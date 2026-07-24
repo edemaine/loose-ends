@@ -38,6 +38,23 @@ failed IDs separated by spaces so they can be pasted into a retry command:
 Failed IDs: 1706.03762 2401.12345v2
 ```
 
+If an explicitly requested version is unavailable—for example, because the
+latest version is a withdrawal—the downloader tries earlier versions in order.
+The resolved version is used in the directory name and reported in the summary:
+
+```text
+Version fallback IDs: 2505.07147v2->2505.07147v1
+```
+
+PDF-only submissions are successful downloads rather than failures. They contain
+`paper.pdf` and a `PDF_ONLY` marker instead of `source/`. The summary reports
+both their count and IDs:
+
+```text
+PDF-only papers: 1.
+PDF-only IDs: 1201.1650v1
+```
+
 Both current IDs and pre-2007 IDs are accepted. Because legacy IDs contain a
 slash, the slash is replaced with an underscore in the directory name (for
 example, `hep-th/9901001` is saved under `arXiv-hep-th_9901001/`). Every

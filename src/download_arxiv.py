@@ -41,12 +41,22 @@ SOURCE_FILENAMES = (
     "source.tex",
     "source.bin",
 )
+PDF_ONLY_MARKER = "PDF_ONLY"
 USER_AGENT = "loose-ends-arxiv-downloader/0.1"
 DEFAULT_REQUEST_INTERVAL = 3.0
 
 
 class DownloadError(RuntimeError):
     """A problem fetching or validating a file from arXiv."""
+
+
+class ArxivHTTPError(DownloadError):
+    """An HTTP error response from arXiv."""
+
+    def __init__(self, status: int, url: str, reason: str) -> None:
+        self.status = status
+        self.url = url
+        super().__init__(f"arXiv returned HTTP {status} for {url}: {reason}")
 
 
 class RequestPacer:
@@ -87,7 +97,16 @@ class DownloadedFile:
 class PaperDownload:
     arxiv_id: str
     pdf_path: Path
-    source_path: Path
+    source_path: Path | None
+    requested_id: str | None = None
+
+    @property
+    def pdf_only(self) -> bool:
+        return self.source_path is None
+
+    @property
+    def fell_back(self) -> bool:
+        return self.requested_id is not None and self.requested_id != self.arxiv_id
 
 
 @dataclass(frozen=True)
@@ -147,9 +166,7 @@ def open_arxiv_url(url: str, *, pacer: RequestPacer | None = None):
     try:
         return urlopen(request, timeout=60)
     except HTTPError as exc:
-        raise DownloadError(
-            f"arXiv returned HTTP {exc.code} for {url}: {exc.reason}"
-        ) from exc
+        raise ArxivHTTPError(exc.code, url, str(exc.reason)) from exc
     except (URLError, TimeoutError, OSError) as exc:
         raise DownloadError(f"could not download {url}: {exc}") from exc
 
@@ -361,14 +378,38 @@ def extract_source(
     return source_dir
 
 
-def fetch_paper(
+def version_candidates(arxiv_id: str) -> list[str]:
+    """Return an explicitly versioned ID followed by its earlier versions."""
+    match = re.fullmatch(r"(.+)v([1-9]\d*)", arxiv_id, re.IGNORECASE)
+    if match is None:
+        return [arxiv_id]
+    base_id, version_text = match.groups()
+    return [
+        f"{base_id}v{version}"
+        for version in range(int(version_text), 0, -1)
+    ]
+
+
+def mark_pdf_only(target_dir: Path) -> None:
+    marker = target_dir / PDF_ONLY_MARKER
+    try:
+        marker.write_text(
+            "arXiv did not provide separate source files for this version.\n",
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        raise DownloadError(f"could not write {marker}: {exc}") from exc
+
+
+def fetch_paper_version(
+    requested_id: str,
     arxiv_id: str,
     output_dir: Path,
     *,
     force: bool = False,
     pacer: RequestPacer | None = None,
-) -> tuple[Path, Path]:
-    """Fetch the PDF and source package, returning their local paths."""
+) -> PaperDownload:
+    """Fetch one known version of a paper."""
     target_dir = output_dir / directory_name(arxiv_id)
     target_dir.mkdir(parents=True, exist_ok=True)
 
@@ -385,24 +426,55 @@ def fetch_paper(
         print(f"Saved: {pdf_path}")
 
     source_dir = target_dir / "source"
+    pdf_only_marker = target_dir / PDF_ONLY_MARKER
     old_source = existing_source_file(target_dir)
     if source_dir.is_dir() and not force:
         source_path = source_dir
+        pdf_only_marker.unlink(missing_ok=True)
         print(f"Already exists: {source_path}")
+    elif pdf_only_marker.exists() and not force:
+        source_path = None
+        print(f"Already identified as PDF-only: arXiv:{arxiv_id}")
     elif source_dir.exists() and not force:
         raise DownloadError(f"source path is not a directory: {source_dir}")
     elif old_source is not None and not force:
-        print(f"Extracting existing source package: {old_source}")
-        source_path = extract_source(old_source, source_dir)
-        print(f"Saved source files: {source_path}")
+        if file_header(old_source).startswith(b"%PDF-"):
+            old_source.unlink()
+            mark_pdf_only(target_dir)
+            source_path = None
+            print(f"Identified as PDF-only: arXiv:{arxiv_id}")
+        else:
+            print(f"Extracting existing source package: {old_source}")
+            source_path = extract_source(old_source, source_dir)
+            pdf_only_marker.unlink(missing_ok=True)
+            print(f"Saved source files: {source_path}")
     else:
+        if force:
+            pdf_only_marker.unlink(missing_ok=True)
         print(f"Downloading source for {arxiv_id}...")
         source_download = target_dir / "source.download"
-        result = download_to(
-            f"https://arxiv.org/src/{quoted_id}",
-            source_download,
-            pacer=pacer,
-        )
+        try:
+            result = download_to(
+                f"https://arxiv.org/src/{quoted_id}",
+                source_download,
+                pacer=pacer,
+            )
+        except ArxivHTTPError as exc:
+            if exc.status not in {403, 404}:
+                raise
+            remove_path(source_dir)
+            for name in SOURCE_FILENAMES:
+                (target_dir / name).unlink(missing_ok=True)
+            mark_pdf_only(target_dir)
+            source_path = None
+            print(f"No separate source available: arXiv:{arxiv_id}")
+            return PaperDownload(
+                arxiv_id,
+                pdf_path,
+                source_path,
+                requested_id=requested_id,
+            )
+
         header = file_header(source_download)
         if result.content_type == "text/html" or header.lstrip().lower().startswith(
             (b"<!doctype html", b"<html")
@@ -410,16 +482,68 @@ def fetch_paper(
             source_download.unlink(missing_ok=True)
             raise DownloadError("arXiv's source endpoint returned HTML instead of source")
 
-        source_package = target_dir / source_filename(result, header)
-        os.replace(source_download, source_package)
-        source_path = extract_source(source_package, source_dir, force=force)
-        if force:
-            for name in SOURCE_FILENAMES:
-                stale_path = target_dir / name
-                stale_path.unlink(missing_ok=True)
-        print(f"Saved source files: {source_path}")
+        if header.startswith(b"%PDF-"):
+            source_download.unlink()
+            remove_path(source_dir)
+            mark_pdf_only(target_dir)
+            source_path = None
+            print(f"No separate source available: arXiv:{arxiv_id}")
+        else:
+            source_package = target_dir / source_filename(result, header)
+            os.replace(source_download, source_package)
+            source_path = extract_source(source_package, source_dir, force=force)
+            pdf_only_marker.unlink(missing_ok=True)
+            if force:
+                for name in SOURCE_FILENAMES:
+                    stale_path = target_dir / name
+                    stale_path.unlink(missing_ok=True)
+            print(f"Saved source files: {source_path}")
 
-    return pdf_path, source_path
+    return PaperDownload(
+        arxiv_id,
+        pdf_path,
+        source_path,
+        requested_id=requested_id,
+    )
+
+
+def fetch_paper(
+    arxiv_id: str,
+    output_dir: Path,
+    *,
+    force: bool = False,
+    pacer: RequestPacer | None = None,
+) -> PaperDownload:
+    """Fetch a paper, falling back from unavailable explicit versions."""
+    candidates = version_candidates(arxiv_id)
+    last_error: ArxivHTTPError | None = None
+
+    for index, candidate in enumerate(candidates):
+        try:
+            return fetch_paper_version(
+                arxiv_id,
+                candidate,
+                output_dir,
+                force=force,
+                pacer=pacer,
+            )
+        except ArxivHTTPError as exc:
+            if exc.status != 404:
+                raise
+            last_error = exc
+            target_dir = output_dir / directory_name(candidate)
+            try:
+                target_dir.rmdir()
+            except OSError:
+                pass
+            if index + 1 < len(candidates):
+                print(
+                    f"arXiv:{candidate} is unavailable; "
+                    f"trying arXiv:{candidates[index + 1]}."
+                )
+
+    assert last_error is not None
+    raise last_error
 
 
 def fetch_papers(
@@ -443,13 +567,13 @@ def fetch_papers(
                 print(f"Skipping duplicate: arXiv:{arxiv_id}")
                 continue
             seen.add(arxiv_id)
-            pdf_path, source_path = fetch_paper(
+            download = fetch_paper(
                 arxiv_id,
                 output_dir,
                 force=force,
                 pacer=pacer,
             )
-            downloads.append(PaperDownload(arxiv_id, pdf_path, source_path))
+            downloads.append(download)
         except (ValueError, DownloadError) as exc:
             failures.append(PaperFailure(failure_name, str(exc)))
             print(f"error: {paper}: {exc}", file=sys.stderr)
@@ -466,6 +590,23 @@ def print_completion_summary(
         + (f"; {len(failures)} failed" if failures else "")
         + "."
     )
+    fallbacks = [download for download in downloads if download.fell_back]
+    if fallbacks:
+        print(f"Version fallbacks: {len(fallbacks)} paper(s).")
+        print(
+            "Version fallback IDs: "
+            + " ".join(
+                f"{download.requested_id}->{download.arxiv_id}"
+                for download in fallbacks
+            )
+        )
+    pdf_only = [download for download in downloads if download.pdf_only]
+    if pdf_only:
+        print(f"PDF-only papers: {len(pdf_only)}.")
+        print(
+            "PDF-only IDs: "
+            + " ".join(download.arxiv_id for download in pdf_only)
+        )
     if failures:
         print("Failed IDs: " + " ".join(failure.paper for failure in failures))
 

@@ -170,16 +170,98 @@ class SourceExtractionTests(unittest.TestCase):
                 archive.addfile(entry, BytesIO(contents))
 
             with redirect_stdout(StringIO()):
-                _, source_dir = fetch_paper("1706.03762", root)
+                download = fetch_paper("1706.03762", root)
 
+            source_dir = download.source_path
+            self.assertIsNotNone(source_dir)
+            assert source_dir is not None
             self.assertEqual((source_dir / "main.tex").read_bytes(), contents)
             self.assertFalse(package.exists())
+
+
+class VersionFallbackTests(unittest.TestCase):
+    @patch.object(download_arxiv, "download_to")
+    def test_falls_back_to_previous_version_after_pdf_404(self, download_to):
+        def fake_download(url, destination, *, pacer=None):
+            if url.endswith("/pdf/2505.07147v2"):
+                raise download_arxiv.ArxivHTTPError(404, url, "Not Found")
+            if url.endswith("/pdf/2505.07147v1"):
+                destination.write_bytes(b"%PDF-test")
+                return download_arxiv.DownloadedFile(
+                    "application/pdf",
+                    "2505.07147v1.pdf",
+                )
+            if url.endswith("/src/2505.07147v1"):
+                with tarfile.open(destination, "w:gz") as archive:
+                    contents = b"hello"
+                    entry = tarfile.TarInfo("main.tex")
+                    entry.size = len(contents)
+                    archive.addfile(entry, BytesIO(contents))
+                return download_arxiv.DownloadedFile(
+                    "application/gzip",
+                    "arXiv-2505.07147v1.tar.gz",
+                )
+            self.fail(f"unexpected URL: {url}")
+
+        download_to.side_effect = fake_download
+
+        with TemporaryDirectory() as temporary, redirect_stdout(StringIO()):
+            root = Path(temporary)
+            download = fetch_paper(
+                "2505.07147v2",
+                root,
+                pacer=RequestPacer(0),
+            )
+
+            self.assertEqual(download.arxiv_id, "2505.07147v1")
+            self.assertEqual(download.requested_id, "2505.07147v2")
+            self.assertTrue(download.fell_back)
+            self.assertTrue(
+                (root / "arXiv-2505.07147v1" / "source" / "main.tex").is_file()
+            )
+            self.assertFalse((root / "arXiv-2505.07147v2").exists())
+
+    @patch.object(download_arxiv, "download_to")
+    def test_source_403_is_a_successful_pdf_only_paper(self, download_to):
+        def fake_download(url, destination, *, pacer=None):
+            if "/pdf/" in url:
+                destination.write_bytes(b"%PDF-test")
+                return download_arxiv.DownloadedFile(
+                    "application/pdf",
+                    "1201.1650v1.pdf",
+                )
+            raise download_arxiv.ArxivHTTPError(403, url, "Forbidden")
+
+        download_to.side_effect = fake_download
+
+        with TemporaryDirectory() as temporary, redirect_stdout(StringIO()):
+            root = Path(temporary)
+            download = fetch_paper(
+                "1201.1650v1",
+                root,
+                pacer=RequestPacer(0),
+            )
+
+            self.assertTrue(download.pdf_only)
+            self.assertIsNone(download.source_path)
+            self.assertTrue(
+                (root / "arXiv-1201.1650v1" / "PDF_ONLY").is_file()
+            )
+            download_to.reset_mock()
+            second_download = fetch_paper("1201.1650v1", root)
+            self.assertTrue(second_download.pdf_only)
+            download_to.assert_not_called()
 
 
 class BatchDownloadTests(unittest.TestCase):
     @patch.object(download_arxiv, "fetch_paper")
     def test_batch_continues_after_bad_id_and_skips_duplicate(self, fetch_paper):
-        fetch_paper.return_value = (Path("paper.pdf"), Path("source"))
+        fetch_paper.return_value = download_arxiv.PaperDownload(
+            "1706.03762",
+            Path("paper.pdf"),
+            Path("source"),
+            requested_id="1706.03762",
+        )
 
         with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
             downloads, failures = fetch_papers(
@@ -204,6 +286,33 @@ class BatchDownloadTests(unittest.TestCase):
 
         self.assertIn(
             "Failed IDs: 1706.03762 2401.12345v2",
+            output.getvalue(),
+        )
+
+    def test_summary_counts_pdf_only_papers_and_fallbacks(self):
+        downloads = [
+            download_arxiv.PaperDownload(
+                "1201.1650v1",
+                Path("paper.pdf"),
+                None,
+                requested_id="1201.1650v1",
+            ),
+            download_arxiv.PaperDownload(
+                "2505.07147v1",
+                Path("paper.pdf"),
+                Path("source"),
+                requested_id="2505.07147v2",
+            ),
+        ]
+
+        output = StringIO()
+        with redirect_stdout(output):
+            print_completion_summary(downloads, [])
+
+        self.assertIn("PDF-only papers: 1.", output.getvalue())
+        self.assertIn("PDF-only IDs: 1201.1650v1", output.getvalue())
+        self.assertIn(
+            "Version fallback IDs: 2505.07147v2->2505.07147v1",
             output.getvalue(),
         )
 
