@@ -18,6 +18,7 @@ from download_arxiv import (
     fetch_paper,
     fetch_papers,
     parse_arxiv_id,
+    print_completion_summary,
 )
 
 
@@ -190,6 +191,34 @@ class BatchDownloadTests(unittest.TestCase):
         self.assertEqual([download.arxiv_id for download in downloads], ["1706.03762"])
         self.assertEqual([failure.paper for failure in failures], ["not-an-id"])
         fetch_paper.assert_called_once()
+
+    def test_summary_lists_failed_ids_for_retry(self):
+        failures = [
+            download_arxiv.PaperFailure("1706.03762", "first error"),
+            download_arxiv.PaperFailure("2401.12345v2", "second error"),
+        ]
+
+        output = StringIO()
+        with redirect_stdout(output):
+            print_completion_summary([], failures)
+
+        self.assertIn(
+            "Failed IDs: 1706.03762 2401.12345v2",
+            output.getvalue(),
+        )
+
+    @patch.object(download_arxiv, "fetch_paper")
+    def test_failed_url_is_summarized_as_canonical_id(self, fetch_paper):
+        fetch_paper.side_effect = download_arxiv.DownloadError("network error")
+
+        with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            _, failures = fetch_papers(
+                ["https://arxiv.org/abs/1706.03762v7"],
+                Path("papers"),
+                pacer=RequestPacer(0),
+            )
+
+        self.assertEqual(failures[0].paper, "1706.03762v7")
 
 
 if __name__ == "__main__":

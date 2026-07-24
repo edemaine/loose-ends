@@ -239,11 +239,7 @@ def main(argv: list[str] | None = None) -> int:
         force=args.force,
         pacer=pacer,
     )
-    print(
-        f"Completed {len(downloads)} paper(s)"
-        + (f"; {len(failures)} failed" if failures else "")
-        + "."
-    )
+    download_arxiv.print_completion_summary(downloads, failures)
     return 1 if failures else 0
 
 

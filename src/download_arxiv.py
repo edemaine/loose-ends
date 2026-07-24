@@ -435,8 +435,10 @@ def fetch_papers(
     seen: set[str] = set()
 
     for paper in papers:
+        failure_name = paper
         try:
             arxiv_id = parse_arxiv_id(paper)
+            failure_name = arxiv_id
             if arxiv_id in seen:
                 print(f"Skipping duplicate: arXiv:{arxiv_id}")
                 continue
@@ -449,10 +451,23 @@ def fetch_papers(
             )
             downloads.append(PaperDownload(arxiv_id, pdf_path, source_path))
         except (ValueError, DownloadError) as exc:
-            failures.append(PaperFailure(paper, str(exc)))
+            failures.append(PaperFailure(failure_name, str(exc)))
             print(f"error: {paper}: {exc}", file=sys.stderr)
 
     return downloads, failures
+
+
+def print_completion_summary(
+    downloads: list[PaperDownload],
+    failures: list[PaperFailure],
+) -> None:
+    print(
+        f"Completed {len(downloads)} paper(s)"
+        + (f"; {len(failures)} failed" if failures else "")
+        + "."
+    )
+    if failures:
+        print("Failed IDs: " + " ".join(failure.paper for failure in failures))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -491,11 +506,7 @@ def main(argv: list[str] | None = None) -> int:
         pacer=RequestPacer(),
     )
 
-    print(
-        f"Completed {len(downloads)} paper(s)"
-        + (f"; {len(failures)} failed" if failures else "")
-        + "."
-    )
+    print_completion_summary(downloads, failures)
     return 1 if failures else 0
 
 

@@ -31,7 +31,12 @@ directory as-is. Existing downloads are left untouched; pass `--force` to
 replace them. If an earlier run left a source archive beside `paper.pdf`, the
 next run extracts and removes it without downloading it again. A batch continues
 after an invalid ID or failed download and exits with a failure status after
-reporting the final counts.
+reporting the final counts. When anything fails, the last output line lists the
+failed IDs separated by spaces so they can be pasted into a retry command:
+
+```text
+Failed IDs: 1706.03762 2401.12345v2
+```
 
 Both current IDs and pre-2007 IDs are accepted. Because legacy IDs contain a
 slash, the slash is replaced with an underscore in the directory name (for
