@@ -20,6 +20,7 @@ The first example creates:
 ```text
 arXiv-1706.03762/
 ├── paper.pdf
+├── metadata.json
 └── source/
     ├── main.tex
     └── ...
@@ -27,12 +28,14 @@ arXiv-1706.03762/
 
 Source tarballs and zip files are safely extracted under `source/` and removed
 after successful extraction. A non-archive source submission is placed in that
-directory as-is. Existing downloads are left untouched; pass `--force` to
-replace them. If an earlier run left a source archive beside `paper.pdf`, the
-next run extracts and removes it without downloading it again. A batch continues
-after an invalid ID or failed download and exits with a failure status after
-reporting the final counts. When anything fails, the last output line lists the
-failed IDs separated by spaces so they can be pasted into a retry command:
+directory as-is. `metadata.json` records the resolved arXiv ID, title, ordered
+authors, and publication/update timestamps from the arXiv API. Existing
+downloads are left untouched; pass `--force` to replace them. If an earlier run
+left a source archive beside `paper.pdf`, the next run extracts and removes it
+without downloading it again. A batch continues after an invalid ID or failed
+download and exits with a failure status after reporting the final counts. When
+anything fails, the last output line lists the failed IDs separated by spaces
+so they can be pasted into a retry command:
 
 ```text
 Failed IDs: 1706.03762 2401.12345v2
@@ -79,8 +82,9 @@ downloads, failures = download_arxiv.fetch_papers(
 
 ## Download papers by author
 
-Author search uses the arXiv metadata API and passes the resulting IDs to the
-same `download_arxiv` module.
+Author search uses the arXiv metadata API and passes the resulting IDs and
+metadata to the same `download_arxiv` module, avoiding a duplicate metadata
+request.
 
 Inspect the results before downloading:
 
@@ -109,7 +113,7 @@ Code lives in `src/` and tests live in `test/`. Run:
 python -m unittest discover -s test -v
 ```
 
-The arXiv metadata API is not needed when the identifier is already known. The
-script downloads content directly from arXiv's documented PDF and source links.
-Author lookup uses the API's `au:` query field. For repository-scale harvesting,
-use arXiv's bulk-data facilities instead.
+The download script batches arXiv metadata API lookups, then downloads content
+from the PDF and source links. Author lookup uses the API's `au:` query field
+and reuses the metadata returned by that search. For repository-scale
+harvesting, use arXiv's bulk-data facilities instead.

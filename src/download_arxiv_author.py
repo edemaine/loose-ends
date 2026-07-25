@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import sys
-import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlencode
@@ -13,20 +12,11 @@ from urllib.parse import urlencode
 import download_arxiv
 
 
-API_URL = "https://export.arxiv.org/api/query"
-ATOM_NAMESPACE = "http://www.w3.org/2005/Atom"
-OPENSEARCH_NAMESPACE = "http://a9.com/-/spec/opensearch/1.1/"
-NAMESPACES = {"atom": ATOM_NAMESPACE, "opensearch": OPENSEARCH_NAMESPACE}
+API_URL = download_arxiv.API_URL
 DEFAULT_PAGE_SIZE = 100
-
-
-@dataclass(frozen=True)
-class ArxivPaper:
-    arxiv_id: str
-    title: str
-    authors: tuple[str, ...]
-    published: str
-    updated: str
+ArxivPaper = download_arxiv.PaperMetadata
+normalized_text = download_arxiv.normalized_text
+parse_atom_feed = download_arxiv.parse_atom_feed
 
 
 @dataclass(frozen=True)
@@ -34,10 +24,6 @@ class AuthorSearchResult:
     author: str
     total_results: int
     papers: tuple[ArxivPaper, ...]
-
-
-def normalized_text(value: str | None) -> str:
-    return " ".join((value or "").split())
 
 
 def author_query(author: str) -> str:
@@ -48,62 +34,6 @@ def author_query(author: str) -> str:
     if '"' in author:
         raise ValueError('author name cannot contain a double quote (")')
     return f'au:"{author}"'
-
-
-def parse_atom_feed(payload: bytes) -> tuple[int, list[ArxivPaper]]:
-    """Parse one page of an arXiv API Atom response."""
-    try:
-        root = ET.fromstring(payload)
-    except ET.ParseError as exc:
-        raise download_arxiv.DownloadError(
-            f"arXiv returned invalid Atom XML: {exc}"
-        ) from exc
-
-    total_element = root.find("opensearch:totalResults", NAMESPACES)
-    try:
-        total_results = int(total_element.text) if total_element is not None else 0
-    except (TypeError, ValueError) as exc:
-        raise download_arxiv.DownloadError(
-            "arXiv returned an invalid result count"
-        ) from exc
-
-    papers = []
-    for entry in root.findall("atom:entry", NAMESPACES):
-        id_element = entry.find("atom:id", NAMESPACES)
-        if id_element is None or not id_element.text:
-            raise download_arxiv.DownloadError(
-                "arXiv returned an Atom entry without an ID"
-            )
-        try:
-            arxiv_id = download_arxiv.parse_arxiv_id(id_element.text)
-        except ValueError as exc:
-            title = normalized_text(entry.findtext("atom:title", "", NAMESPACES))
-            raise download_arxiv.DownloadError(
-                f"arXiv API returned an error entry: {title or id_element.text}"
-            ) from exc
-
-        authors = tuple(
-            normalized_text(author.findtext("atom:name", "", NAMESPACES))
-            for author in entry.findall("atom:author", NAMESPACES)
-        )
-        papers.append(
-            ArxivPaper(
-                arxiv_id=arxiv_id,
-                title=normalized_text(
-                    entry.findtext("atom:title", "", NAMESPACES)
-                ),
-                authors=tuple(author for author in authors if author),
-                published=normalized_text(
-                    entry.findtext("atom:published", "", NAMESPACES)
-                ),
-                updated=normalized_text(
-                    entry.findtext("atom:updated", "", NAMESPACES)
-                ),
-            )
-        )
-
-    return total_results, papers
-
 
 def search_author(
     author: str,
@@ -238,6 +168,10 @@ def main(argv: list[str] | None = None) -> int:
         args.output_dir.expanduser(),
         force=args.force,
         pacer=pacer,
+        metadata_by_id={
+            paper.arxiv_id: paper
+            for paper in result.papers
+        },
     )
     download_arxiv.print_completion_summary(downloads, failures)
     return 1 if failures else 0

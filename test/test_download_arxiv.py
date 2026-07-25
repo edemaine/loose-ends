@@ -1,6 +1,7 @@
 from contextlib import redirect_stderr, redirect_stdout
 from io import BytesIO, StringIO
 from pathlib import Path
+import json
 import sys
 import tarfile
 from tempfile import TemporaryDirectory
@@ -20,6 +21,38 @@ from download_arxiv import (
     parse_arxiv_id,
     print_completion_summary,
 )
+
+
+def paper_metadata(arxiv_id: str) -> download_arxiv.PaperMetadata:
+    return download_arxiv.PaperMetadata(
+        arxiv_id=arxiv_id,
+        title="Test Paper",
+        authors=("Ada Lovelace", "Alan Turing"),
+        published="2024-01-01T00:00:00Z",
+        updated="2024-01-02T00:00:00Z",
+    )
+
+
+def metadata_feed(*papers: download_arxiv.PaperMetadata) -> bytes:
+    entries = "".join(
+        f"""
+        <entry>
+          <id>https://arxiv.org/abs/{paper.arxiv_id}</id>
+          <title>{paper.title}</title>
+          <published>{paper.published}</published>
+          <updated>{paper.updated}</updated>
+          {''.join(f'<author><name>{author}</name></author>' for author in paper.authors)}
+        </entry>
+        """
+        for paper in papers
+    )
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+    <feed xmlns="http://www.w3.org/2005/Atom"
+          xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/">
+      <opensearch:totalResults>{len(papers)}</opensearch:totalResults>
+      {entries}
+    </feed>
+    """.encode()
 
 
 class ParseArxivIdTests(unittest.TestCase):
@@ -97,6 +130,28 @@ class RequestPacerTests(unittest.TestCase):
             RequestPacer(-1)
 
 
+class MetadataTests(unittest.TestCase):
+    @patch.object(download_arxiv, "open_arxiv_url")
+    def test_fetches_exact_ids_in_batches(self, open_url):
+        first = paper_metadata("1706.03762v7")
+        second = paper_metadata("2401.12345v2")
+        open_url.side_effect = [
+            BytesIO(metadata_feed(first)),
+            BytesIO(metadata_feed(second)),
+        ]
+
+        metadata = download_arxiv.fetch_arxiv_metadata(
+            ["1706.03762", second.arxiv_id],
+            batch_size=1,
+            pacer=RequestPacer(0),
+        )
+
+        self.assertEqual(metadata["1706.03762"].arxiv_id, "1706.03762v7")
+        self.assertEqual(metadata["1706.03762"].authors, first.authors)
+        self.assertEqual(metadata[second.arxiv_id].title, second.title)
+        self.assertEqual(open_url.call_count, 2)
+
+
 class SourceExtractionTests(unittest.TestCase):
     def test_extracts_tarball_and_removes_it(self):
         with TemporaryDirectory() as temporary:
@@ -170,13 +225,24 @@ class SourceExtractionTests(unittest.TestCase):
                 archive.addfile(entry, BytesIO(contents))
 
             with redirect_stdout(StringIO()):
-                download = fetch_paper("1706.03762", root)
+                download = fetch_paper(
+                    "1706.03762",
+                    root,
+                    metadata=paper_metadata("1706.03762"),
+                )
 
             source_dir = download.source_path
             self.assertIsNotNone(source_dir)
             assert source_dir is not None
             self.assertEqual((source_dir / "main.tex").read_bytes(), contents)
             self.assertFalse(package.exists())
+            metadata = json.loads(
+                (paper_dir / "metadata.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                metadata["authors"],
+                ["Ada Lovelace", "Alan Turing"],
+            )
 
 
 class VersionFallbackTests(unittest.TestCase):
@@ -211,6 +277,7 @@ class VersionFallbackTests(unittest.TestCase):
                 "2505.07147v2",
                 root,
                 pacer=RequestPacer(0),
+                save_metadata=False,
             )
 
             self.assertEqual(download.arxiv_id, "2505.07147v1")
@@ -240,6 +307,7 @@ class VersionFallbackTests(unittest.TestCase):
                 "1201.1650v1",
                 root,
                 pacer=RequestPacer(0),
+                metadata=paper_metadata("1201.1650v1"),
             )
 
             self.assertTrue(download.pdf_only)
@@ -247,15 +315,29 @@ class VersionFallbackTests(unittest.TestCase):
             self.assertTrue(
                 (root / "arXiv-1201.1650v1" / "PDF_ONLY").is_file()
             )
+            self.assertTrue(
+                (root / "arXiv-1201.1650v1" / "metadata.json").is_file()
+            )
             download_to.reset_mock()
-            second_download = fetch_paper("1201.1650v1", root)
+            second_download = fetch_paper(
+                "1201.1650v1",
+                root,
+                metadata=paper_metadata("1201.1650v1"),
+            )
             self.assertTrue(second_download.pdf_only)
             download_to.assert_not_called()
 
 
 class BatchDownloadTests(unittest.TestCase):
+    @patch.object(download_arxiv, "fetch_arxiv_metadata")
+    @patch.object(download_arxiv, "write_paper_metadata")
     @patch.object(download_arxiv, "fetch_paper")
-    def test_batch_continues_after_bad_id_and_skips_duplicate(self, fetch_paper):
+    def test_batch_continues_after_bad_id_and_skips_duplicate(
+        self,
+        fetch_paper,
+        write_metadata,
+        fetch_metadata,
+    ):
         fetch_paper.return_value = download_arxiv.PaperDownload(
             "1706.03762",
             Path("paper.pdf"),
@@ -268,11 +350,16 @@ class BatchDownloadTests(unittest.TestCase):
                 ["1706.03762", "not-an-id", "1706.03762"],
                 Path("papers"),
                 pacer=RequestPacer(0),
+                metadata_by_id={
+                    "1706.03762": paper_metadata("1706.03762"),
+                },
             )
 
         self.assertEqual([download.arxiv_id for download in downloads], ["1706.03762"])
         self.assertEqual([failure.paper for failure in failures], ["not-an-id"])
         fetch_paper.assert_called_once()
+        write_metadata.assert_called_once()
+        fetch_metadata.assert_not_called()
 
     def test_summary_lists_failed_ids_for_retry(self):
         failures = [

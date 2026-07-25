@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import json
 import os
 import re
 import shutil
@@ -16,12 +17,13 @@ import stat
 import sys
 import tarfile
 import time
+import xml.etree.ElementTree as ET
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Mapping
 from urllib.error import HTTPError, URLError
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 
@@ -44,6 +46,13 @@ SOURCE_FILENAMES = (
 PDF_ONLY_MARKER = "PDF_ONLY"
 USER_AGENT = "loose-ends-arxiv-downloader/0.1"
 DEFAULT_REQUEST_INTERVAL = 3.0
+API_URL = "https://export.arxiv.org/api/query"
+ATOM_NAMESPACE = "http://www.w3.org/2005/Atom"
+OPENSEARCH_NAMESPACE = "http://a9.com/-/spec/opensearch/1.1/"
+NAMESPACES = {"atom": ATOM_NAMESPACE, "opensearch": OPENSEARCH_NAMESPACE}
+DEFAULT_METADATA_BATCH_SIZE = 100
+METADATA_FILE = "metadata.json"
+METADATA_SCHEMA_VERSION = 1
 
 
 class DownloadError(RuntimeError):
@@ -115,6 +124,15 @@ class PaperFailure:
     error: str
 
 
+@dataclass(frozen=True)
+class PaperMetadata:
+    arxiv_id: str
+    title: str
+    authors: tuple[str, ...]
+    published: str
+    updated: str
+
+
 def parse_arxiv_id(value: str) -> str:
     """Return an arXiv ID from a bare ID, arXiv citation, or arXiv URL."""
     candidate = value.strip().strip("<>")
@@ -169,6 +187,135 @@ def open_arxiv_url(url: str, *, pacer: RequestPacer | None = None):
         raise ArxivHTTPError(exc.code, url, str(exc.reason)) from exc
     except (URLError, TimeoutError, OSError) as exc:
         raise DownloadError(f"could not download {url}: {exc}") from exc
+
+
+def normalized_text(value: str | None) -> str:
+    return " ".join((value or "").split())
+
+
+def parse_atom_feed(payload: bytes) -> tuple[int, list[PaperMetadata]]:
+    """Parse paper metadata from one arXiv API Atom response."""
+    try:
+        root = ET.fromstring(payload)
+    except ET.ParseError as exc:
+        raise DownloadError(f"arXiv returned invalid Atom XML: {exc}") from exc
+
+    total_element = root.find("opensearch:totalResults", NAMESPACES)
+    try:
+        total_results = int(total_element.text) if total_element is not None else 0
+    except (TypeError, ValueError) as exc:
+        raise DownloadError("arXiv returned an invalid result count") from exc
+
+    papers = []
+    for entry in root.findall("atom:entry", NAMESPACES):
+        id_element = entry.find("atom:id", NAMESPACES)
+        if id_element is None or not id_element.text:
+            raise DownloadError("arXiv returned an Atom entry without an ID")
+        try:
+            arxiv_id = parse_arxiv_id(id_element.text)
+        except ValueError as exc:
+            title = normalized_text(entry.findtext("atom:title", "", NAMESPACES))
+            raise DownloadError(
+                f"arXiv API returned an error entry: {title or id_element.text}"
+            ) from exc
+
+        authors = tuple(
+            normalized_text(author.findtext("atom:name", "", NAMESPACES))
+            for author in entry.findall("atom:author", NAMESPACES)
+        )
+        papers.append(
+            PaperMetadata(
+                arxiv_id=arxiv_id,
+                title=normalized_text(
+                    entry.findtext("atom:title", "", NAMESPACES)
+                ),
+                authors=tuple(author for author in authors if author),
+                published=normalized_text(
+                    entry.findtext("atom:published", "", NAMESPACES)
+                ),
+                updated=normalized_text(
+                    entry.findtext("atom:updated", "", NAMESPACES)
+                ),
+            )
+        )
+
+    return total_results, papers
+
+
+def fetch_arxiv_metadata(
+    arxiv_ids: Iterable[str],
+    *,
+    batch_size: int = DEFAULT_METADATA_BATCH_SIZE,
+    pacer: RequestPacer | None = None,
+) -> dict[str, PaperMetadata]:
+    """Fetch metadata for exact arXiv IDs in batched API requests."""
+    if batch_size < 1:
+        raise ValueError("metadata batch size must be at least 1")
+    ids = list(dict.fromkeys(parse_arxiv_id(value) for value in arxiv_ids))
+    requested_by_base: dict[str, list[str]] = {}
+    for arxiv_id in ids:
+        base_id = re.sub(r"v[1-9]\d*$", "", arxiv_id, flags=re.IGNORECASE)
+        requested_by_base.setdefault(base_id, []).append(arxiv_id)
+    metadata: dict[str, PaperMetadata] = {}
+    for start in range(0, len(ids), batch_size):
+        batch = ids[start : start + batch_size]
+        query = urlencode(
+            {
+                "id_list": ",".join(batch),
+                "start": 0,
+                "max_results": len(batch),
+            }
+        )
+        with open_arxiv_url(f"{API_URL}?{query}", pacer=pacer) as response:
+            _, papers = parse_atom_feed(response.read())
+        for paper in papers:
+            if paper.arxiv_id in ids:
+                metadata[paper.arxiv_id] = paper
+                continue
+            base_id = re.sub(
+                r"v[1-9]\d*$",
+                "",
+                paper.arxiv_id,
+                flags=re.IGNORECASE,
+            )
+            requested = requested_by_base.get(base_id, [])
+            if len(requested) == 1:
+                metadata[requested[0]] = paper
+
+    missing = [arxiv_id for arxiv_id in ids if arxiv_id not in metadata]
+    if missing:
+        raise DownloadError(
+            "arXiv returned no metadata for: " + ", ".join(missing)
+        )
+    return metadata
+
+
+def write_paper_metadata(target_dir: Path, metadata: PaperMetadata) -> Path:
+    """Atomically save normalized arXiv metadata beside a downloaded paper."""
+    if not metadata.title or not metadata.authors:
+        raise DownloadError(f"arXiv returned incomplete metadata for {metadata.arxiv_id}")
+    path = target_dir / METADATA_FILE
+    temporary = path.with_name(path.name + ".part")
+    payload = {
+        "schema_version": METADATA_SCHEMA_VERSION,
+        "arxiv_id": metadata.arxiv_id,
+        "title": metadata.title,
+        "authors": list(metadata.authors),
+        "published": metadata.published,
+        "updated": metadata.updated,
+    }
+    temporary.unlink(missing_ok=True)
+    try:
+        temporary.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary, path)
+    except OSError as exc:
+        raise DownloadError(f"could not write {path}: {exc}") from exc
+    finally:
+        temporary.unlink(missing_ok=True)
+    return path
 
 
 def download_to(
@@ -390,6 +537,20 @@ def version_candidates(arxiv_id: str) -> list[str]:
     ]
 
 
+def metadata_matches_id(metadata: PaperMetadata, arxiv_id: str) -> bool:
+    if metadata.arxiv_id == arxiv_id:
+        return True
+    if re.search(r"v[1-9]\d*$", arxiv_id, flags=re.IGNORECASE):
+        return False
+    metadata_base = re.sub(
+        r"v[1-9]\d*$",
+        "",
+        metadata.arxiv_id,
+        flags=re.IGNORECASE,
+    )
+    return metadata_base == arxiv_id
+
+
 def mark_pdf_only(target_dir: Path) -> None:
     marker = target_dir / PDF_ONLY_MARKER
     try:
@@ -513,14 +674,16 @@ def fetch_paper(
     *,
     force: bool = False,
     pacer: RequestPacer | None = None,
+    metadata: PaperMetadata | None = None,
+    save_metadata: bool = True,
 ) -> PaperDownload:
-    """Fetch a paper, falling back from unavailable explicit versions."""
+    """Fetch a paper and its metadata, with explicit-version fallback."""
     candidates = version_candidates(arxiv_id)
     last_error: ArxivHTTPError | None = None
 
     for index, candidate in enumerate(candidates):
         try:
-            return fetch_paper_version(
+            download = fetch_paper_version(
                 arxiv_id,
                 candidate,
                 output_dir,
@@ -541,6 +704,23 @@ def fetch_paper(
                     f"arXiv:{candidate} is unavailable; "
                     f"trying arXiv:{candidates[index + 1]}."
                 )
+            continue
+
+        if save_metadata:
+            if metadata is None or not metadata_matches_id(
+                metadata,
+                download.arxiv_id,
+            ):
+                metadata = fetch_arxiv_metadata(
+                    [download.arxiv_id],
+                    pacer=pacer,
+                )[download.arxiv_id]
+            metadata_path = write_paper_metadata(
+                download.pdf_path.parent,
+                metadata,
+            )
+            print(f"Saved metadata: {metadata_path}")
+        return download
 
     assert last_error is not None
     raise last_error
@@ -552,9 +732,10 @@ def fetch_papers(
     *,
     force: bool = False,
     pacer: RequestPacer | None = None,
+    metadata_by_id: Mapping[str, PaperMetadata] | None = None,
 ) -> tuple[list[PaperDownload], list[PaperFailure]]:
-    """Download a batch, continuing after invalid IDs or request failures."""
-    downloads: list[PaperDownload] = []
+    """Download a batch and save metadata, continuing after failures."""
+    content_downloads: list[PaperDownload] = []
     failures: list[PaperFailure] = []
     seen: set[str] = set()
 
@@ -572,11 +753,47 @@ def fetch_papers(
                 output_dir,
                 force=force,
                 pacer=pacer,
+                save_metadata=False,
             )
-            downloads.append(download)
+            content_downloads.append(download)
         except (ValueError, DownloadError) as exc:
             failures.append(PaperFailure(failure_name, str(exc)))
             print(f"error: {paper}: {exc}", file=sys.stderr)
+
+    metadata = dict(metadata_by_id or {})
+    missing_ids = [
+        download.arxiv_id
+        for download in content_downloads
+        if download.arxiv_id not in metadata
+    ]
+    metadata_error: DownloadError | None = None
+    if missing_ids:
+        try:
+            metadata.update(
+                fetch_arxiv_metadata(missing_ids, pacer=pacer)
+            )
+        except DownloadError as exc:
+            metadata_error = exc
+
+    downloads: list[PaperDownload] = []
+    for download in content_downloads:
+        paper_metadata = metadata.get(download.arxiv_id)
+        try:
+            if paper_metadata is None:
+                assert metadata_error is not None
+                raise metadata_error
+            metadata_path = write_paper_metadata(
+                download.pdf_path.parent,
+                paper_metadata,
+            )
+            print(f"Saved metadata: {metadata_path}")
+            downloads.append(download)
+        except DownloadError as exc:
+            failures.append(PaperFailure(download.arxiv_id, str(exc)))
+            print(
+                f"error: arXiv:{download.arxiv_id}: {exc}",
+                file=sys.stderr,
+            )
 
     return downloads, failures
 
