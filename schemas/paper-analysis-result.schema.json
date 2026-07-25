@@ -1,0 +1,66 @@
+{
+  "type": "object",
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": [
+        "complete",
+        "partial"
+      ]
+    },
+    "paper_title": {
+      "type": "string"
+    },
+    "paper_authors": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "open_problems": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "explicitness": {
+            "type": "string",
+            "enum": [
+              "explicit",
+              "inferred",
+              "uncertain"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "explicitness"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "status",
+    "paper_title",
+    "paper_authors",
+    "open_problems",
+    "warnings"
+  ],
+  "additionalProperties": false
+}

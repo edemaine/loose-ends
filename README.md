@@ -2,7 +2,8 @@
 
 Tooling for studying open problems in research papers with large language models.
 
-No installation is required; the scripts use only the Python standard library.
+The Python code uses only the standard library. Downloading papers needs no
+additional package; analyzing them requires the Codex CLI.
 
 ## Download arXiv papers
 
@@ -104,6 +105,100 @@ Name-based author matching is approximate. Common names can refer to multiple
 people, and arXiv may match initials or alternate forms of a name. The listing
 includes every paper's full author list so the result set can be checked before
 downloading.
+
+## Analyze papers with Codex
+
+`src/analyze_papers.py` starts one non-interactive Codex CLI agent per paper.
+Each agent reads the rendered PDF and submitted source, then writes three
+human-readable artifacts:
+
+```text
+arXiv-.../
+├── paper.pdf
+├── metadata.json
+├── source/
+└── analysis/
+    ├── summary.md
+    ├── results.md
+    ├── open-problems.md
+    ├── manifest.json
+    ├── events.jsonl
+    └── run.log
+```
+
+`summary.md` gives a technical orientation, `results.md` catalogs the important
+theorems, lemmas, and techniques, and `open-problems.md` records explicit and
+carefully labeled inferred problems. The compact `manifest.json` contains
+provenance, the ordered paper-author list, and a machine-readable index of the
+`OP-###` entries. The JSONL event stream and stderr log are retained for
+diagnostics.
+
+Install and authenticate the Codex CLI first, then analyze one paper:
+
+```sh
+codex login
+python src/analyze_papers.py papers/edemaine/arXiv-0705.4085v1
+```
+
+A parent directory is searched recursively for downloaded `arXiv-*`
+directories. Run several independent paper agents concurrently with `--jobs`:
+
+```sh
+python src/analyze_papers.py papers/edemaine --jobs 4
+```
+
+The default is one agent at a time. Start with modest concurrency because every
+job consumes Codex capacity independently. Use `--model MODEL` to override the
+model configured by the CLI, or `--force` to regenerate a current analysis.
+Parallel jobs are started one second apart to avoid Windows CLI startup races;
+after startup, their paper analyses run concurrently. Pre-thread Windows
+path-startup failures are retried up to twice.
+
+The runner also supports Cygwin Python. It keeps local filesystem operations in
+Cygwin path form while converting `-C`, output, schema, and prompt paths to
+Windows form before invoking the Windows-native Codex CLI. On Windows, it also
+adds an inheritable ACL entry for the invoking account so that Cygwin Python can
+validate files created by the restricted Codex sandbox account. After Codex
+finishes, it removes any explicit deny entry for that account and reapplies
+recursive access before validating and cleaning the workspace. If only
+temporary-workspace cleanup fails after installation, the run remains
+successful and the path is recorded as a warning in `run.log`.
+For example, the current frontier model with extra-high reasoning is:
+
+```sh
+python src/analyze_papers.py papers/edemaine \
+  --model gpt-5.6-sol --reasoning-effort xhigh --fast
+```
+
+Reasoning effort is separate from the model ID. Supported levels include
+`low`, `medium`, `high`, `xhigh`, `max`, and `ultra`; a selected model may
+support only a subset. `--fast` requests Codex's faster service tier for these
+runs without changing the global CLI configuration; Fast mode consumes credits
+at a higher rate.
+
+Codex writes in a temporary workspace beneath the paper's `analysis/`
+directory. The runner stages disposable copies of `paper.pdf` and `source/`
+inside that workspace so the Windows sandbox can read the local primary
+sources while the originals remain protected. Generated files are validated
+and installed only after a successful run; a failed workspace is preserved as
+`analysis/.run-*` for inspection. A successful analysis is skipped when the
+paper content, prompt, schema, and requested model have not changed. Each
+analyzed, recovered, or current status line reports its result and open-problem
+counts, and the final status line totals both catalogs across all successful
+outcomes.
+
+To install previously preserved runs that reached structured status
+`complete`, without spending another model turn, use:
+
+```sh
+python src/analyze_papers.py papers/edemaine \
+  --recover-complete --jobs 8
+```
+
+Recovery retains the original `.run-*` directory. Because old event logs did
+not record the original model flags, the recovered manifest marks that
+configuration as unknown; the recovered result is treated as current until an
+explicit `--force` run replaces it.
 
 ## Development
 
