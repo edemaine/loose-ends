@@ -148,8 +148,9 @@ python src/analyze_papers.py papers/edemaine --jobs 4
 ```
 
 The default is one agent at a time. Start with modest concurrency because every
-job consumes Codex capacity independently. Use `--model MODEL` to override the
-model configured by the CLI, or `--force` to regenerate a current analysis.
+job consumes Codex capacity independently. All Codex-backed scripts default to
+`--model gpt-5.6-sol --reasoning-effort xhigh`; use either option to override
+that choice, or `--force` to regenerate a current analysis.
 Parallel jobs are started one second apart to avoid Windows CLI startup races;
 after startup, their paper analyses run concurrently. Pre-thread Windows
 path-startup failures are retried up to twice.
@@ -199,6 +200,180 @@ Recovery retains the original `.run-*` directory. Because old event logs did
 not record the original model flags, the recovered manifest marks that
 configuration as unknown; the recovered result is treated as current until an
 explicit `--force` run replaces it.
+
+## Triage open problems
+
+`src/triage_open_problems.py` reads each paper's analysis and any previous
+attempts and critiques. It assigns every selected problem one of three
+classifications:
+
+- `attempt`: there is a concrete, worthwhile Codex line of attack now;
+- `maybe`: exploratory work or a prerequisite may be useful first;
+- `skip`: the problem is currently a poor fit or the supplied history has
+  exhausted the plausible approaches.
+
+There is no per-paper quota. A triage can recommend multiple independent or
+dependent next steps—for example, a proof search and a counterexample search,
+or computation followed by a proof attempt.
+
+Preview the stale work without spending credits, then run it:
+
+```sh
+python src/triage_open_problems.py papers/edemaine --dry-run
+python src/triage_open_problems.py papers/edemaine --jobs 4
+```
+
+Narrow by problem ID or by explicitness:
+
+```sh
+python src/triage_open_problems.py papers/edemaine/arXiv-... \
+  --problem OP-001 --problem OP-004
+python src/triage_open_problems.py papers/edemaine \
+  --explicitness explicit
+```
+
+One Codex turn triages all selected stale problems from the same paper. This is
+substantially cheaper than starting one turn per problem. The Markdown and
+compact structured record are stored at the paper root:
+
+```text
+arXiv-.../
+├── analysis/
+└── attempts/
+    └── OP-001/
+        ├── triage.md
+        ├── triage.json
+        ├── triage-manifest.json
+        ├── triage-events.jsonl
+        └── triage-run.log
+```
+
+A triage is current only while the paper analysis, problem record, prompt,
+model settings, and complete attempt/review history still match. Installing a
+new attempt or critique therefore makes that problem's triage stale
+automatically; the next triage pass can decide whether a different direction
+is worthwhile.
+
+To triage and immediately feed the `attempt` recommendations into the solver,
+use the composition shortcut:
+
+```sh
+python src/triage_open_problems.py papers/edemaine \
+  --jobs 4 --solve attempt
+```
+
+Use `--solve attempt,maybe` to include exploratory recommendations, or
+`--solve-review none` to suppress the downstream critics. The same model
+options are used throughout this shortcut. Run the scripts separately when
+different solver and reviewer models are desired.
+
+## Attempt solutions
+
+`src/solve_open_problems.py` runs each planned next step as an independent
+Codex workspace. Unlike triage, every solver receives a disposable copy of the
+entire paper—PDF, submitted source, and metadata when present—together with the
+technical analysis, current triage, and all previous attempts, artifacts, and
+critiques. It is therefore not trying to solve a problem from its short
+description alone.
+
+Solve all fresh `attempt` recommendations:
+
+```sh
+python src/solve_open_problems.py papers/edemaine \
+  --from-triage attempt --jobs 4
+```
+
+No solve-all behavior is implicit. `--from-triage` requires a current triage;
+problems whose new history has made triage stale are skipped. To deliberately
+try a specific problem without current triage, or every extracted problem, use
+an explicit selector:
+
+```sh
+python src/solve_open_problems.py papers/edemaine/arXiv-... \
+  --problem OP-003
+python src/solve_open_problems.py papers/edemaine/arXiv-... \
+  --all-problems
+```
+
+`--dry-run` shows the exact planned steps and future attempt numbers. When a
+triage proposes multiple steps, each becomes an independent attempt.
+Independent or alternative steps can run concurrently; a step with
+`depends_on` prerequisites runs in a later wave, after their attempt outputs
+have entered the staged history. Selecting a dependent step with `--step`
+automatically includes its prerequisites.
+
+Attempts are append-only:
+
+```text
+attempts/
+└── OP-001/
+    ├── triage.md
+    └── attempt-001/
+        ├── attempt.md
+        ├── solver-result.json
+        ├── manifest.json
+        ├── events.jsonl
+        ├── run.log
+        └── artifacts/
+```
+
+`attempt.md` is the human-readable research record. The structured result
+classifies the outcome and indexes exact `C-###` claims so a critic can check
+them. Code, data, and auxiliary derivations can be retained under `artifacts/`.
+If a completed Codex turn is preserved because driver validation or
+installation fails, retrying the same solve command recovers the matching
+`.solve-run-*` workspace before starting another model turn.
+
+By default, newly installed attempts with at least one checkable claim are
+passed to `review_solutions.py`; `no_checkable_progress` attempts do not spend a
+critic turn. Control this with `--review promising`, `--review all`, or
+`--review none`. Reviewer model flags inherit the solver flags unless
+overridden:
+
+```sh
+python src/solve_open_problems.py papers/edemaine \
+  --from-triage attempt \
+  --model gpt-5.6-sol --reasoning-effort xhigh --fast \
+  --review-model gpt-5.6-sol --review-reasoning-effort ultra
+```
+
+The solver prints a final list of reviews that merit medium or high human
+attention, along with any unreviewed candidate solutions or counterexamples.
+
+## Review attempts
+
+Critics can also be run or rerun independently:
+
+```sh
+python src/review_solutions.py papers/edemaine --jobs 4
+python src/review_solutions.py papers/edemaine/arXiv-... \
+  --problem OP-001 --mode all
+```
+
+The default `promising` mode scans pending attempts but selects only those with
+checkable progress. `--mode all` also reviews honest no-progress reports.
+Current reviews are skipped unless the solver-owned attempt content, critic
+prompt, schema, or model settings changed; use `--force` to replace one
+deliberately.
+
+Reviews add these files to the attempt directory:
+
+```text
+attempt-001/
+├── critique.md
+├── review-result.json
+├── review-manifest.json
+├── review-events.jsonl
+└── review-run.log
+```
+
+The structured review records a verdict, claim-by-claim assessments, blocking
+gaps, and an attention level. The critic independently receives the full paper
+context and does not modify the solver's `attempt.md`.
+
+All three commands share the analyzer's `--model`, `--reasoning-effort`,
+`--fast`, `--codex`, concurrency, Cygwin path conversion, Windows ACL repair,
+and transient startup retry behavior.
 
 ## Development
 

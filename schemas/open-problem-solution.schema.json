@@ -1,0 +1,75 @@
+{
+  "type": "object",
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": [
+        "no_checkable_progress",
+        "useful_negative_result",
+        "partial_progress",
+        "candidate_counterexample",
+        "candidate_solution"
+      ]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "checkable_claims": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "proof",
+              "lemma",
+              "counterexample",
+              "computation",
+              "reduction",
+              "reformulation",
+              "obstruction",
+              "other"
+            ]
+          },
+          "statement": {
+            "type": "string"
+          },
+          "support": {
+            "type": "string"
+          },
+          "remaining_gap": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "type",
+          "statement",
+          "support",
+          "remaining_gap"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "warnings": {
+      "type": "array",
+      "items": {"type": "string"}
+    }
+  },
+  "required": [
+    "status",
+    "summary",
+    "checkable_claims",
+    "artifacts",
+    "warnings"
+  ],
+  "additionalProperties": false
+}

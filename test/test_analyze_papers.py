@@ -11,6 +11,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import analyze_papers
+import codex_cli
 from analyze_papers import (
     AnalysisError,
     analyze_paper,
@@ -139,26 +140,26 @@ class CodexPathTests(unittest.TestCase):
     def test_acl_repair_removes_explicit_deny_before_granting_access(self):
         with (
             TemporaryDirectory() as temporary,
-            patch.object(analyze_papers, "is_windows_host", return_value=True),
+            patch.object(codex_cli, "is_windows_host", return_value=True),
             patch.object(
-                analyze_papers,
+                codex_cli,
                 "workspace_is_user_accessible",
                 side_effect=[False, True],
             ),
             patch.object(
-                analyze_papers,
+                codex_cli,
                 "windows_identity",
                 return_value=r"DOMAIN\user",
             ),
             patch.object(
-                analyze_papers,
+                codex_cli,
                 "windows_icacls_for_sandbox",
                 return_value="icacls.exe",
             ),
-            patch.object(analyze_papers, "_run_local_command") as run_local,
+            patch.object(codex_cli, "_run_local_command") as run_local,
         ):
             workspace = Path(temporary)
-            analyze_papers.grant_recovery_access(workspace, "codex")
+            codex_cli.normalize_workspace_access(workspace, "codex")
 
         self.assertEqual(run_local.call_count, 2)
         remove_command = run_local.call_args_list[0].args[0]

@@ -1,0 +1,513 @@
+#!/usr/bin/env python3
+"""Shared non-interactive Codex CLI execution helpers."""
+
+from __future__ import annotations
+
+import argparse
+from dataclasses import dataclass
+from functools import lru_cache
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import threading
+import time
+
+
+REASONING_EFFORTS = ("low", "medium", "high", "xhigh", "max", "ultra")
+DEFAULT_MODEL = "gpt-5.6-sol"
+DEFAULT_REASONING_EFFORT = "xhigh"
+CODEX_LAUNCH_INTERVAL_SECONDS = 1.0
+MAX_CODEX_START_ATTEMPTS = 3
+_CODEX_LAUNCH_LOCK = threading.Lock()
+_next_codex_launch_at = 0.0
+
+
+class CodexError(RuntimeError):
+    """A local Codex invocation or its workspace could not be used."""
+
+
+@dataclass(frozen=True)
+class ModelOptions:
+    model: str | None = None
+    reasoning_effort: str | None = None
+    fast: bool = False
+
+
+def configure_utf8_stdio() -> None:
+    """Keep research titles and author names printable on Windows consoles."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="backslashreplace")
+
+
+def positive_integer(value: str) -> int:
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return number
+
+
+def add_model_arguments(
+    parser: argparse.ArgumentParser,
+    *,
+    prefix: str = "",
+) -> None:
+    """Add consistent model, reasoning, Fast mode, and executable options."""
+    option_prefix = f"{prefix}-" if prefix else ""
+    destination_prefix = f"{prefix.replace('-', '_')}_" if prefix else ""
+    model_default = None if prefix else DEFAULT_MODEL
+    reasoning_default = None if prefix else DEFAULT_REASONING_EFFORT
+    model_default_help = (
+        "inherit the primary run" if prefix else DEFAULT_MODEL
+    )
+    reasoning_default_help = (
+        "inherit the primary run" if prefix else DEFAULT_REASONING_EFFORT
+    )
+    parser.add_argument(
+        f"--{option_prefix}model",
+        dest=f"{destination_prefix}model",
+        default=model_default,
+        metavar="MODEL",
+        help=(
+            "Codex model ID; for example, gpt-5.6-sol "
+            f"(default: {model_default_help})"
+        ),
+    )
+    parser.add_argument(
+        f"--{option_prefix}reasoning-effort",
+        dest=f"{destination_prefix}reasoning_effort",
+        default=reasoning_default,
+        choices=REASONING_EFFORTS,
+        metavar="LEVEL",
+        help=(
+            "reasoning depth: low, medium, high, xhigh, max, or ultra; "
+            f"extra-high is xhigh (default: {reasoning_default_help})"
+        ),
+    )
+    parser.add_argument(
+        f"--{option_prefix}fast",
+        dest=f"{destination_prefix}fast",
+        action="store_true",
+        help=(
+            "request Codex Fast mode for this run; this uses more credits "
+            + (
+                "(default: inherit the primary run)"
+                if prefix
+                else "(default: use the CLI configuration)"
+            )
+        ),
+    )
+
+
+def model_options_from_args(
+    args: argparse.Namespace,
+    *,
+    prefix: str = "",
+) -> ModelOptions:
+    destination_prefix = f"{prefix.replace('-', '_')}_" if prefix else ""
+    return ModelOptions(
+        model=getattr(args, f"{destination_prefix}model"),
+        reasoning_effort=getattr(
+            args,
+            f"{destination_prefix}reasoning_effort",
+        ),
+        fast=getattr(args, f"{destination_prefix}fast"),
+    )
+
+
+def semantic_config_digest(
+    prompt: str,
+    schema_text: str,
+    options: ModelOptions,
+) -> str:
+    payload = {
+        "fast": options.fast,
+        "model": options.model,
+        "prompt": prompt,
+        "reasoning_effort": options.reasoning_effort,
+        "schema": schema_text,
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def resolve_codex_executable(value: str) -> str:
+    executable = shutil.which(value)
+    if executable is None:
+        raise CodexError(
+            f"could not find the Codex CLI executable {value!r} on PATH"
+        )
+    return executable
+
+
+def read_codex_version(codex: str) -> str:
+    try:
+        completed = subprocess.run(
+            [codex, "--version"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as exc:
+        raise CodexError(f"could not run {codex!r}: {exc}") from exc
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or f"exit status {completed.returncode}"
+        raise CodexError(f"could not query the Codex CLI version: {detail}")
+    return completed.stdout.strip()
+
+
+def is_windows_host() -> bool:
+    return os.name == "nt" or sys.platform == "cygwin"
+
+
+def _run_local_command(command: list[str], description: str) -> str:
+    try:
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        stdout, stderr = process.communicate()
+    except OSError as exc:
+        raise CodexError(f"{description}: {exc}") from exc
+    if process.returncode != 0:
+        detail = stderr.strip() or stdout.strip() or (
+            f"exit status {process.returncode}"
+        )
+        raise CodexError(f"{description}: {detail}")
+    return stdout
+
+
+def path_for_codex(path: Path) -> str:
+    """Return a path the Windows-native Codex CLI can understand."""
+    resolved = path.resolve()
+    if sys.platform != "cygwin":
+        return str(resolved)
+    try:
+        process = subprocess.Popen(
+            ["cygpath", "-w", str(resolved)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        stdout, stderr = process.communicate()
+    except OSError as exc:
+        raise CodexError(f"could not run cygpath for {resolved}: {exc}") from exc
+    if process.returncode != 0:
+        detail = stderr.strip() or f"exit status {process.returncode}"
+        raise CodexError(f"could not convert Cygwin path {resolved}: {detail}")
+    converted = stdout.strip()
+    if not converted:
+        raise CodexError(f"cygpath returned an empty path for {resolved}")
+    return converted
+
+
+@lru_cache(maxsize=1)
+def windows_identity() -> str:
+    domain = os.environ.get("USERDOMAIN", "").strip()
+    username = os.environ.get("USERNAME", "").strip()
+    if domain and username:
+        return f"{domain}\\{username}"
+    executable = shutil.which("whoami.exe")
+    if executable is None:
+        raise CodexError("could not find whoami.exe for Windows ACL setup")
+    identity = _run_local_command(
+        [executable],
+        "could not determine the current Windows identity",
+    ).strip()
+    if not identity or "\\" not in identity:
+        raise CodexError(
+            f"whoami.exe returned an unexpected identity: {identity!r}"
+        )
+    return identity
+
+
+@lru_cache(maxsize=1)
+def windows_icacls() -> str:
+    executable = shutil.which("icacls.exe") or shutil.which("icacls")
+    if executable is None:
+        raise CodexError("could not find icacls.exe for Windows ACL setup")
+    return executable
+
+
+def windows_icacls_for_sandbox() -> str:
+    executable = windows_icacls()
+    if sys.platform == "cygwin":
+        return path_for_codex(Path(executable))
+    return executable
+
+
+def grant_workspace_owner_inheritance(workspace: Path) -> None:
+    """Make future sandbox-created children readable by the invoking user."""
+    if not is_windows_host():
+        return
+    identity = windows_identity()
+    _run_local_command(
+        [
+            windows_icacls(),
+            path_for_codex(workspace),
+            "/grant",
+            f"{identity}:(OI)(CI)(F)",
+        ],
+        f"could not grant {identity} access to {workspace}",
+    )
+
+
+def grant_sandbox_read_access(path: Path) -> None:
+    """Let the restricted Windows Codex sandbox read staged local inputs."""
+    if not is_windows_host():
+        return
+    domain = windows_identity().split("\\", 1)[0]
+    sandbox_group = f"{domain}\\CodexSandboxUsers"
+    staged_path = path_for_codex(path)
+    _run_local_command(
+        [
+            windows_icacls(),
+            staged_path,
+            "/remove:d",
+            sandbox_group,
+            "/T",
+            "/C",
+        ],
+        f"could not remove inherited sandbox read denials from {path}",
+    )
+    _run_local_command(
+        [
+            windows_icacls(),
+            staged_path,
+            "/grant",
+            f"{sandbox_group}:(OI)(CI)(RX)",
+            "/T",
+            "/C",
+        ],
+        f"could not grant the Codex sandbox read access to {path}",
+    )
+
+
+def workspace_is_user_accessible(workspace: Path) -> bool:
+    """Return whether the invoking user can traverse and read a workspace."""
+    try:
+        def raise_walk_error(error: OSError) -> None:
+            raise error
+
+        for root, directories, filenames in os.walk(
+            workspace,
+            onerror=raise_walk_error,
+        ):
+            root_path = Path(root)
+            for name in directories:
+                (root_path / name).stat()
+            for name in filenames:
+                path = root_path / name
+                path.stat()
+                path.read_bytes()
+    except OSError:
+        return False
+    return True
+
+
+def normalize_workspace_access(workspace: Path, codex: str) -> None:
+    """Remove sandbox-created deny ACLs, then grant recursive user access."""
+    if not is_windows_host() or workspace_is_user_accessible(workspace):
+        return
+    identity = windows_identity()
+    command_prefix = [
+        codex,
+        "sandbox",
+        "-P",
+        ":workspace",
+        "-C",
+        path_for_codex(workspace),
+        windows_icacls_for_sandbox(),
+        ".",
+    ]
+    for action in (
+        ["/remove:d", identity, "/T", "/C"],
+        ["/grant", f"{identity}:(OI)(CI)(F)", "/T", "/C"],
+    ):
+        _run_local_command(
+            [*command_prefix, *action],
+            f"could not normalize sandbox-owned files in {workspace}",
+        )
+    if not workspace_is_user_accessible(workspace):
+        raise CodexError(
+            f"Windows ACL repair did not make {workspace} accessible"
+        )
+
+
+def wait_for_codex_launch_slot(interval: float) -> None:
+    """Space process startups while allowing already-started runs to overlap."""
+    if interval <= 0:
+        return
+    global _next_codex_launch_at
+    with _CODEX_LAUNCH_LOCK:
+        now = time.monotonic()
+        delay = max(0.0, _next_codex_launch_at - now)
+        if delay:
+            time.sleep(delay)
+        _next_codex_launch_at = time.monotonic() + interval
+
+
+def is_transient_startup_failure(
+    completed: subprocess.CompletedProcess,
+    events_path: Path,
+    log_path: Path,
+) -> bool:
+    """Recognize the Windows startup race seen before a thread is created."""
+    if completed.returncode == 0 or events_path.stat().st_size:
+        return False
+    try:
+        log = log_path.read_text(encoding="utf-8").lower()
+    except (OSError, UnicodeError):
+        return False
+    return (
+        "the system cannot find the path specified" in log
+        or "os error 3" in log
+    )
+
+
+def build_exec_command(
+    *,
+    codex: str,
+    workspace: Path,
+    prompt: str,
+    schema_path: Path,
+    result_path: Path,
+    options: ModelOptions,
+) -> list[str]:
+    command = [
+        codex,
+        "exec",
+        "--ephemeral",
+        "--disable",
+        "shell_snapshot",
+        "--skip-git-repo-check",
+        "--sandbox",
+        "workspace-write",
+        "--json",
+        "--color",
+        "never",
+        "-C",
+        path_for_codex(workspace),
+        "--output-schema",
+        path_for_codex(schema_path),
+        "-o",
+        path_for_codex(result_path),
+    ]
+    if options.model is not None:
+        command.extend(("--model", options.model))
+    if options.reasoning_effort is not None:
+        command.extend(
+            (
+                "--config",
+                f'model_reasoning_effort="{options.reasoning_effort}"',
+            )
+        )
+    if options.fast:
+        command.extend(
+            (
+                "--config",
+                "features.fast_mode=true",
+                "--config",
+                'service_tier="fast"',
+            )
+        )
+    command.append(prompt)
+    return command
+
+
+def run_structured_codex(
+    *,
+    codex: str,
+    workspace: Path,
+    prompt: str,
+    schema_path: Path,
+    result_filename: str = "agent-result.json",
+    events_filename: str = "events.jsonl",
+    log_filename: str = "run.log",
+    options: ModelOptions = ModelOptions(),
+    launch_interval: float = CODEX_LAUNCH_INTERVAL_SECONDS,
+) -> Path:
+    """Run one structured Codex turn and return its final-response path."""
+    workspace = workspace.resolve()
+    grant_workspace_owner_inheritance(workspace)
+    result_path = workspace / result_filename
+    events_path = workspace / events_filename
+    log_path = workspace / log_filename
+    events_path.write_text("", encoding="utf-8")
+    log_path.write_text("", encoding="utf-8")
+    command = build_exec_command(
+        codex=codex,
+        workspace=workspace,
+        prompt=prompt,
+        schema_path=schema_path,
+        result_path=result_path,
+        options=options,
+    )
+
+    completed: subprocess.CompletedProcess | None = None
+    for attempt in range(1, MAX_CODEX_START_ATTEMPTS + 1):
+        wait_for_codex_launch_slot(launch_interval)
+        try:
+            with (
+                events_path.open("a", encoding="utf-8") as events,
+                log_path.open("a", encoding="utf-8") as log,
+            ):
+                if attempt > 1:
+                    log.write(
+                        f"\n--- Codex startup retry {attempt}/"
+                        f"{MAX_CODEX_START_ATTEMPTS} ---\n"
+                    )
+                    log.flush()
+                completed = subprocess.run(
+                    command,
+                    cwd=workspace,
+                    stdout=events,
+                    stderr=log,
+                    text=True,
+                    check=False,
+                )
+        except OSError as exc:
+            if (
+                attempt < MAX_CODEX_START_ATTEMPTS
+                and getattr(exc, "winerror", None) in {2, 3}
+            ):
+                with log_path.open("a", encoding="utf-8") as log:
+                    log.write(f"Codex startup error: {exc}\n")
+                continue
+            raise CodexError(
+                f"could not start Codex; workspace preserved at "
+                f"{workspace}: {exc}"
+            ) from exc
+
+        if completed.returncode == 0:
+            break
+        if (
+            attempt == MAX_CODEX_START_ATTEMPTS
+            or not is_transient_startup_failure(
+                completed,
+                events_path,
+                log_path,
+            )
+        ):
+            break
+
+    normalize_workspace_access(workspace, codex)
+    if completed is None or completed.returncode != 0:
+        returncode = completed.returncode if completed is not None else "unknown"
+        raise CodexError(
+            f"Codex exited with status {returncode}; "
+            f"workspace preserved at {workspace}"
+        )
+    return result_path

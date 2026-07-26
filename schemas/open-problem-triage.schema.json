@@ -1,0 +1,96 @@
+{
+  "type": "object",
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["complete", "partial"]
+    },
+    "triages": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "problem_id": {
+            "type": "string"
+          },
+          "classification": {
+            "type": "string",
+            "enum": ["attempt", "maybe", "skip"]
+          },
+          "rationale": {
+            "type": "string"
+          },
+          "promising_features": {
+            "type": "array",
+            "items": {"type": "string"}
+          },
+          "obstacles": {
+            "type": "array",
+            "items": {"type": "string"}
+          },
+          "next_steps": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "mode": {
+                  "type": "string",
+                  "enum": [
+                    "proof",
+                    "counterexample",
+                    "computation",
+                    "reformulation",
+                    "special_case",
+                    "verification",
+                    "literature_check",
+                    "other"
+                  ]
+                },
+                "instruction": {
+                  "type": "string"
+                },
+                "relationship": {
+                  "type": "string"
+                },
+                "depends_on": {
+                  "type": "array",
+                  "items": {"type": "string"}
+                },
+                "success_signal": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "mode",
+                "instruction",
+                "relationship",
+                "depends_on",
+                "success_signal"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "problem_id",
+          "classification",
+          "rationale",
+          "promising_features",
+          "obstacles",
+          "next_steps"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {"type": "string"}
+    }
+  },
+  "required": ["status", "triages", "warnings"],
+  "additionalProperties": false
+}
