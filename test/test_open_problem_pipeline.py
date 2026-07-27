@@ -108,13 +108,12 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 for index, problem in enumerate(staged["problems"], 1):
                     problem_id = problem["id"]
                     classification = "attempt" if index == 1 else "maybe"
-                    step = {
+                    suggestion = {
                         "id": f"S-{index:03d}",
                         "mode": "proof",
-                        "instruction": "Try the central lemma.",
-                        "relationship": "Independent.",
-                        "depends_on": [],
-                        "success_signal": "A proved lemma.",
+                        "suggestion": "Try the central lemma.",
+                        "why_promising": "The paper supplies its hypotheses.",
+                        "abandon_if": "The hypotheses cannot be established.",
                     }
                     entries.append(
                         {
@@ -123,7 +122,7 @@ class OpenProblemPipelineTests(unittest.TestCase):
                             "rationale": "The paper supplies relevant machinery.",
                             "promising_features": ["R-001"],
                             "obstacles": ["A missing estimate"],
-                            "next_steps": [step],
+                            "suggested_approaches": [suggestion],
                         }
                     )
                     (workspace / f"triage-{problem_id}.md").write_text(
@@ -192,14 +191,13 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 "rationale": "Promising.",
                 "promising_features": ["R-001"],
                 "obstacles": [],
-                "next_steps": [
+                "suggested_approaches": [
                     {
                         "id": "proof-search",
                         "mode": "proof",
-                        "instruction": "Prove a key lemma.",
-                        "relationship": "Independent.",
-                        "depends_on": [],
-                        "success_signal": "A rigorous lemma.",
+                        "suggestion": "Prove a key lemma.",
+                        "why_promising": "R-001 nearly implies it.",
+                        "abandon_if": "A required estimate is false.",
                     }
                 ],
             }
@@ -211,6 +209,7 @@ class OpenProblemPipelineTests(unittest.TestCase):
             common.write_json(
                 problem.directory / "triage-manifest.json",
                 {
+                    "schema_version": common.TRIAGE_MANIFEST_SCHEMA_VERSION,
                     "input_digest": common.triage_input_digest(problem),
                     "config_digest": "triage-config",
                 },
@@ -221,6 +220,10 @@ class OpenProblemPipelineTests(unittest.TestCase):
             )
             self.assertEqual(missing, [])
             self.assertEqual(len(work), 1)
+            self.assertEqual(
+                work[0].guidance["suggested_approaches"][0]["id"],
+                "proof-search",
+            )
 
             solver_prompt = (
                 solve_open_problems.DEFAULT_PROMPT_PATH.read_text(
@@ -431,7 +434,7 @@ class OpenProblemPipelineTests(unittest.TestCase):
             workspace = problem.directory / ".solve-run-preserved"
             workspace.mkdir()
             (workspace / "attempt.md").write_text(
-                "# OP-001, step proof\n\n## Checkable claims\n\n"
+                "# OP-001 adaptive attempt\n\n## Checkable claims\n\n"
                 "C-001 is a lemma.\n",
                 encoding="utf-8",
             )
@@ -454,18 +457,24 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 },
             )
             write_run_files(workspace)
+            guidance = {
+                **solve_open_problems.generic_guidance(),
+                "instruction": "Prove a lemma, adapting as needed.",
+            }
             work = solve_open_problems.SolveWork(
                 problem,
-                {
-                    "id": "proof",
-                    "mode": "proof",
-                    "instruction": "Prove a lemma.",
-                    "relationship": "Independent.",
-                    "depends_on": [],
-                    "success_signal": "A lemma.",
-                },
+                guidance,
                 1,
                 None,
+            )
+            options = codex_cli.ModelOptions()
+            solve_open_problems._write_work_record(
+                workspace,
+                work,
+                config_digest="config",
+                codex_version="test",
+                options=options,
+                prior_history_digest=common.attempt_history_digest(problem),
             )
 
             with patch.object(
@@ -479,7 +488,7 @@ class OpenProblemPipelineTests(unittest.TestCase):
                     prompt_template="prompt",
                     schema_path=Path("schema"),
                     config_digest="config",
-                    options=codex_cli.ModelOptions(),
+                    options=options,
                     launch_interval=0,
                 )
 
@@ -535,14 +544,13 @@ class OpenProblemPipelineTests(unittest.TestCase):
                     "rationale": "Promising.",
                     "promising_features": [],
                     "obstacles": [],
-                    "next_steps": [
+                    "suggested_approaches": [
                         {
                             "id": "proof",
                             "mode": "proof",
-                            "instruction": "Try a proof.",
-                            "relationship": "Independent.",
-                            "depends_on": [],
-                            "success_signal": "A proof.",
+                            "suggestion": "Try a proof.",
+                            "why_promising": "The paper has useful machinery.",
+                            "abandon_if": "A necessary lemma is false.",
                         }
                     ],
                 }
@@ -557,6 +565,9 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 common.write_json(
                     problem.directory / "triage-manifest.json",
                     {
+                        "schema_version": (
+                            common.TRIAGE_MANIFEST_SCHEMA_VERSION
+                        ),
                         "input_digest": common.triage_input_digest(problem),
                         "config_digest": config_digest,
                     },
@@ -580,43 +591,73 @@ class OpenProblemPipelineTests(unittest.TestCase):
             self.assertEqual(arguments.count("--exact-problem"), 2)
             self.assertIn("Feeding 2 current triage item(s)", output.getvalue())
 
-    def test_solver_runs_dependent_triage_steps_in_later_waves(self):
+    def test_solver_combines_all_triage_suggestions_in_one_attempt(self):
         with TemporaryDirectory() as temporary:
             paper = make_analyzed_paper(Path(temporary))
             problem = common.discover_problem_refs(
                 [paper],
                 problem_ids={"OP-001"},
             )[0]
-            first = solve_open_problems.SolveWork(
-                problem,
+            problem.directory.mkdir(parents=True)
+            suggestions = [
                 {
                     "id": "compute",
                     "mode": "computation",
-                    "instruction": "Compute examples.",
-                    "relationship": "First.",
-                    "depends_on": [],
-                    "success_signal": "Data.",
+                    "suggestion": "Compute examples.",
+                    "why_promising": "Small cases may expose structure.",
+                    "abandon_if": "The data contradicts the pattern.",
                 },
-                1,
-                "snapshot",
-            )
-            second = solve_open_problems.SolveWork(
-                problem,
                 {
-                    "id": "judge",
+                    "id": "prove",
                     "mode": "proof",
-                    "instruction": "Judge the pattern.",
-                    "relationship": "After computation.",
-                    "depends_on": ["compute"],
-                    "success_signal": "A lemma.",
+                    "suggestion": "Try the structural lemma.",
+                    "why_promising": "It would settle the conjecture.",
+                    "abandon_if": "A small case refutes the lemma.",
                 },
-                2,
-                "snapshot",
+                {
+                    "id": "counterexample",
+                    "mode": "counterexample",
+                    "suggestion": "Search the boundary cases.",
+                    "why_promising": "The hypotheses may be too weak.",
+                    "abandon_if": "The paper's invariant rules them out.",
+                },
+            ]
+            common.write_json(
+                problem.directory / common.TRIAGE_RESULT,
+                {
+                    "problem_id": problem.id,
+                    "classification": "attempt",
+                    "rationale": "Several related avenues look useful.",
+                    "promising_features": ["R-001"],
+                    "obstacles": ["A missing estimate"],
+                    "suggested_approaches": suggestions,
+                },
             )
-            call_order: list[str] = []
+            common.write_json(
+                problem.directory / common.TRIAGE_MANIFEST,
+                {
+                    "schema_version": (
+                        common.TRIAGE_MANIFEST_SCHEMA_VERSION
+                    ),
+                    "input_digest": common.triage_input_digest(problem),
+                },
+            )
+            work_items, missing = solve_open_problems.build_work(
+                [problem],
+                require_triage_classes={"attempt"},
+            )
+
+            self.assertEqual(missing, [])
+            self.assertEqual(len(work_items), 1)
+            self.assertEqual(
+                work_items[0].guidance["suggested_approaches"],
+                suggestions,
+            )
+
+            calls: list[solve_open_problems.SolveWork] = []
 
             def fake_solve(work, **kwargs):
-                call_order.append(work.step["id"])
+                calls.append(work)
                 directory = problem.directory / work.attempt_name
                 attempt = review_solutions.AttemptRef(
                     problem,
@@ -640,7 +681,7 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 side_effect=fake_solve,
             ):
                 outcomes, failures = solve_open_problems.solve_many(
-                    [second, first],
+                    work_items,
                     codex="codex",
                     codex_version="test",
                     prompt_template="prompt",
@@ -651,8 +692,37 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 )
 
             self.assertEqual(failures, [])
-            self.assertEqual(len(outcomes), 2)
-            self.assertEqual(call_order, ["compute", "judge"])
+            self.assertEqual(len(outcomes), 1)
+            self.assertEqual(calls, work_items)
+
+    def test_step_based_triage_manifest_is_deliberately_stale(self):
+        with TemporaryDirectory() as temporary:
+            paper = make_analyzed_paper(Path(temporary))
+            problem = common.discover_problem_refs(
+                [paper],
+                problem_ids={"OP-001"},
+            )[0]
+            problem.directory.mkdir(parents=True)
+            common.write_json(
+                problem.directory / common.TRIAGE_RESULT,
+                {
+                    "problem_id": problem.id,
+                    "classification": "attempt",
+                    "rationale": "Old format.",
+                    "promising_features": [],
+                    "obstacles": [],
+                    "next_steps": [],
+                },
+            )
+            common.write_json(
+                problem.directory / common.TRIAGE_MANIFEST,
+                {
+                    "schema_version": 1,
+                    "input_digest": common.triage_input_digest(problem),
+                },
+            )
+
+            self.assertFalse(common.triage_is_current(problem))
 
     def test_all_cli_entry_points_share_frontier_model_defaults(self):
         parsers = (

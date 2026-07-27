@@ -14,10 +14,10 @@ solver attempts and critiques, when present, are under
 unexplored direction from one that has repeatedly failed, and identify concrete
 ways to improve on earlier attempts.
 
-This is a research-planning task, not a quota. Classify every requested problem:
+This is research triage, not a quota. Classify every requested problem:
 
 - `attempt`: a Codex solver has a concrete, worthwhile line of attack now;
-- `maybe`: progress seems possible, but the proposed work is exploratory,
+- `maybe`: progress seems possible, but the work is exploratory,
   underspecified, or likely needs a prerequisite;
 - `skip`: the problem is currently a poor fit, too broad, requires unavailable
   evidence or experiments, is probably only an inferred limitation, or has
@@ -26,15 +26,15 @@ This is a research-planning task, not a quota. Classify every requested problem:
 Do not favor a fixed number of problems. It is valid to classify all, some, or
 none as `attempt`.
 
-For each problem, propose zero or more bounded `next_steps`. A step should be
-specific enough to give directly to an independent solver. Include multiple
-steps when proof and counterexample searches should be tried independently, or
-when computation should inform a later proof. Use `relationship` to explain
-whether steps are independent, alternatives, or sequential prerequisites. Use
-`depends_on` for the IDs of steps that must finish first; independent first
-steps have an empty array. Keep the dependency graph acyclic.
-`literature_check` may be recommended, but the downstream solver will not have
-internet access unless separately arranged.
+For each problem, propose zero or more nonbinding `suggested_approaches`.
+Identify distinct promising ideas, useful modes such as proof,
+counterexample search, computation, or reformulation, why each idea is
+promising, and an observation that should cause it to be abandoned or
+reconsidered. Do not turn these ideas into a sequential plan or dependency
+graph. A downstream solver receives all suggestions in one adaptive research
+turn and may combine, reorder, abandon, or replace them after reading the full
+paper and attempt history. `literature_check` may be suggested, but the
+downstream solver will not have internet access unless separately arranged.
 
 Write one substantive Markdown report named `triage-OP-NNN.md` in the current
 working directory for every requested ID. Each report should contain:
@@ -42,8 +42,8 @@ working directory for every requested ID. Each report should contain:
 - classification and rationale;
 - evidence from the paper analysis and prior attempts;
 - obstacles and warning signs;
-- the proposed steps, their relationships, and what would count as progress;
-- a short explanation if there are no proposed steps.
+- the suggested approaches, why they may work, and when to abandon them;
+- a short explanation if there are no suggested approaches.
 
 Do not modify `inputs/`. Your final response must be only the JSON object
 required by the supplied schema. The `triages` array must contain every

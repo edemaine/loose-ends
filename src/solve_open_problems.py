@@ -42,7 +42,7 @@ WORK_RECORD_FILE = "work-record.json"
 @dataclass(frozen=True)
 class SolveWork:
     problem: common.ProblemRef
-    step: dict
+    guidance: dict
     attempt_number: int
     triage_snapshot_digest: str | None
 
@@ -60,111 +60,77 @@ class SolveOutcome:
     message: str
 
 
-def generic_step(problem: common.ProblemRef) -> dict:
+def generic_guidance() -> dict:
     return {
-        "id": "independent",
-        "mode": "other",
-        "instruction": (
-            "Choose the most promising concrete line of attack after reading "
-            "the paper, analysis, and complete attempt history."
+        "source": "explicit_selection",
+        "classification": None,
+        "rationale": (
+            "This problem was selected explicitly without a current triage."
         ),
-        "relationship": "Standalone fresh assessment.",
-        "depends_on": [],
-        "success_signal": (
-            "A checkable lemma, obstruction, special case, computation, "
-            "counterexample, reformulation, or complete argument."
+        "promising_features": [],
+        "obstacles": [],
+        "suggested_approaches": [],
+        "instruction": (
+            "Choose and adapt the most promising research strategy after "
+            "reading the full paper, analysis, and attempt history."
         ),
     }
 
 
-def planned_steps(
+def research_guidance(
     problem: common.ProblemRef,
     *,
     require_triage_classes: set[str] | None,
-    step_ids: set[str] | None,
-) -> tuple[list[dict], str | None]:
-    """Return a current triage plan, or a generic explicit-selection step."""
+) -> tuple[dict | None, str | None]:
+    """Return current triage as advisory guidance, or generic guidance."""
     current = common.triage_is_current(problem)
     result = common.triage_result(problem) if current else None
     if require_triage_classes is not None:
         if result is None or result.get("classification") not in (
             require_triage_classes
         ):
-            return [], None
-        steps = result.get("next_steps")
-        if not isinstance(steps, list):
-            return [], None
-    elif result is not None and isinstance(result.get("next_steps"), list):
-        steps = result["next_steps"]
-        if not steps:
-            steps = [generic_step(problem)]
-    else:
-        steps = [generic_step(problem)]
-    if step_ids is not None:
-        step_by_id = {
-            step.get("id"): step
-            for step in steps
-            if isinstance(step, dict) and isinstance(step.get("id"), str)
-        }
-        selected_ids = set(step_ids).intersection(step_by_id)
-        pending_ids = list(selected_ids)
-        while pending_ids:
-            step_id = pending_ids.pop()
-            dependencies = step_by_id[step_id].get("depends_on", [])
-            for dependency in dependencies:
-                if dependency in step_by_id and dependency not in selected_ids:
-                    selected_ids.add(dependency)
-                    pending_ids.append(dependency)
-        steps = [step for step in steps if step.get("id") in selected_ids]
-    ordered: list[dict] = []
-    remaining = list(steps)
-    completed_ids: set[str] = set()
-    while remaining:
-        ready = [
-            step
-            for step in remaining
-            if set(step.get("depends_on", [])).issubset(completed_ids)
-        ]
-        if not ready:
-            # Stored triages are validated when installed; preserve enough
-            # information for solve_many to report a malformed edited file.
-            ordered.extend(remaining)
-            break
-        for step in ready:
-            ordered.append(step)
-            completed_ids.add(step.get("id"))
-            remaining.remove(step)
-    snapshot = common.triage_input_digest(problem) if result is not None else None
-    return [dict(step) for step in ordered], snapshot
+            return None, None
+    if result is None:
+        return generic_guidance(), None
+    guidance = {
+        "source": "triage",
+        "classification": result.get("classification"),
+        "rationale": result.get("rationale", ""),
+        "promising_features": result.get("promising_features", []),
+        "obstacles": result.get("obstacles", []),
+        "suggested_approaches": result.get("suggested_approaches", []),
+        "instruction": (
+            "Treat every suggestion as advisory. Form your own strategy; "
+            "combine, reorder, abandon, or replace approaches in response "
+            "to evidence."
+        ),
+    }
+    return guidance, common.triage_input_digest(problem)
 
 
 def build_work(
     problems: Sequence[common.ProblemRef],
     *,
     require_triage_classes: set[str] | None,
-    step_ids: set[str] | None = None,
 ) -> tuple[list[SolveWork], list[common.ProblemRef]]:
     work: list[SolveWork] = []
     without_work: list[common.ProblemRef] = []
     for problem in problems:
-        steps, snapshot = planned_steps(
+        guidance, snapshot = research_guidance(
             problem,
             require_triage_classes=require_triage_classes,
-            step_ids=step_ids,
         )
-        if not steps:
+        if guidance is None:
             without_work.append(problem)
             continue
-        first_number = common.next_attempt_number(problem)
-        for offset, step in enumerate(steps):
-            work.append(
-                SolveWork(
-                    problem,
-                    step,
-                    first_number + offset,
-                    snapshot,
-                )
+        work.append(
+            SolveWork(
+                problem,
+                guidance,
+                common.next_attempt_number(problem),
+                snapshot,
             )
+        )
     return work, without_work
 
 
@@ -177,8 +143,8 @@ def render_prompt(
     return (
         template.replace("{{PROBLEM_ID}}", work.problem.id)
         .replace(
-            "{{STEP_JSON}}",
-            json.dumps(work.step, indent=2, ensure_ascii=False),
+            "{{RESEARCH_GUIDANCE_JSON}}",
+            json.dumps(work.guidance, indent=2, ensure_ascii=False),
         )
         .replace(
             "{{CONTEXT_DIRECTORY}}",
@@ -320,7 +286,7 @@ def _install_attempt(
         shutil.copyfile(workspace / "attempt.md", staging / "attempt.md")
         common.write_json(staging / "solver-result.json", result)
         manifest = {
-            "schema_version": 1,
+            "schema_version": 2,
             "generated_at": common.utc_now(),
             "problem_id": work.problem.id,
             "problem_digest": common.problem_digest(work.problem),
@@ -329,7 +295,7 @@ def _install_attempt(
             ),
             "prior_attempt_history_digest": prior_history_digest,
             "triage_snapshot_digest": work.triage_snapshot_digest,
-            "planned_step": work.step,
+            "research_guidance": work.guidance,
             "config_digest": config_digest,
             "codex_version": codex_version,
             "requested_model": options.model,
@@ -343,7 +309,6 @@ def _install_attempt(
                 {
                     "recovered_from_workspace": recovered_from.name,
                     "original_workspace_preserved": True,
-                    "recovered_without_config": config_digest is None,
                 }
             )
         common.write_json(staging / "manifest.json", manifest)
@@ -379,10 +344,10 @@ def _write_work_record(
     common.write_json(
         workspace / WORK_RECORD_FILE,
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "problem_id": work.problem.id,
             "attempt_name": work.attempt_name,
-            "step": work.step,
+            "research_guidance": work.guidance,
             "triage_snapshot_digest": work.triage_snapshot_digest,
             "prior_attempt_history_digest": prior_history_digest,
             "config_digest": config_digest,
@@ -401,30 +366,15 @@ def _recovery_workspace_matches(
     config_digest: str,
 ) -> tuple[bool, dict | None]:
     record = common.load_json(workspace / WORK_RECORD_FILE)
-    if record is not None:
-        return (
-            record.get("problem_id") == work.problem.id
-            and record.get("attempt_name") == work.attempt_name
-            and record.get("step") == work.step
-            and record.get("config_digest") == config_digest,
-            record,
-        )
-
-    # Compatibility for complete workspaces created before work-record.json
-    # was introduced. Only the first attempt can be identified unambiguously;
-    # require its assigned step in the report's top heading.
-    if work.attempt_number != 1:
+    if record is None or record.get("schema_version") != 2:
         return False, None
-    try:
-        beginning = (workspace / "attempt.md").read_text(
-            encoding="utf-8"
-        )[:4096]
-    except (FileNotFoundError, OSError, UnicodeError):
-        return False, None
-    heading = re.compile(
-        rf"(?mi)^#.*\bstep\s+{re.escape(work.step['id'])}\b"
+    return (
+        record.get("problem_id") == work.problem.id
+        and record.get("attempt_name") == work.attempt_name
+        and record.get("research_guidance") == work.guidance
+        and record.get("config_digest") == config_digest,
+        record,
     )
-    return bool(heading.search(beginning)), None
 
 
 def recover_solver_work(
@@ -458,15 +408,12 @@ def recover_solver_work(
         )
         if not matches:
             continue
+        assert record is not None
         result, artifacts = validate_solver_result(
             workspace / "agent-result.json",
             workspace,
         )
-        recorded_digest = (
-            record.get("prior_attempt_history_digest")
-            if record is not None
-            else None
-        )
+        recorded_digest = record.get("prior_attempt_history_digest")
         prior_history_digest = (
             recorded_digest
             if isinstance(recorded_digest, str)
@@ -477,22 +424,9 @@ def recover_solver_work(
             workspace=workspace,
             result=result,
             artifacts=artifacts,
-            config_digest=(
-                record.get("config_digest")
-                if record is not None
-                and isinstance(record.get("config_digest"), str)
-                else None
-            ),
-            codex_version=(
-                record.get("codex_version", codex_version)
-                if record is not None
-                else "unknown (recovered legacy workspace)"
-            ),
-            options=(
-                options
-                if record is not None
-                else codex_cli.ModelOptions()
-            ),
+            config_digest=record["config_digest"],
+            codex_version=record.get("codex_version", codex_version),
+            options=options,
             prior_history_digest=prior_history_digest,
             recovered_from=workspace,
         )
@@ -526,7 +460,7 @@ def solve_work(
     options: codex_cli.ModelOptions,
     launch_interval: float = codex_cli.CODEX_LAUNCH_INTERVAL_SECONDS,
 ) -> SolveOutcome:
-    """Run and install one solver step."""
+    """Run and install one adaptive solver attempt."""
     work.problem.directory.mkdir(parents=True, exist_ok=True)
     recovered = recover_solver_work(
         work,
@@ -554,7 +488,7 @@ def solve_work(
             [work.problem],
             include_paper=True,
             include_history=True,
-            include_triage=True,
+            include_triage=work.triage_snapshot_digest is not None,
         )
         prompt = render_prompt(
             prompt_template,
@@ -616,95 +550,28 @@ def solve_many(
     failures: list[tuple[SolveWork, str]] = []
     if not work_items:
         return outcomes, failures
-
-    def key(work: SolveWork) -> tuple[Path, str, str]:
-        return (
-            work.problem.paper_directory,
-            work.problem.id,
-            work.step["id"],
-        )
-
-    remaining = {key(work): work for work in work_items}
-    completed: set[tuple[Path, str, str]] = set()
-    failed: set[tuple[Path, str, str]] = set()
-    all_keys = set(remaining)
-    while remaining:
-        blocked: list[tuple[tuple[Path, str, str], SolveWork, list[str]]] = []
-        ready: list[tuple[tuple[Path, str, str], SolveWork]] = []
-        for work_key, work in remaining.items():
-            dependencies = {
-                (
-                    work.problem.paper_directory,
-                    work.problem.id,
-                    dependency,
-                )
-                for dependency in work.step.get("depends_on", [])
-            }
-            failed_dependencies = dependencies.intersection(failed)
-            missing_dependencies = dependencies.difference(all_keys)
-            if failed_dependencies or missing_dependencies:
-                names = sorted(
-                    dependency[2]
-                    for dependency in (
-                        failed_dependencies | missing_dependencies
-                    )
-                )
-                blocked.append((work_key, work, names))
-            elif dependencies.issubset(completed):
-                ready.append((work_key, work))
-
-        for work_key, work, names in blocked:
-            failures.append(
-                (
-                    work,
-                    "not run because prerequisite step(s) failed or were "
-                    "missing: " + ", ".join(names),
-                )
-            )
-            failed.add(work_key)
-            del remaining[work_key]
-        if not ready:
-            if blocked and remaining:
-                continue
-            if remaining:
-                for work_key, work in list(remaining.items()):
-                    failures.append(
-                        (
-                            work,
-                            "not run because its step dependencies could "
-                            "not be resolved",
-                        )
-                    )
-                    failed.add(work_key)
-                    del remaining[work_key]
-            break
-
-        with ThreadPoolExecutor(
-            max_workers=min(jobs, len(ready))
-        ) as executor:
-            future_to_work = {
-                executor.submit(
-                    solve_work,
-                    work,
-                    codex=codex,
-                    codex_version=codex_version,
-                    prompt_template=prompt_template,
-                    schema_path=schema_path,
-                    config_digest=config_digest,
-                    options=options,
-                ): (work_key, work)
-                for work_key, work in ready
-            }
-            for future in as_completed(future_to_work):
-                work_key, work = future_to_work[future]
-                del remaining[work_key]
-                try:
-                    outcomes.append(future.result())
-                except (common.CodexError, OSError) as exc:
-                    failures.append((work, str(exc)))
-                    failed.add(work_key)
-                else:
-                    completed.add(work_key)
+    with ThreadPoolExecutor(
+        max_workers=min(jobs, len(work_items))
+    ) as executor:
+        future_to_work = {
+            executor.submit(
+                solve_work,
+                work,
+                codex=codex,
+                codex_version=codex_version,
+                prompt_template=prompt_template,
+                schema_path=schema_path,
+                config_digest=config_digest,
+                options=options,
+            ): work
+            for work in work_items
+        }
+        for future in as_completed(future_to_work):
+            work = future_to_work[future]
+            try:
+                outcomes.append(future.result())
+            except (common.CodexError, OSError) as exc:
+                failures.append((work, str(exc)))
     return outcomes, failures
 
 
@@ -722,7 +589,7 @@ def _inherit_review_options(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "run independent, full-paper solver attempts on selected problems"
+            "run one adaptive, full-paper solver attempt per selected problem"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""examples:
@@ -778,13 +645,6 @@ def build_parser() -> argparse.ArgumentParser:
         help=argparse.SUPPRESS,
     )
     parser.add_argument(
-        "--step",
-        action="append",
-        dest="step_ids",
-        metavar="STEP-ID",
-        help="only run this triage next-step ID; may be repeated",
-    )
-    parser.add_argument(
         "-j",
         "--jobs",
         type=codex_cli.positive_integer,
@@ -808,7 +668,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="report planned solver steps without starting Codex",
+        help="report adaptive solver attempts without starting Codex",
     )
     parser.add_argument(
         "--codex",
@@ -906,7 +766,6 @@ def main(argv: list[str] | None = None) -> int:
         work_items, without_work = build_work(
             problems,
             require_triage_classes=triage_classes,
-            step_ids=set(args.step_ids) if args.step_ids else None,
         )
         review_prompt_path = args.review_prompt.expanduser().resolve()
         review_schema_path = args.review_schema.expanduser().resolve()
@@ -932,23 +791,23 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.dry_run:
         for work in work_items:
+            suggestions = work.guidance.get("suggested_approaches", [])
             print(
                 f"Would solve: {work.problem.paper_directory} "
                 f"{work.problem.id}/{work.attempt_name} "
-                f"[{work.step.get('mode')}] {work.step.get('id')}: "
-                f"{work.step.get('instruction')}"
+                f"(adaptive; {len(suggestions)} suggested approach(es))"
             )
         print(
             f"Selected {len(problems)} problem(s): "
-            f"{len(work_items)} solver step(s); "
-            f"{len(without_work)} without matching current triage work."
+            f"{len(work_items)} adaptive solver attempt(s); "
+            f"{len(without_work)} without matching current triage."
         )
         return 0
 
     if not work_items:
         print(
             f"No solver work selected from {len(problems)} problem(s); "
-            f"{len(without_work)} had no matching current triage step."
+            f"{len(without_work)} had no matching current triage."
         )
         return 0
     try:
@@ -957,7 +816,7 @@ def main(argv: list[str] | None = None) -> int:
     except common.CodexError as exc:
         parser.error(str(exc))
     print(
-        f"Running {len(work_items)} solver step(s) for "
+        f"Running {len(work_items)} adaptive solver attempt(s) for "
         f"{len(problems) - len(without_work)} problem(s), with up to "
         f"{min(args.jobs, len(work_items))} Codex agent(s) at once."
     )

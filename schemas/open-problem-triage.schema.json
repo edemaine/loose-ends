@@ -28,7 +28,7 @@
             "type": "array",
             "items": {"type": "string"}
           },
-          "next_steps": {
+          "suggested_approaches": {
             "type": "array",
             "items": {
               "type": "object",
@@ -49,27 +49,22 @@
                     "other"
                   ]
                 },
-                "instruction": {
+                "suggestion": {
                   "type": "string"
                 },
-                "relationship": {
+                "why_promising": {
                   "type": "string"
                 },
-                "depends_on": {
-                  "type": "array",
-                  "items": {"type": "string"}
-                },
-                "success_signal": {
+                "abandon_if": {
                   "type": "string"
                 }
               },
               "required": [
                 "id",
                 "mode",
-                "instruction",
-                "relationship",
-                "depends_on",
-                "success_signal"
+                "suggestion",
+                "why_promising",
+                "abandon_if"
               ],
               "additionalProperties": false
             }
@@ -81,7 +76,7 @@
           "rationale",
           "promising_features",
           "obstacles",
-          "next_steps"
+          "suggested_approaches"
         ],
         "additionalProperties": false
       }

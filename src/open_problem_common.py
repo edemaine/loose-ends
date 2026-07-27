@@ -21,6 +21,7 @@ ATTEMPTS_DIRECTORY = "attempts"
 TRIAGE_MARKDOWN = "triage.md"
 TRIAGE_RESULT = "triage.json"
 TRIAGE_MANIFEST = "triage-manifest.json"
+TRIAGE_MANIFEST_SCHEMA_VERSION = 2
 TRIAGE_RUN_FILES = ("triage-events.jsonl", "triage-run.log")
 ATTEMPT_DIRECTORY_RE = re.compile(r"^attempt-([0-9]{3,})$")
 ATTEMPT_HISTORY_FILES = (
@@ -330,6 +331,8 @@ def triage_is_current(
     manifest = triage_manifest(problem)
     result = triage_result(problem)
     if manifest is None or result is None:
+        return False
+    if manifest.get("schema_version") != TRIAGE_MANIFEST_SCHEMA_VERSION:
         return False
     if manifest.get("input_digest") != triage_input_digest(problem):
         return False

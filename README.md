@@ -212,9 +212,10 @@ classifications:
 - `skip`: the problem is currently a poor fit or the supplied history has
   exhausted the plausible approaches.
 
-There is no per-paper quota. A triage can recommend multiple independent or
-dependent next steps—for example, a proof search and a counterexample search,
-or computation followed by a proof attempt.
+There is no per-paper quota. A triage can recommend zero or more distinct
+approaches—for example, proof search, counterexample search, computation, or a
+reformulation. These are advisory research ideas, not a sequence or dependency
+graph.
 
 Preview the stale work without spending credits, then run it:
 
@@ -252,7 +253,8 @@ A triage is current only while the paper analysis, problem record, prompt,
 model settings, and complete attempt/review history still match. Installing a
 new attempt or critique therefore makes that problem's triage stale
 automatically; the next triage pass can decide whether a different direction
-is worthwhile.
+is worthwhile. Triages from the previous step/dependency format are
+deliberately stale and must be regenerated.
 
 To triage and immediately feed the `attempt` recommendations into the solver,
 use the composition shortcut:
@@ -269,12 +271,12 @@ different solver and reviewer models are desired.
 
 ## Attempt solutions
 
-`src/solve_open_problems.py` runs each planned next step as an independent
-Codex workspace. Unlike triage, every solver receives a disposable copy of the
-entire paper—PDF, submitted source, and metadata when present—together with the
-technical analysis, current triage, and all previous attempts, artifacts, and
-critiques. It is therefore not trying to solve a problem from its short
-description alone.
+`src/solve_open_problems.py` runs one adaptive Codex research turn per selected
+problem. Unlike triage, every solver receives a disposable copy of the entire
+paper—PDF, submitted source, and metadata when present—together with the
+technical analysis, all triage suggestions, and all previous attempts,
+artifacts, and critiques. It is therefore not trying to solve a problem from
+its short description alone.
 
 Solve all fresh `attempt` recommendations:
 
@@ -295,12 +297,13 @@ python src/solve_open_problems.py papers/edemaine/arXiv-... \
   --all-problems
 ```
 
-`--dry-run` shows the exact planned steps and future attempt numbers. When a
-triage proposes multiple steps, each becomes an independent attempt.
-Independent or alternative steps can run concurrently; a step with
-`depends_on` prerequisites runs in a later wave, after their attempt outputs
-have entered the staged history. Selecting a dependent step with `--step`
-automatically includes its prerequisites.
+`--dry-run` shows one future adaptive attempt number for each selected problem
+and the number of triage suggestions it will receive. All suggestions go into
+the same solver prompt. The solver is explicitly free to combine, reorder,
+abandon, or replace them as evidence develops, and to try proof,
+counterexample, computation, and verification within the same turn. A later
+attempt happens only after the current attempt (and any critic output)
+invalidates triage and a new triage pass recommends more work.
 
 Attempts are append-only:
 

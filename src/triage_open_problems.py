@@ -24,7 +24,7 @@ DEFAULT_SCHEMA_PATH = (
     PROJECT_ROOT / "schemas" / "open-problem-triage.schema.json"
 )
 TRIAGE_CLASSES = ("attempt", "maybe", "skip")
-STEP_MODES = (
+APPROACH_MODES = (
     "proof",
     "counterexample",
     "computation",
@@ -41,7 +41,7 @@ class TriageOutcome:
     problem: common.ProblemRef
     status: str
     classification: str
-    step_count: int
+    suggestion_count: int
     message: str
 
 
@@ -112,73 +112,43 @@ def validate_triage_result(
                 raise common.CodexError(
                     f"triage response has invalid {field} for {problem_id}"
                 )
-        steps = entry.get("next_steps")
-        if not isinstance(steps, list):
+        suggestions = entry.get("suggested_approaches")
+        if not isinstance(suggestions, list):
             raise common.CodexError(
-                f"triage response has invalid next_steps for {problem_id}"
+                f"triage response has invalid suggested_approaches for "
+                f"{problem_id}"
             )
-        step_ids: set[str] = set()
-        for step in steps:
-            if not isinstance(step, dict):
+        suggestion_ids: set[str] = set()
+        for suggestion in suggestions:
+            if not isinstance(suggestion, dict):
                 raise common.CodexError(
-                    f"a next step for {problem_id} is not an object"
+                    f"a suggested approach for {problem_id} is not an object"
                 )
-            step_id = step.get("id")
+            suggestion_id = suggestion.get("id")
             if (
-                not isinstance(step_id, str)
-                or not step_id.strip()
-                or step_id in step_ids
+                not isinstance(suggestion_id, str)
+                or not suggestion_id.strip()
+                or suggestion_id in suggestion_ids
             ):
                 raise common.CodexError(
-                    f"invalid or duplicate next-step ID for {problem_id}"
+                    f"invalid or duplicate suggested-approach ID for "
+                    f"{problem_id}"
                 )
-            step_ids.add(step_id)
-            if step.get("mode") not in STEP_MODES:
+            suggestion_ids.add(suggestion_id)
+            if suggestion.get("mode") not in APPROACH_MODES:
                 raise common.CodexError(
-                    f"invalid mode for {problem_id} step {step_id}"
+                    f"invalid mode for {problem_id} suggested approach "
+                    f"{suggestion_id}"
                 )
-            for field in ("instruction", "relationship", "success_signal"):
-                if not isinstance(step.get(field), str) or not step[field].strip():
+            for field in ("suggestion", "why_promising", "abandon_if"):
+                if (
+                    not isinstance(suggestion.get(field), str)
+                    or not suggestion[field].strip()
+                ):
                     raise common.CodexError(
-                        f"{problem_id} step {step_id} has no {field}"
+                        f"{problem_id} suggested approach {suggestion_id} "
+                        f"has no {field}"
                     )
-            depends_on = step.get("depends_on")
-            if not isinstance(depends_on, list) or not all(
-                isinstance(value, str) for value in depends_on
-            ) or len(set(depends_on)) != len(depends_on):
-                raise common.CodexError(
-                    f"{problem_id} step {step_id} has invalid depends_on"
-                )
-        step_by_id = {step["id"]: step for step in steps}
-        for step_id, step in step_by_id.items():
-            unknown = set(step["depends_on"]).difference(step_by_id)
-            if step_id in step["depends_on"] or unknown:
-                detail = (
-                    ", ".join(sorted(unknown))
-                    if unknown
-                    else "itself"
-                )
-                raise common.CodexError(
-                    f"{problem_id} step {step_id} depends on {detail}"
-                )
-        visiting: set[str] = set()
-        visited: set[str] = set()
-
-        def visit(step_id: str) -> None:
-            if step_id in visiting:
-                raise common.CodexError(
-                    f"{problem_id} next steps contain a dependency cycle"
-                )
-            if step_id in visited:
-                return
-            visiting.add(step_id)
-            for dependency in step_by_id[step_id]["depends_on"]:
-                visit(dependency)
-            visiting.remove(step_id)
-            visited.add(step_id)
-
-        for step_id in step_by_id:
-            visit(step_id)
         report = workspace / f"triage-{problem_id}.md"
         contents = common.validate_markdown(
             report,
@@ -227,7 +197,7 @@ def _install_triage(
             },
         )
         manifest = {
-            "schema_version": 1,
+            "schema_version": common.TRIAGE_MANIFEST_SCHEMA_VERSION,
             "generated_at": common.utc_now(),
             "input_digest": input_digest,
             "config_digest": config_digest,
@@ -240,7 +210,7 @@ def _install_triage(
             "requested_reasoning_effort": options.reasoning_effort,
             "requested_fast_mode": options.fast,
             "classification": entry["classification"],
-            "step_count": len(entry["next_steps"]),
+            "suggestion_count": len(entry["suggested_approaches"]),
         }
         common.write_json(staging / common.TRIAGE_MANIFEST, manifest)
         shutil.copyfile(
@@ -333,9 +303,10 @@ def triage_paper(
                     problem,
                     "triaged",
                     entry["classification"],
-                    len(entry["next_steps"]),
+                    len(entry["suggested_approaches"]),
                     f"{entry['classification']}; "
-                    f"{len(entry['next_steps'])} next step(s)",
+                    f"{len(entry['suggested_approaches'])} suggested "
+                    "approach(es)",
                 )
             )
     except (common.CodexError, OSError) as exc:
@@ -352,7 +323,7 @@ def triage_paper(
                 outcome.problem,
                 outcome.status,
                 outcome.classification,
-                outcome.step_count,
+                outcome.suggestion_count,
                 outcome.message + "; temporary workspace preserved",
             )
             for outcome in outcomes
@@ -508,7 +479,7 @@ def main(argv: list[str] | None = None) -> int:
                     problem,
                     "current",
                     result["classification"],
-                    len(result.get("next_steps", [])),
+                    len(result.get("suggested_approaches", [])),
                     "triage matches the analysis, history, and prompt",
                 )
             )
@@ -580,7 +551,7 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"Current: {outcome.problem.paper_directory} "
             f"{outcome.problem.id} ({outcome.classification}; "
-            f"{outcome.step_count} next step(s))"
+            f"{outcome.suggestion_count} suggested approach(es))"
         )
 
     classifications = {
