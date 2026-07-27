@@ -13,7 +13,7 @@ import re
 import shutil
 import sys
 import tempfile
-from typing import Sequence
+from typing import Callable, Sequence
 
 import codex_cli
 import open_problem_common as common
@@ -58,6 +58,12 @@ class SolveOutcome:
     status: str
     claim_count: int
     message: str
+
+
+SolveFinishedCallback = Callable[
+    [SolveWork, SolveOutcome | None, str | None],
+    None,
+]
 
 
 def generic_guidance() -> dict:
@@ -545,6 +551,7 @@ def solve_many(
     config_digest: str,
     options: codex_cli.ModelOptions,
     jobs: int,
+    on_finished: SolveFinishedCallback | None = None,
 ) -> tuple[list[SolveOutcome], list[tuple[SolveWork, str]]]:
     outcomes: list[SolveOutcome] = []
     failures: list[tuple[SolveWork, str]] = []
@@ -569,9 +576,16 @@ def solve_many(
         for future in as_completed(future_to_work):
             work = future_to_work[future]
             try:
-                outcomes.append(future.result())
+                outcome = future.result()
             except (common.CodexError, OSError) as exc:
-                failures.append((work, str(exc)))
+                message = str(exc)
+                failures.append((work, message))
+                if on_finished is not None:
+                    on_finished(work, None, message)
+            else:
+                outcomes.append(outcome)
+                if on_finished is not None:
+                    on_finished(work, outcome, None)
     return outcomes, failures
 
 
@@ -815,11 +829,47 @@ def main(argv: list[str] | None = None) -> int:
         codex_version = codex_cli.read_codex_version(codex)
     except common.CodexError as exc:
         parser.error(str(exc))
+    agent_count = min(args.jobs, len(work_items))
+    if agent_count == 1:
+        concurrency = "sequentially with 1 Codex agent"
+    else:
+        concurrency = f"with up to {agent_count} concurrent Codex agents"
+    if len(work_items) == 1:
+        scope = "Solving 1 problem with one adaptive attempt"
+    else:
+        scope = (
+            f"Solving {len(work_items)} problems with one adaptive attempt "
+            "per problem"
+        )
     print(
-        f"Running {len(work_items)} adaptive solver attempt(s) for "
-        f"{len(problems) - len(without_work)} problem(s), with up to "
-        f"{min(args.jobs, len(work_items))} Codex agent(s) at once."
+        f"{scope}, {concurrency}.",
+        flush=True,
     )
+    finished_count = 0
+
+    def report_finished(
+        work: SolveWork,
+        outcome: SolveOutcome | None,
+        error: str | None,
+    ) -> None:
+        nonlocal finished_count
+        finished_count += 1
+        prefix = f"[{finished_count}/{len(work_items)}]"
+        if outcome is not None:
+            print(
+                f"Completed {prefix}: {work.problem.paper_directory} "
+                f"{work.problem.id}/{work.attempt_name} "
+                f"({outcome.message})",
+                flush=True,
+            )
+        else:
+            print(
+                f"Failed {prefix}: {work.problem.paper_directory} "
+                f"{work.problem.id}/{work.attempt_name}: {error}",
+                file=sys.stderr,
+                flush=True,
+            )
+
     outcomes, failures = solve_many(
         work_items,
         codex=codex,
@@ -829,19 +879,8 @@ def main(argv: list[str] | None = None) -> int:
         config_digest=config_digest,
         options=options,
         jobs=args.jobs,
+        on_finished=report_finished,
     )
-    for outcome in outcomes:
-        print(
-            f"Solved: {outcome.work.problem.paper_directory} "
-            f"{outcome.work.problem.id}/{outcome.work.attempt_name} "
-            f"({outcome.message})"
-        )
-    for work, message in failures:
-        print(
-            f"Failed: {work.problem.paper_directory} "
-            f"{work.problem.id}/{work.attempt_name}: {message}",
-            file=sys.stderr,
-        )
 
     review_outcomes: list[review_solutions.ReviewOutcome] = []
     review_failures: list[

@@ -655,6 +655,13 @@ class OpenProblemPipelineTests(unittest.TestCase):
             )
 
             calls: list[solve_open_problems.SolveWork] = []
+            finished: list[
+                tuple[
+                    solve_open_problems.SolveWork,
+                    solve_open_problems.SolveOutcome | None,
+                    str | None,
+                ]
+            ] = []
 
             def fake_solve(work, **kwargs):
                 calls.append(work)
@@ -689,11 +696,18 @@ class OpenProblemPipelineTests(unittest.TestCase):
                     config_digest="config",
                     options=codex_cli.ModelOptions(),
                     jobs=2,
+                    on_finished=lambda work, outcome, error: finished.append(
+                        (work, outcome, error)
+                    ),
                 )
 
             self.assertEqual(failures, [])
             self.assertEqual(len(outcomes), 1)
             self.assertEqual(calls, work_items)
+            self.assertEqual(len(finished), 1)
+            self.assertIs(finished[0][0], work_items[0])
+            self.assertIs(finished[0][1], outcomes[0])
+            self.assertIsNone(finished[0][2])
 
     def test_step_based_triage_manifest_is_deliberately_stale(self):
         with TemporaryDirectory() as temporary:
