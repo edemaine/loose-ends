@@ -374,9 +374,35 @@ The structured review records a verdict, claim-by-claim assessments, blocking
 gaps, and an attention level. The critic independently receives the full paper
 context and does not modify the solver's `attempt.md`.
 
-All three commands share the analyzer's `--model`, `--reasoning-effort`,
-`--fast`, `--codex`, concurrency, Cygwin path conversion, Windows ACL repair,
-and transient startup retry behavior.
+## Human review
+
+`src/human_review.py` turns the critic's high- and medium-attention
+recommendations into a local HTML dashboard:
+
+```sh
+python src/human_review.py papers/edemaine
+```
+
+The command writes `human-review.html` and opens it in a browser. Search and
+attention filters narrow the queue; an always-visible problem list is grouped
+under paper titles, with the selected problem's attempts listed below. Each
+view starts with the paper title and open problem, followed by solver and
+critic summaries, claim assessments, blocking gaps, and recommended next
+steps. The solution summary and rendered `attempt.md` come first; tabs then
+show the rendered `critique.md` and links to the paper analysis, structured
+records, and artifacts. The browser loads Markdown-it and its KaTeX plugin to
+render Markdown and math in one parsing pass, supporting `\(...\)`, `\[...\]`,
+`$...$`, and `$$...$$` delimiters. High-attention items come first.
+
+Use `--latest-per-problem` to suppress older selected attempts,
+`--summary-only` for a compact index, `--attention high` to narrow the queue,
+`--output FILE` to choose the dashboard location, or `--no-open` to avoid
+launching the browser. `--terminal` retains the paged Markdown presentation.
+The command only writes its HTML output and never starts a Codex agent.
+
+All Codex-backed commands share the analyzer's `--model`,
+`--reasoning-effort`, `--fast`, `--codex`, concurrency, Cygwin path
+conversion, Windows ACL repair, and transient startup retry behavior.
 
 ## Development
 

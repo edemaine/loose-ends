@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import codex_cli
 import analyze_papers
+import human_review
 import open_problem_common as common
 import review_solutions
 import solve_open_problems
@@ -422,6 +423,98 @@ class OpenProblemPipelineTests(unittest.TestCase):
             }
             attempt = review_solutions.AttemptRef(problem, directory, result)
             self.assertFalse(review_solutions.is_promising(attempt))
+
+    def test_human_review_prioritizes_attention_and_shows_files(self):
+        with TemporaryDirectory() as temporary:
+            paper = make_analyzed_paper(Path(temporary))
+            problems = common.discover_problem_refs([paper])
+            levels = ("medium", "high")
+            bodies = ("MEDIUM BODY", "HIGH BODY")
+            for problem, level, body in zip(problems, levels, bodies):
+                directory = problem.directory / "attempt-001"
+                directory.mkdir(parents=True)
+                (directory / "attempt.md").write_text(
+                    f"# Attempt\n\n{body}\n",
+                    encoding="utf-8",
+                )
+                solver_result = {
+                    "status": "partial_progress",
+                    "summary": f"{level} solver summary",
+                    "checkable_claims": [],
+                    "artifacts": [],
+                    "warnings": [],
+                }
+                common.write_json(
+                    directory / "solver-result.json",
+                    solver_result,
+                )
+                common.write_json(directory / "manifest.json", {})
+                (directory / "critique.md").write_text(
+                    f"# Critique\n\n{level} critique.\n",
+                    encoding="utf-8",
+                )
+                common.write_json(
+                    directory / "review-result.json",
+                    {
+                        "verdict": "plausible_progress",
+                        "attention": level,
+                        "summary": f"{level} critic summary",
+                        "claim_reviews": [],
+                        "blocking_gaps": ["One gap."],
+                        "recommended_next_steps": ["Check it."],
+                        "warnings": [],
+                    },
+                )
+                common.write_json(
+                    directory / "review-manifest.json",
+                    {
+                        "attempt_digest": common.solver_attempt_digest(
+                            directory
+                        )
+                    },
+                )
+
+            items = human_review.discover_human_reviews(
+                problems,
+                attention={"high", "medium"},
+            )
+            report = human_review.render_human_review_report(items)
+
+            self.assertEqual(
+                [item.attention for item in items],
+                ["high", "medium"],
+            )
+            self.assertLess(
+                report.index("HIGH BODY"),
+                report.index("MEDIUM BODY"),
+            )
+            self.assertIn("critique.md", report)
+            self.assertIn("open-problems.md", report)
+
+            compact = human_review.render_human_review_report(
+                items,
+                include_contents=False,
+            )
+            self.assertNotIn("HIGH BODY", compact)
+
+            dashboard = human_review.render_human_review_html(items)
+            self.assertIn('id="problem-list"', dashboard)
+            self.assertNotIn('id="problem-select"', dashboard)
+            self.assertIn('id="attempt-list"', dashboard)
+            self.assertIn("HIGH BODY", dashboard)
+            self.assertIn("file:///", dashboard)
+            self.assertIn('tab: "attempt"', dashboard)
+            self.assertIn("katex@0.17.0", dashboard)
+            self.assertIn("markdown-it@14.3.0", dashboard)
+            self.assertIn("@mdit/plugin-katex@1.0.1", dashboard)
+            self.assertIn('delimiters: "all"', dashboard)
+            self.assertIn("html: false", dashboard)
+            self.assertNotIn("renderMathInElement", dashboard)
+            self.assertNotIn("auto-render.min.js", dashboard)
+            self.assertLess(
+                dashboard.index('["attempt", "Solution attempt"]'),
+                dashboard.index('["critique", "Critique"]'),
+            )
 
     def test_solver_recovers_core_artifact_mislisting_without_new_turn(self):
         with TemporaryDirectory() as temporary:

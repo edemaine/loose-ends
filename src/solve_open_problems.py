@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import shlex
 import shutil
 import sys
 import tempfile
@@ -945,6 +946,17 @@ def main(argv: list[str] | None = None) -> int:
                 f"  {outcome.attention}: {outcome.attempt.directory} "
                 f"({outcome.verdict})"
             )
+        print("Open the human-review dashboard with:")
+        print(
+            "  "
+            + shlex.join(
+                [
+                    "python",
+                    "src/human_review.py",
+                    *(str(path) for path in args.paths),
+                ]
+            )
+        )
     unreviewed_candidates = [
         outcome
         for outcome in outcomes
