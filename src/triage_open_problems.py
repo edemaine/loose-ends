@@ -14,6 +14,7 @@ import sys
 import tempfile
 from typing import Sequence
 
+import analyze_papers
 import codex_cli
 import open_problem_common as common
 
@@ -435,8 +436,17 @@ def main(argv: list[str] | None = None) -> int:
             allowed=common.EXPLICITNESS_VALUES,
             label="--explicitness",
         )
+        paper_directories = analyze_papers.discover_paper_directories(
+            args.paths
+        )
+        repaired_codex, repaired_directory_count = (
+            common.repair_problem_data_access(
+                paper_directories,
+                codex_command=args.codex,
+            )
+        )
         problems = common.discover_problem_refs(
-            args.paths,
+            paper_directories,
             problem_ids=set(args.problem_ids) if args.problem_ids else None,
             explicitness=explicitness,
         )
@@ -464,6 +474,17 @@ def main(argv: list[str] | None = None) -> int:
         json.JSONDecodeError,
     ) as exc:
         parser.error(str(exc))
+
+    if repaired_directory_count:
+        noun = (
+            "directory"
+            if repaired_directory_count == 1
+            else "directories"
+        )
+        print(
+            f"Repaired Windows access for {repaired_directory_count} "
+            f"generated-data {noun}."
+        )
 
     current: list[TriageOutcome] = []
     stale: list[common.ProblemRef] = []
@@ -500,12 +521,15 @@ def main(argv: list[str] | None = None) -> int:
 
     if stale:
         try:
-            codex = codex_cli.resolve_codex_executable(args.codex)
+            codex = (
+                repaired_codex
+                or codex_cli.resolve_codex_executable(args.codex)
+            )
             codex_version = codex_cli.read_codex_version(codex)
         except common.CodexError as exc:
             parser.error(str(exc))
     else:
-        codex = args.codex
+        codex = repaired_codex or args.codex
         codex_version = "not queried"
 
     outcomes = list(current)

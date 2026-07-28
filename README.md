@@ -161,8 +161,11 @@ Windows form before invoking the Windows-native Codex CLI. On Windows, it also
 adds an inheritable ACL entry for the invoking account so that Cygwin Python can
 validate files created by the restricted Codex sandbox account. After Codex
 finishes, it removes any explicit deny entry for that account and reapplies
-recursive access before validating and cleaning the workspace. If only
-temporary-workspace cleanup fails after installation, the run remains
+recursive access before validating and cleaning the workspace. If older
+installed outputs still carry those sandbox deny entries, triage
+automatically repairs the selected papers' `analysis/` and `attempts/` trees
+before reading them; this is a local ACL operation and starts no model turn.
+If only temporary-workspace cleanup fails after installation, the run remains
 successful and the path is recorded as a warning in `run.log`.
 For example, the current frontier model with extra-high reasoning is:
 

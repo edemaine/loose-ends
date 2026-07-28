@@ -178,6 +178,45 @@ class OpenProblemPipelineTests(unittest.TestCase):
             )
             self.assertFalse(common.triage_is_current(problems[0]))
 
+    def test_repairs_inaccessible_generated_data_before_triage(self):
+        with TemporaryDirectory() as temporary:
+            paper = make_analyzed_paper(Path(temporary))
+            attempts = paper / common.ATTEMPTS_DIRECTORY
+            attempts.mkdir()
+            with (
+                patch.object(
+                    codex_cli,
+                    "is_windows_host",
+                    return_value=True,
+                ),
+                patch.object(
+                    codex_cli,
+                    "workspace_is_user_accessible",
+                    side_effect=lambda path: path != paper / "analysis",
+                ),
+                patch.object(
+                    codex_cli,
+                    "resolve_codex_executable",
+                    return_value="resolved-codex",
+                ) as resolve,
+                patch.object(
+                    codex_cli,
+                    "normalize_workspace_access",
+                ) as normalize,
+            ):
+                codex, repaired = common.repair_problem_data_access(
+                    [paper],
+                    codex_command="codex",
+                )
+
+            self.assertEqual(codex, "resolved-codex")
+            self.assertEqual(repaired, 1)
+            resolve.assert_called_once_with("codex")
+            normalize.assert_called_once_with(
+                paper / "analysis",
+                "resolved-codex",
+            )
+
     def test_solver_uses_full_context_then_reviewer_triages_progress(self):
         with TemporaryDirectory() as temporary:
             paper = make_analyzed_paper(Path(temporary))

@@ -311,7 +311,8 @@ def workspace_is_user_accessible(workspace: Path) -> bool:
             for name in filenames:
                 path = root_path / name
                 path.stat()
-                path.read_bytes()
+                with path.open("rb") as source:
+                    source.read(1)
     except OSError:
         return False
     return True

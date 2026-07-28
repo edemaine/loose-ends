@@ -205,6 +205,31 @@ def group_by_paper(
     return dict(sorted(grouped.items(), key=lambda item: os.path.normcase(str(item[0]))))
 
 
+def repair_problem_data_access(
+    paper_directories: Iterable[Path],
+    *,
+    codex_command: str,
+) -> tuple[str | None, int]:
+    """Repair restrictive sandbox ACLs in generated paper data on Windows."""
+    if not codex_cli.is_windows_host():
+        return None, 0
+    inaccessible: list[Path] = []
+    for paper in paper_directories:
+        for name in ("analysis", ATTEMPTS_DIRECTORY):
+            directory = paper / name
+            if (
+                directory.is_dir()
+                and not codex_cli.workspace_is_user_accessible(directory)
+            ):
+                inaccessible.append(directory)
+    if not inaccessible:
+        return None, 0
+    codex = codex_cli.resolve_codex_executable(codex_command)
+    for directory in inaccessible:
+        codex_cli.normalize_workspace_access(directory, codex)
+    return codex, len(inaccessible)
+
+
 def _hash_file(digest, path: Path, relative: str) -> None:
     digest.update(relative.encode("utf-8", errors="surrogateescape"))
     digest.update(b"\0")
