@@ -588,6 +588,13 @@ class OpenProblemPipelineTests(unittest.TestCase):
             self.assertNotIn("HIGH BODY", compact)
 
             dashboard = human_review.render_human_review_html(items)
+            self.assertEqual(
+                human_review._extract_open_problem_markdown(
+                    paper / "analysis" / "open-problems.md",
+                    "OP-001",
+                ),
+                "Prove it.",
+            )
             self.assertIn('id="problem-list"', dashboard)
             self.assertNotIn('id="problem-select"', dashboard)
             self.assertIn('id="attempt-list"', dashboard)
@@ -606,6 +613,16 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 dashboard,
             )
             self.assertIn("HIGH BODY", dashboard)
+            self.assertIn('"problemStatement": "Construct it."', dashboard)
+            self.assertIn("Open problem statement", dashboard)
+            self.assertIn(
+                "markdownBody(item.criticSummary, \"No critic summary.\")",
+                dashboard,
+            )
+            self.assertIn(
+                "repeat(2, minmax(0, 1fr))",
+                dashboard,
+            )
             self.assertIn("file:///", dashboard)
             self.assertIn('tab: "attempt"', dashboard)
             self.assertIn("katex@0.17.0", dashboard)

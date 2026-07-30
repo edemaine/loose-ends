@@ -392,13 +392,14 @@ claimed solutions, claimed counterexamples, either kind of resolution, or only
 resolution claims that the critic rated `strong_candidate`; these attempts are
 also labeled in the queue. An always-visible problem list is grouped under
 paper titles, with the selected problem's attempts listed below. Each view
-starts with the paper title and open problem, followed by solver and critic
-summaries, claim assessments, blocking gaps, and recommended next steps. The
-solution summary and rendered `attempt.md` come first; tabs then show the
-rendered `critique.md` and links to the paper analysis, structured records, and
-artifacts. The browser loads Markdown-it and its KaTeX plugin to render Markdown
-and math in one parsing pass, supporting `\(...\)`, `\[...\]`, `$...$`, and
-`$$...$$` delimiters. High-attention items come first.
+starts with the paper title and full extracted open-problem statement, followed
+by Markdown-rendered solver and critic summaries, claim assessments, blocking
+gaps, and recommended next steps. The solution summary and rendered
+`attempt.md` come first; tabs then show the rendered `critique.md` and links to
+the paper analysis, structured records, and artifacts. The browser loads
+Markdown-it and its KaTeX plugin to render Markdown and math in one parsing
+pass, supporting `\(...\)`, `\[...\]`, `$...$`, and `$$...$$` delimiters.
+High-attention items come first.
 
 Use `--latest-per-problem` to suppress older selected attempts,
 `--summary-only` for a compact index, `--attention high` to narrow the queue,

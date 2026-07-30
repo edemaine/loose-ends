@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path, PureWindowsPath
 import pydoc
+import re
 import subprocess
 import sys
 from typing import Iterable, Sequence
@@ -178,16 +179,55 @@ def _read_optional_text(path: Path) -> str:
         return ""
 
 
+_OPEN_PROBLEM_HEADING_RE = re.compile(
+    r"^(?P<marks>#{1,6})[ \t]+(?P<id>OP-[0-9]+)\b.*$",
+    re.IGNORECASE,
+)
+_MARKDOWN_HEADING_RE = re.compile(r"^(?P<marks>#{1,6})[ \t]+")
+
+
+def _extract_open_problem_markdown(path: Path, problem_id: str) -> str:
+    """Return one problem's Markdown body from open-problems.md."""
+    lines = _read_optional_text(path).replace("\r\n", "\n").splitlines()
+    start = None
+    heading_level = None
+    for index, line in enumerate(lines):
+        match = _OPEN_PROBLEM_HEADING_RE.match(line)
+        if match and match.group("id").upper() == problem_id.upper():
+            start = index + 1
+            heading_level = len(match.group("marks"))
+            break
+    if start is None or heading_level is None:
+        return ""
+
+    end = len(lines)
+    for index in range(start, len(lines)):
+        match = _MARKDOWN_HEADING_RE.match(lines[index])
+        if match and len(match.group("marks")) <= heading_level:
+            end = index
+            break
+    return "\n".join(lines[start:end]).strip()
+
+
 def _html_data(
     items: Sequence[HumanReviewItem],
     *,
     include_contents: bool,
 ) -> list[dict]:
     data: list[dict] = []
+    problem_statements: dict[tuple[Path, str], str] = {}
     for index, item in enumerate(items):
         attempt = item.attempt
         problem = attempt.problem
         paper = problem.paper_directory
+        problem_key = (paper, problem.id)
+        if include_contents and problem_key not in problem_statements:
+            problem_statements[problem_key] = (
+                _extract_open_problem_markdown(
+                    paper / "analysis" / "open-problems.md",
+                    problem.id,
+                )
+            )
         paths = _relevant_paths(item)
         files = []
         for path in paths:
@@ -214,6 +254,11 @@ def _html_data(
                 "paperDirectory": str(paper),
                 "problemId": problem.id,
                 "problemTitle": problem.title,
+                "problemStatement": (
+                    problem_statements.get(problem_key, "")
+                    if include_contents
+                    else ""
+                ),
                 "explicitness": problem.explicitness,
                 "attemptName": attempt.name,
                 "attemptNumber": _attempt_number(attempt),
@@ -322,7 +367,7 @@ def render_human_review_html(
     .shell {
       min-height: 100vh;
       display: grid;
-      grid-template-columns: minmax(290px, 370px) 1fr;
+      grid-template-columns: clamp(290px, 25vw, 370px) minmax(0, 1fr);
     }
     .rail {
       min-height: 100vh;
@@ -475,14 +520,17 @@ def render_human_review_html(
     }
     .attempt-card strong { display: block; color: var(--navy); }
     .attempt-card span { color: var(--muted); font-size: 12px; }
-    .main { min-width: 0; padding: 40px clamp(24px, 5vw, 78px) 80px; }
+    .main {
+      min-width: 0;
+      padding: 40px clamp(18px, 4vw, 78px) 80px;
+    }
     .empty {
       max-width: 720px;
       margin: 15vh auto;
       color: var(--muted);
       text-align: center;
     }
-    .review { max-width: 1080px; margin: 0 auto; }
+    .review { min-width: 0; max-width: 1080px; margin: 0 auto; }
     .topline {
       display: flex;
       align-items: center;
@@ -533,11 +581,12 @@ def render_human_review_html(
     .metadata { color: var(--muted); }
     .summary-grid {
       display: grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 15px;
       margin: 28px 0;
     }
     .summary {
+      min-width: 0;
       border: 1px solid var(--line);
       border-radius: 14px;
       background: var(--panel);
@@ -551,6 +600,15 @@ def render_human_review_html(
       letter-spacing: 0.025em;
     }
     .summary p { margin: 0; }
+    .problem-statement {
+      margin-top: 26px;
+    }
+    .problem-statement > h2 {
+      margin: 0 0 9px;
+      color: var(--navy);
+      font-size: 14px;
+      letter-spacing: 0.025em;
+    }
     .section {
       margin-top: 17px;
       border-top: 1px solid var(--line);
@@ -664,6 +722,20 @@ def render_human_review_html(
       overflow-y: hidden;
       padding: 4px 0;
     }
+    .summary .markdown-body {
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      padding: 0;
+      overflow: auto;
+      font: inherit;
+    }
+    .summary .markdown-body p { margin: 0.65em 0; }
+    .summary .markdown-body h1, .summary .markdown-body h2,
+    .summary .markdown-body h3, .summary .markdown-body h4,
+    .summary .markdown-body h5, .summary .markdown-body h6 {
+      font-size: 1em;
+    }
     .file-list { display: grid; gap: 8px; }
     .file {
       display: block;
@@ -708,6 +780,9 @@ def render_human_review_html(
         --shadow: 0 18px 50px rgba(0, 0, 0, 0.28);
       }
     }
+    @media (max-width: 1200px) {
+      .summary-grid { grid-template-columns: 1fr; }
+    }
     @media (max-width: 850px) {
       .shell { display: block; }
       .rail {
@@ -718,7 +793,6 @@ def render_human_review_html(
         border-bottom: 1px solid var(--line);
       }
       .main { padding-top: 30px; }
-      .summary-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -855,6 +929,7 @@ def render_human_review_html(
         if (!query) return true;
         const haystack = [
           item.paperTitle, item.problemId, item.problemTitle,
+          item.problemStatement,
           item.attemptName, item.criticSummary, item.solverSummary,
           item.solverStatus, item.verdict
         ].join(" ").toLowerCase();
@@ -879,6 +954,18 @@ def render_human_review_html(
       values.forEach(value => list.append(node("li", "", String(value))));
       section.append(list);
       parent.append(section);
+    }
+
+    function markdownBody(markdown, missingText) {
+      const body = node("div", "markdown-body");
+      if (!markdown) {
+        body.append(node("p", "", missingText));
+      } else if (markdownRenderer) {
+        body.innerHTML = markdownRenderer.render(markdown);
+      } else {
+        body.append(node("pre", "markdown-source", markdown));
+      }
+      return body;
     }
 
     function renderProblemControls(items) {
@@ -1011,16 +1098,26 @@ def render_human_review_html(
           `${authors}${authors ? " · " : ""}${item.explicitness}`)
       );
 
+      const problemStatement = node("section", "problem-statement");
+      problemStatement.append(
+        node("h2", "", "Open problem statement"),
+        markdownBody(
+          item.problemStatement,
+          "The full statement was not found in open-problems.md."
+        )
+      );
+      review.append(problemStatement);
+
       const summaries = node("div", "summary-grid");
       const critic = node("section", "summary");
       critic.append(
         node("h2", "", "Critic assessment"),
-        node("p", "", item.criticSummary || "No critic summary.")
+        markdownBody(item.criticSummary, "No critic summary.")
       );
       const solver = node("section", "summary");
       solver.append(
         node("h2", "", `Solver · ${item.solverStatus}`),
-        node("p", "", item.solverSummary || "No solver summary.")
+        markdownBody(item.solverSummary, "No solver summary.")
       );
       summaries.append(solver, critic);
       review.append(summaries);
@@ -1084,18 +1181,10 @@ def render_human_review_html(
         });
         panel.append(list);
       } else {
-        const documentBody = node("div", "markdown-body");
         const markdown = panels[state.tab];
-        if (!markdown) {
-          documentBody.append(
-            node("p", "", "Content was omitted from this report.")
-          );
-        } else if (markdownRenderer) {
-          documentBody.innerHTML = markdownRenderer.render(markdown);
-        } else {
-          documentBody.append(node("pre", "markdown-source", markdown));
-        }
-        panel.append(documentBody);
+        panel.append(
+          markdownBody(markdown, "Content was omitted from this report.")
+        );
       }
       review.append(panel);
     }
