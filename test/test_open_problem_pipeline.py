@@ -217,6 +217,57 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 "resolved-codex",
             )
 
+    def test_synthesizes_missing_triage_markdown_from_valid_json(self):
+        with TemporaryDirectory() as temporary:
+            paper = make_analyzed_paper(Path(temporary))
+            problem = common.discover_problem_refs(
+                [paper],
+                problem_ids={"OP-001"},
+            )[0]
+            workspace = Path(temporary) / "workspace"
+            workspace.mkdir()
+            common.write_json(
+                workspace / "agent-result.json",
+                {
+                    "status": "partial",
+                    "triages": [
+                        {
+                            "problem_id": problem.id,
+                            "classification": "attempt",
+                            "rationale": "The paper supplies a useful lemma.",
+                            "promising_features": ["R-001 is close."],
+                            "obstacles": ["One estimate is missing."],
+                            "suggested_approaches": [
+                                {
+                                    "id": "proof",
+                                    "mode": "proof",
+                                    "suggestion": "Prove the estimate.",
+                                    "why_promising": "It would close the gap.",
+                                    "abandon_if": "A small case refutes it.",
+                                }
+                            ],
+                        }
+                    ],
+                    "warnings": [],
+                },
+            )
+
+            result, entries = triage_open_problems.validate_triage_result(
+                workspace / "agent-result.json",
+                workspace,
+                [problem],
+            )
+
+            report = (
+                workspace
+                / f"triage-{problem.id}.md"
+            ).read_text(encoding="utf-8")
+            self.assertIn(f"# Triage {problem.id}", report)
+            self.assertIn("**attempt**", report)
+            self.assertIn("### proof — proof", report)
+            self.assertEqual(entries[problem.id]["classification"], "attempt")
+            self.assertIn("Driver synthesized", result["warnings"][-1])
+
     def test_solver_uses_full_context_then_reviewer_triages_progress(self):
         with TemporaryDirectory() as temporary:
             paper = make_analyzed_paper(Path(temporary))

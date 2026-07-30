@@ -214,7 +214,17 @@ class AnalyzePaperTests(unittest.TestCase):
 
             command = commands[0]
             self.assertIn("--ephemeral", command)
+            self.assertIn("--ignore-user-config", command)
             self.assertIn("shell_snapshot", command)
+            self.assertIn("skill_mcp_dependency_install", command)
+            self.assertIn('web_search="disabled"', command)
+            self.assertIn("apps._default.enabled=false", command)
+            self.assertIn("agents.enabled=false", command)
+            self.assertIn(
+                "sandbox_workspace_write.network_access=false",
+                command,
+            )
+            self.assertIn('windows.sandbox="elevated"', command)
             self.assertIn("--json", command)
             self.assertIn("workspace-write", command)
             self.assertNotIn("--add-dir", command)

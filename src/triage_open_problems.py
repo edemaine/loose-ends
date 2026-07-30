@@ -64,6 +64,61 @@ def render_prompt(
     )
 
 
+def render_triage_markdown(entry: dict) -> str:
+    """Render a structured triage entry as its human-readable report."""
+    problem_id = entry["problem_id"]
+    classification = entry["classification"]
+    lines = [
+        f"# Triage {problem_id}",
+        "",
+        "## Classification",
+        "",
+        f"**{classification}**",
+        "",
+        entry["rationale"],
+        "",
+        "## Promising features and evidence",
+        "",
+    ]
+    features = entry["promising_features"]
+    lines.extend(
+        (f"- {feature}" for feature in features)
+        if features
+        else ("- None identified.",)
+    )
+    lines.extend(("", "## Obstacles and warning signs", ""))
+    obstacles = entry["obstacles"]
+    lines.extend(
+        (f"- {obstacle}" for obstacle in obstacles)
+        if obstacles
+        else ("- None identified.",)
+    )
+    lines.extend(("", "## Suggested approaches", ""))
+    suggestions = entry["suggested_approaches"]
+    if not suggestions:
+        lines.extend(
+            (
+                "No concrete approach is currently justified by the supplied "
+                "paper analysis and attempt history.",
+                "",
+            )
+        )
+    for suggestion in suggestions:
+        lines.extend(
+            (
+                f"### {suggestion['id']} — {suggestion['mode']}",
+                "",
+                suggestion["suggestion"],
+                "",
+                f"**Why promising:** {suggestion['why_promising']}",
+                "",
+                f"**Abandon or reconsider if:** {suggestion['abandon_if']}",
+                "",
+            )
+        )
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def validate_triage_result(
     result_path: Path,
     workspace: Path,
@@ -82,6 +137,7 @@ def validate_triage_result(
         raise common.CodexError("triage response has no triages array")
     requested = {problem.id for problem in problems}
     by_id: dict[str, dict] = {}
+    synthesized_reports: list[str] = []
     for entry in entries:
         if not isinstance(entry, dict):
             raise common.CodexError("a triage entry is not an object")
@@ -151,6 +207,18 @@ def validate_triage_result(
                         f"has no {field}"
                     )
         report = workspace / f"triage-{problem_id}.md"
+        if not report.exists():
+            try:
+                report.write_text(
+                    render_triage_markdown(entry),
+                    encoding="utf-8",
+                )
+            except OSError as exc:
+                raise common.CodexError(
+                    f"Codex did not create triage report for {problem_id}, "
+                    f"and the driver could not synthesize it: {exc}"
+                ) from exc
+            synthesized_reports.append(problem_id)
         contents = common.validate_markdown(
             report,
             description=f"triage report for {problem_id}",
@@ -165,6 +233,16 @@ def validate_triage_result(
         raise common.CodexError(
             "triage response omitted: " + ", ".join(sorted(missing))
         )
+    if synthesized_reports:
+        result = {
+            **result,
+            "warnings": [
+                *warnings,
+                "Driver synthesized missing Markdown triage report(s) from "
+                "the validated structured response: "
+                + ", ".join(synthesized_reports),
+            ],
+        }
     return result, by_id
 
 

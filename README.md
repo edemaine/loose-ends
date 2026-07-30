@@ -406,6 +406,13 @@ The command only writes its HTML output and never starts a Codex agent.
 All Codex-backed commands share the analyzer's `--model`,
 `--reasoning-effort`, `--fast`, `--codex`, concurrency, Cygwin path
 conversion, Windows ACL repair, and transient startup retry behavior.
+Automated Codex runs ignore the invoking user's Codex configuration and
+explicitly disable MCP/plugin app tools, web search, shell network access,
+automatic MCP dependency installation, and nested agent spawning. Saved Codex
+authentication is still used, as documented for `--ignore-user-config`. On
+Windows, the launcher explicitly restores the elevated sandbox implementation
+so `workspace-write` remains effective even though user configuration is
+ignored.
 
 ## Development
 
