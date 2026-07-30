@@ -318,7 +318,7 @@ def render_human_review_html(
       font: 15px/1.55 ui-sans-serif, system-ui, -apple-system,
         "Segoe UI", sans-serif;
     }
-    button, input { font: inherit; }
+    button, input, select { font: inherit; }
     .shell {
       min-height: 100vh;
       display: grid;
@@ -370,6 +370,19 @@ def render_human_review_html(
       outline: none;
     }
     input[type="search"]:focus {
+      border-color: var(--teal);
+      box-shadow: 0 0 0 3px rgba(40, 120, 111, 0.14);
+    }
+    select {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: var(--surface);
+      color: var(--ink);
+      padding: 9px 10px;
+      outline: none;
+    }
+    select:focus {
       border-color: var(--teal);
       box-shadow: 0 0 0 3px rgba(40, 120, 111, 0.14);
     }
@@ -489,6 +502,14 @@ def render_human_review_html(
     .badge.high { color: var(--high); background: var(--high-bg); }
     .badge.medium { color: var(--medium); background: var(--medium-bg); }
     .badge.low, .badge.none { color: var(--low); background: var(--low-bg); }
+    .badge.solution {
+      color: #256046;
+      background: #dcefe4;
+    }
+    .badge.counterexample {
+      color: #744192;
+      background: #eee2f5;
+    }
     .verdict {
       color: var(--muted);
       font-size: 13px;
@@ -712,6 +733,17 @@ def render_human_review_html(
           <input id="search" type="search"
             placeholder="Paper, problem, attempt…" autocomplete="off">
         </label>
+        <label class="control">Claim focus
+          <select id="claim-filter">
+            <option value="all">All reviewed attempts</option>
+            <option value="resolution">Any claimed resolution</option>
+            <option value="strong-resolution">
+              Strong claimed resolution
+            </option>
+            <option value="solution">Claimed solutions</option>
+            <option value="counterexample">Claimed counterexamples</option>
+          </select>
+        </label>
         <div class="filters" aria-label="Attention filters">
           <label class="filter"><input id="filter-high" type="checkbox" checked>
             High</label>
@@ -732,7 +764,7 @@ def render_human_review_html(
     <main class="main">
       <div class="empty" id="empty" hidden>
         <h1>No matching reviews</h1>
-        <p>Change the search or attention filters.</p>
+        <p>Change the search, claim focus, or attention filters.</p>
       </div>
       <article class="review" id="review"></article>
     </main>
@@ -744,6 +776,7 @@ def render_human_review_html(
     );
     const state = { selectedProblem: "", selectedItem: "", tab: "attempt" };
     const search = document.getElementById("search");
+    const claimFilter = document.getElementById("claim-filter");
     const high = document.getElementById("filter-high");
     const medium = document.getElementById("filter-medium");
     const low = document.getElementById("filter-low");
@@ -789,15 +822,41 @@ def render_human_review_html(
       return element;
     }
 
+    function resolutionKind(item) {
+      if (item.solverStatus === "candidate_solution") return "solution";
+      if (item.solverStatus === "candidate_counterexample") {
+        return "counterexample";
+      }
+      return "";
+    }
+
+    function matchesClaimFocus(item) {
+      const kind = resolutionKind(item);
+      switch (claimFilter.value) {
+        case "resolution":
+          return Boolean(kind);
+        case "strong-resolution":
+          return Boolean(kind) && item.verdict === "strong_candidate";
+        case "solution":
+          return kind === "solution";
+        case "counterexample":
+          return kind === "counterexample";
+        default:
+          return true;
+      }
+    }
+
     function filteredItems() {
       const query = search.value.trim().toLowerCase();
       return allItems.filter(item => {
         if (attentionFilters[item.attention] &&
             !attentionFilters[item.attention].checked) return false;
+        if (!matchesClaimFocus(item)) return false;
         if (!query) return true;
         const haystack = [
           item.paperTitle, item.problemId, item.problemTitle,
-          item.attemptName, item.criticSummary, item.solverSummary
+          item.attemptName, item.criticSummary, item.solverSummary,
+          item.solverStatus, item.verdict
         ].join(" ").toLowerCase();
         return haystack.includes(query);
       });
@@ -896,9 +955,16 @@ def render_human_review_html(
           `attempt-card${item.id === state.selectedItem ? " active" : ""}`
         );
         button.type = "button";
+        const resolution = resolutionKind(item);
         button.append(
           node("strong", "", item.attemptName),
-          node("span", "", `${item.attention.toUpperCase()} · ${item.verdict}`)
+          node(
+            "span",
+            "",
+            `${item.attention.toUpperCase()} · ${item.verdict}${
+              resolution ? ` · ${resolution.toUpperCase()} CLAIM` : ""
+            }`
+          )
         );
         button.addEventListener("click", () => {
           state.selectedItem = item.id;
@@ -917,6 +983,16 @@ def render_human_review_html(
         node("span", `badge ${item.attention}`, item.attention),
         node("span", "verdict", `${item.verdict} · ${item.attemptName}`)
       );
+      const resolution = resolutionKind(item);
+      if (resolution) {
+        top.append(
+          node(
+            "span",
+            `badge ${resolution}`,
+            `${resolution} claim`
+          )
+        );
+      }
       if (!item.current) top.append(node("span", "stale", "STALE REVIEW"));
       review.append(top);
       review.append(node("h1", "", item.paperTitle));
@@ -1035,7 +1111,18 @@ def render_human_review_html(
         .filter(([, count]) => count)
         .map(([level, count]) => `${count} ${level}`)
         .join(" · ");
-      queueCount.textContent = `${items.length} shown · ${countText}`;
+      const focusLabels = {
+        resolution: "claimed resolutions",
+        "strong-resolution": "strong claimed resolutions",
+        solution: "claimed solutions",
+        counterexample: "claimed counterexamples"
+      };
+      const countParts = [`${items.length} shown`];
+      if (countText) countParts.push(countText);
+      if (focusLabels[claimFilter.value]) {
+        countParts.push(focusLabels[claimFilter.value]);
+      }
+      queueCount.textContent = countParts.join(" · ");
       renderProblemControls(items);
       const selected = items.find(item => item.id === state.selectedItem);
       empty.hidden = Boolean(selected);
@@ -1049,6 +1136,7 @@ def render_human_review_html(
       render();
     }
     search.addEventListener("input", updateFilters);
+    claimFilter.addEventListener("change", updateFilters);
     high.addEventListener("change", updateFilters);
     medium.addEventListener("change", updateFilters);
     low.addEventListener("change", updateFilters);

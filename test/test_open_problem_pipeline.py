@@ -591,6 +591,20 @@ class OpenProblemPipelineTests(unittest.TestCase):
             self.assertIn('id="problem-list"', dashboard)
             self.assertNotIn('id="problem-select"', dashboard)
             self.assertIn('id="attempt-list"', dashboard)
+            self.assertIn('id="claim-filter"', dashboard)
+            self.assertIn(
+                '<option value="resolution">Any claimed resolution</option>',
+                dashboard,
+            )
+            self.assertIn('case "strong-resolution":', dashboard)
+            self.assertIn(
+                'item.solverStatus === "candidate_solution"',
+                dashboard,
+            )
+            self.assertIn(
+                'item.solverStatus === "candidate_counterexample"',
+                dashboard,
+            )
             self.assertIn("HIGH BODY", dashboard)
             self.assertIn("file:///", dashboard)
             self.assertIn('tab: "attempt"', dashboard)
