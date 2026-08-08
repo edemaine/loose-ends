@@ -33,8 +33,10 @@ promising, and an observation that should cause it to be abandoned or
 reconsidered. Do not turn these ideas into a sequential plan or dependency
 graph. A downstream solver receives all suggestions in one adaptive research
 turn and may combine, reorder, abandon, or replace them after reading the full
-paper and attempt history. `literature_check` may be suggested, but the
-downstream solver will not have internet access unless separately arranged.
+paper and attempt history. `literature_check` may be suggested when present-day
+status is especially important, but do not classify a problem as resolved from
+model memory. A separate optional literature-search phase can verify current
+status and prepare later work for the downstream solver.
 
 Write one substantive Markdown report named `triage-OP-NNN.md` in the current
 working directory for every requested ID. Each report should contain:

@@ -1,0 +1,121 @@
+{
+  "type": "object",
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["complete", "partial"]
+    },
+    "literature": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "problem_id": {"type": "string"},
+          "resolution_status": {
+            "type": "string",
+            "enum": [
+              "resolved",
+              "partially_resolved",
+              "no_resolution_found",
+              "uncertain"
+            ]
+          },
+          "confidence": {
+            "type": "string",
+            "enum": ["low", "medium", "high"]
+          },
+          "status_summary": {"type": "string"},
+          "exact_match_analysis": {"type": "string"},
+          "residual_problem": {"type": "string"},
+          "solver_briefing": {"type": "string"},
+          "sources": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {"type": "string"},
+                "role": {
+                  "type": "string",
+                  "enum": [
+                    "resolution",
+                    "partial_result",
+                    "special_case",
+                    "technique",
+                    "counterexample",
+                    "lower_bound",
+                    "survey",
+                    "terminology",
+                    "other"
+                  ]
+                },
+                "priority": {
+                  "type": "string",
+                  "enum": ["high", "medium", "low"]
+                },
+                "title": {"type": "string"},
+                "authors": {
+                  "type": "array",
+                  "items": {"type": "string"}
+                },
+                "publication_year": {"type": "string"},
+                "url": {"type": "string"},
+                "source_type": {
+                  "type": "string",
+                  "enum": [
+                    "primary_source",
+                    "secondary_source",
+                    "search_result_only"
+                  ]
+                },
+                "result_statement": {"type": "string"},
+                "relevance": {"type": "string"},
+                "limitations": {"type": "string"}
+              },
+              "required": [
+                "id",
+                "role",
+                "priority",
+                "title",
+                "authors",
+                "publication_year",
+                "url",
+                "source_type",
+                "result_statement",
+                "relevance",
+                "limitations"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "search_queries": {
+            "type": "array",
+            "items": {"type": "string"}
+          },
+          "warnings": {
+            "type": "array",
+            "items": {"type": "string"}
+          }
+        },
+        "required": [
+          "problem_id",
+          "resolution_status",
+          "confidence",
+          "status_summary",
+          "exact_match_analysis",
+          "residual_problem",
+          "solver_briefing",
+          "sources",
+          "search_queries",
+          "warnings"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {"type": "string"}
+    }
+  },
+  "required": ["status", "literature", "warnings"],
+  "additionalProperties": false
+}

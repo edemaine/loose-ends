@@ -18,6 +18,16 @@
     "summary": {
       "type": "string"
     },
+    "novelty_assessment": {
+      "type": "string",
+      "enum": [
+        "apparently_new",
+        "known_result",
+        "new_extension",
+        "mixed",
+        "uncertain"
+      ]
+    },
     "claim_reviews": {
       "type": "array",
       "items": {
@@ -60,6 +70,7 @@
     "verdict",
     "attention",
     "summary",
+    "novelty_assessment",
     "claim_reviews",
     "blocking_gaps",
     "recommended_next_steps",

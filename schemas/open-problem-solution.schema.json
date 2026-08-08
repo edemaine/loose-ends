@@ -8,11 +8,36 @@
         "useful_negative_result",
         "partial_progress",
         "candidate_counterexample",
-        "candidate_solution"
+        "candidate_solution",
+        "known_resolution"
       ]
     },
     "summary": {
       "type": "string"
+    },
+    "novelty_status": {
+      "type": "string",
+      "enum": [
+        "apparently_new",
+        "known_result_reconstruction",
+        "new_extension",
+        "mixed",
+        "unknown"
+      ]
+    },
+    "external_sources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "title": {"type": "string"},
+          "url": {"type": "string"},
+          "used_for": {"type": "string"},
+          "verification": {"type": "string"}
+        },
+        "required": ["title", "url", "used_for", "verification"],
+        "additionalProperties": false
+      }
     },
     "checkable_claims": {
       "type": "array",
@@ -67,6 +92,8 @@
   "required": [
     "status",
     "summary",
+    "novelty_status",
+    "external_sources",
     "checkable_claims",
     "artifacts",
     "warnings"

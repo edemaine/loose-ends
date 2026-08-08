@@ -34,6 +34,13 @@ VERDICTS = (
 )
 ATTENTION_LEVELS = ("none", "low", "medium", "high")
 REVIEW_MODES = ("promising", "all")
+NOVELTY_ASSESSMENTS = (
+    "apparently_new",
+    "known_result",
+    "new_extension",
+    "mixed",
+    "uncertain",
+)
 
 
 @dataclass(frozen=True)
@@ -98,6 +105,10 @@ def review_is_current(
         attempt.directory
     ):
         return False
+    if manifest.get(
+        "literature_snapshot_digest"
+    ) != common.literature_snapshot_digest(attempt.problem):
+        return False
     if (
         config_digest is not None
         and manifest.get("config_digest") != config_digest
@@ -145,6 +156,10 @@ def validate_review_result(
         "summary"
     ].strip():
         raise common.CodexError("review response has no summary")
+    if result.get("novelty_assessment") not in NOVELTY_ASSESSMENTS:
+        raise common.CodexError(
+            "review response has invalid novelty_assessment"
+        )
     for field in ("blocking_gaps", "recommended_next_steps", "warnings"):
         values = result.get(field)
         if not isinstance(values, list) or not all(
@@ -214,6 +229,7 @@ def _install_review(
     config_digest: str,
     codex_version: str,
     options: codex_cli.ModelOptions,
+    web_search: str,
 ) -> None:
     staging = Path(
         tempfile.mkdtemp(prefix=".review-install-", dir=attempt.directory)
@@ -230,11 +246,15 @@ def _install_review(
                 "schema_version": 1,
                 "generated_at": common.utc_now(),
                 "attempt_digest": attempt_digest,
+                "literature_snapshot_digest": (
+                    common.literature_snapshot_digest(attempt.problem)
+                ),
                 "config_digest": config_digest,
                 "codex_version": codex_version,
                 "requested_model": options.model,
                 "requested_reasoning_effort": options.reasoning_effort,
                 "requested_fast_mode": options.fast,
+                "requested_web_search": web_search,
                 "verdict": result["verdict"],
                 "attention": result["attention"],
             },
@@ -271,6 +291,7 @@ def review_attempt(
     schema_path: Path,
     config_digest: str,
     options: codex_cli.ModelOptions,
+    web_search: str = "live",
     launch_interval: float = codex_cli.CODEX_LAUNCH_INTERVAL_SECONDS,
 ) -> ReviewOutcome:
     """Run and install one independent review."""
@@ -285,6 +306,9 @@ def review_attempt(
             include_paper=True,
             include_history=True,
             include_triage=True,
+            include_literature=common.literature_is_current(
+                attempt.problem
+            ),
             exclude_review_for=attempt.directory,
         )
         prompt = render_prompt(
@@ -298,6 +322,7 @@ def review_attempt(
             prompt=prompt,
             schema_path=schema_path,
             options=options,
+            web_search=web_search,
             launch_interval=launch_interval,
         )
         result = validate_review_result(result_path, workspace, attempt)
@@ -309,6 +334,7 @@ def review_attempt(
             config_digest=config_digest,
             codex_version=codex_version,
             options=options,
+            web_search=web_search,
         )
     except (common.CodexError, OSError) as exc:
         raise common.CodexError(
@@ -340,6 +366,7 @@ def review_many(
     config_digest: str,
     options: codex_cli.ModelOptions,
     jobs: int,
+    web_search: str = "live",
 ) -> tuple[list[ReviewOutcome], list[tuple[AttemptRef, str]]]:
     outcomes: list[ReviewOutcome] = []
     failures: list[tuple[AttemptRef, str]] = []
@@ -356,6 +383,7 @@ def review_many(
                 schema_path=schema_path,
                 config_digest=config_digest,
                 options=options,
+                web_search=web_search,
             ): attempt
             for attempt in attempts
         }
@@ -447,6 +475,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"final-response JSON schema (default: {DEFAULT_SCHEMA_PATH})",
     )
     codex_cli.add_model_arguments(parser)
+    codex_cli.add_web_search_argument(parser, default="live")
     return parser
 
 
@@ -475,6 +504,7 @@ def main(argv: list[str] | None = None) -> int:
             prompt_template,
             schema_text,
             options,
+            web_search=args.web_search,
         )
     except (
         common.CodexError,
@@ -544,6 +574,7 @@ def main(argv: list[str] | None = None) -> int:
             config_digest=config_digest,
             options=options,
             jobs=args.jobs,
+            web_search=args.web_search,
         )
     else:
         outcomes, failures = [], []

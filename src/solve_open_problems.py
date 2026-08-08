@@ -34,6 +34,14 @@ SOLUTION_STATUSES = (
     "partial_progress",
     "candidate_counterexample",
     "candidate_solution",
+    "known_resolution",
+)
+NOVELTY_STATUSES = (
+    "apparently_new",
+    "known_result_reconstruction",
+    "new_extension",
+    "mixed",
+    "unknown",
 )
 CLAIM_ID_RE = re.compile(r"^C-[0-9]{3,}$")
 CORE_OUTPUT_PATHS = {"attempt.md"}
@@ -46,6 +54,7 @@ class SolveWork:
     guidance: dict
     attempt_number: int
     triage_snapshot_digest: str | None
+    literature_snapshot_digest: str | None = None
 
     @property
     def attempt_name(self) -> str:
@@ -98,31 +107,65 @@ def research_guidance(
         ):
             return None, None
     if result is None:
-        return generic_guidance(), None
-    guidance = {
-        "source": "triage",
-        "classification": result.get("classification"),
-        "rationale": result.get("rationale", ""),
-        "promising_features": result.get("promising_features", []),
-        "obstacles": result.get("obstacles", []),
-        "suggested_approaches": result.get("suggested_approaches", []),
-        "instruction": (
-            "Treat every suggestion as advisory. Form your own strategy; "
-            "combine, reorder, abandon, or replace approaches in response "
-            "to evidence."
-        ),
-    }
-    return guidance, common.triage_input_digest(problem)
+        guidance = generic_guidance()
+        triage_snapshot = None
+    else:
+        guidance = {
+            "source": "triage",
+            "classification": result.get("classification"),
+            "rationale": result.get("rationale", ""),
+            "promising_features": result.get("promising_features", []),
+            "obstacles": result.get("obstacles", []),
+            "suggested_approaches": result.get("suggested_approaches", []),
+            "instruction": (
+                "Treat every suggestion as advisory. Form your own strategy; "
+                "combine, reorder, abandon, or replace approaches in response "
+                "to evidence."
+            ),
+        }
+        triage_snapshot = common.triage_input_digest(problem)
+    literature = (
+        common.literature_result(problem)
+        if common.literature_is_current(problem)
+        else None
+    )
+    if literature is not None:
+        guidance["literature"] = {
+            "resolution_status": literature.get("resolution_status"),
+            "confidence": literature.get("confidence"),
+            "status_summary": literature.get("status_summary", ""),
+            "residual_problem": literature.get("residual_problem", ""),
+            "solver_briefing": literature.get("solver_briefing", ""),
+        }
+    return guidance, triage_snapshot
 
 
 def build_work(
     problems: Sequence[common.ProblemRef],
     *,
     require_triage_classes: set[str] | None,
-) -> tuple[list[SolveWork], list[common.ProblemRef]]:
+    include_literature_resolved: bool = False,
+) -> tuple[
+    list[SolveWork],
+    list[common.ProblemRef],
+    list[common.ProblemRef],
+]:
     work: list[SolveWork] = []
     without_work: list[common.ProblemRef] = []
+    literature_resolved: list[common.ProblemRef] = []
     for problem in problems:
+        literature = (
+            common.literature_result(problem)
+            if common.literature_is_current(problem)
+            else None
+        )
+        if (
+            not include_literature_resolved
+            and literature is not None
+            and literature.get("resolution_status") == "resolved"
+        ):
+            literature_resolved.append(problem)
+            continue
         guidance, snapshot = research_guidance(
             problem,
             require_triage_classes=require_triage_classes,
@@ -136,9 +179,10 @@ def build_work(
                 guidance,
                 common.next_attempt_number(problem),
                 snapshot,
+                common.literature_snapshot_digest(problem),
             )
         )
-    return work, without_work
+    return work, without_work, literature_resolved
 
 
 def render_prompt(
@@ -204,6 +248,36 @@ def validate_solver_result(
         "summary"
     ].strip():
         raise common.CodexError("solver response has no summary")
+    novelty_status = result.get("novelty_status")
+    if novelty_status not in NOVELTY_STATUSES:
+        raise common.CodexError("solver response has invalid novelty_status")
+    external_sources = result.get("external_sources")
+    if not isinstance(external_sources, list):
+        raise common.CodexError("solver response has invalid external_sources")
+    for source in external_sources:
+        if not isinstance(source, dict):
+            raise common.CodexError("solver external source is not an object")
+        for field in ("title", "url", "used_for", "verification"):
+            if not isinstance(source.get(field), str):
+                raise common.CodexError(
+                    f"solver external source has invalid {field}"
+                )
+        if not source["url"].startswith(("https://", "http://")):
+            raise common.CodexError("solver external source has invalid URL")
+    if (
+        status == "known_resolution"
+        and novelty_status != "known_result_reconstruction"
+    ):
+        raise common.CodexError(
+            "known_resolution requires known_result_reconstruction novelty"
+        )
+    if (
+        status == "candidate_solution"
+        and novelty_status == "known_result_reconstruction"
+    ):
+        raise common.CodexError(
+            "a reconstructed published result must use known_resolution"
+        )
     warnings = result.get("warnings")
     if not isinstance(warnings, list) or not all(
         isinstance(value, str) for value in warnings
@@ -279,6 +353,7 @@ def _install_attempt(
     codex_version: str,
     options: codex_cli.ModelOptions,
     prior_history_digest: str,
+    web_search: str = "live",
     recovered_from: Path | None = None,
 ) -> Path:
     destination = work.problem.directory / work.attempt_name
@@ -302,12 +377,14 @@ def _install_attempt(
             ),
             "prior_attempt_history_digest": prior_history_digest,
             "triage_snapshot_digest": work.triage_snapshot_digest,
+            "literature_snapshot_digest": work.literature_snapshot_digest,
             "research_guidance": work.guidance,
             "config_digest": config_digest,
             "codex_version": codex_version,
             "requested_model": options.model,
             "requested_reasoning_effort": options.reasoning_effort,
             "requested_fast_mode": options.fast,
+            "requested_web_search": web_search,
             "status": result["status"],
             "claim_count": len(result["checkable_claims"]),
         }
@@ -347,6 +424,7 @@ def _write_work_record(
     codex_version: str,
     options: codex_cli.ModelOptions,
     prior_history_digest: str,
+    web_search: str = "live",
 ) -> None:
     common.write_json(
         workspace / WORK_RECORD_FILE,
@@ -356,12 +434,14 @@ def _write_work_record(
             "attempt_name": work.attempt_name,
             "research_guidance": work.guidance,
             "triage_snapshot_digest": work.triage_snapshot_digest,
+            "literature_snapshot_digest": work.literature_snapshot_digest,
             "prior_attempt_history_digest": prior_history_digest,
             "config_digest": config_digest,
             "codex_version": codex_version,
             "requested_model": options.model,
             "requested_reasoning_effort": options.reasoning_effort,
             "requested_fast_mode": options.fast,
+            "requested_web_search": web_search,
         },
     )
 
@@ -390,6 +470,7 @@ def recover_solver_work(
     codex_version: str,
     config_digest: str,
     options: codex_cli.ModelOptions,
+    web_search: str = "live",
 ) -> SolveOutcome | None:
     """Install a matching completed preserved workspace without another turn."""
     candidates = sorted(
@@ -435,6 +516,7 @@ def recover_solver_work(
             codex_version=record.get("codex_version", codex_version),
             options=options,
             prior_history_digest=prior_history_digest,
+            web_search=record.get("requested_web_search", web_search),
             recovered_from=workspace,
         )
         attempt = review_solutions.AttemptRef(
@@ -465,6 +547,7 @@ def solve_work(
     schema_path: Path,
     config_digest: str,
     options: codex_cli.ModelOptions,
+    web_search: str = "live",
     launch_interval: float = codex_cli.CODEX_LAUNCH_INTERVAL_SECONDS,
 ) -> SolveOutcome:
     """Run and install one adaptive solver attempt."""
@@ -474,6 +557,7 @@ def solve_work(
         codex_version=codex_version,
         config_digest=config_digest,
         options=options,
+        web_search=web_search,
     )
     if recovered is not None:
         return recovered
@@ -488,6 +572,7 @@ def solve_work(
         codex_version=codex_version,
         options=options,
         prior_history_digest=prior_history_digest,
+        web_search=web_search,
     )
     try:
         context = common.stage_context(
@@ -496,6 +581,7 @@ def solve_work(
             include_paper=True,
             include_history=True,
             include_triage=work.triage_snapshot_digest is not None,
+            include_literature=work.literature_snapshot_digest is not None,
         )
         prompt = render_prompt(
             prompt_template,
@@ -508,6 +594,7 @@ def solve_work(
             prompt=prompt,
             schema_path=schema_path,
             options=options,
+            web_search=web_search,
             launch_interval=launch_interval,
         )
         result, artifacts = validate_solver_result(result_path, workspace)
@@ -520,6 +607,7 @@ def solve_work(
             codex_version=codex_version,
             options=options,
             prior_history_digest=prior_history_digest,
+            web_search=web_search,
         )
     except (common.CodexError, OSError) as exc:
         raise common.CodexError(
@@ -552,6 +640,7 @@ def solve_many(
     config_digest: str,
     options: codex_cli.ModelOptions,
     jobs: int,
+    web_search: str = "live",
     on_finished: SolveFinishedCallback | None = None,
 ) -> tuple[list[SolveOutcome], list[tuple[SolveWork, str]]]:
     outcomes: list[SolveOutcome] = []
@@ -571,6 +660,7 @@ def solve_many(
                 schema_path=schema_path,
                 config_digest=config_digest,
                 options=options,
+                web_search=web_search,
             ): work
             for work in work_items
         }
@@ -681,6 +771,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="maximum concurrent critics (default: --jobs)",
     )
     parser.add_argument(
+        "--include-literature-resolved",
+        action="store_true",
+        help=(
+            "run even when a current literature search marks the exact "
+            "problem resolved"
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="report adaptive solver attempts without starting Codex",
@@ -716,6 +814,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     codex_cli.add_model_arguments(parser)
     codex_cli.add_model_arguments(parser, prefix="review")
+    codex_cli.add_web_search_argument(parser, default="live")
+    codex_cli.add_web_search_argument(
+        parser,
+        default="live",
+        prefix="review",
+    )
     return parser
 
 
@@ -777,10 +881,12 @@ def main(argv: list[str] | None = None) -> int:
             prompt_template,
             schema_text,
             options,
+            web_search=args.web_search,
         )
-        work_items, without_work = build_work(
+        work_items, without_work, literature_resolved = build_work(
             problems,
             require_triage_classes=triage_classes,
+            include_literature_resolved=args.include_literature_resolved,
         )
         review_prompt_path = args.review_prompt.expanduser().resolve()
         review_schema_path = args.review_schema.expanduser().resolve()
@@ -795,6 +901,7 @@ def main(argv: list[str] | None = None) -> int:
             review_prompt,
             review_schema_text,
             review_options,
+            web_search=args.review_web_search or args.web_search,
         )
     except (
         common.CodexError,
@@ -812,17 +919,24 @@ def main(argv: list[str] | None = None) -> int:
                 f"{work.problem.id}/{work.attempt_name} "
                 f"(adaptive; {len(suggestions)} suggested approach(es))"
             )
+        for problem in literature_resolved:
+            print(
+                f"Would skip resolved literature: "
+                f"{problem.paper_directory} {problem.id}"
+            )
         print(
             f"Selected {len(problems)} problem(s): "
             f"{len(work_items)} adaptive solver attempt(s); "
-            f"{len(without_work)} without matching current triage."
+            f"{len(without_work)} without matching current triage; "
+            f"{len(literature_resolved)} resolved by current literature."
         )
         return 0
 
     if not work_items:
         print(
             f"No solver work selected from {len(problems)} problem(s); "
-            f"{len(without_work)} had no matching current triage."
+            f"{len(without_work)} had no matching current triage; "
+            f"{len(literature_resolved)} resolved by current literature."
         )
         return 0
     try:
@@ -880,6 +994,7 @@ def main(argv: list[str] | None = None) -> int:
         config_digest=config_digest,
         options=options,
         jobs=args.jobs,
+        web_search=args.web_search,
         on_finished=report_finished,
     )
 
@@ -914,6 +1029,7 @@ def main(argv: list[str] | None = None) -> int:
                 config_digest=review_config_digest,
                 options=review_options,
                 jobs=args.review_jobs or args.jobs,
+                web_search=args.review_web_search or args.web_search,
             )
             for outcome in review_outcomes:
                 print(
@@ -973,7 +1089,8 @@ def main(argv: list[str] | None = None) -> int:
         f"{len(review_outcomes)} review(s); {review_skipped} review(s) "
         f"skipped for no checkable progress; "
         f"{len(review_failures)} review failure(s); "
-        f"{len(attention)} recommended for human attention."
+        f"{len(literature_resolved)} problem(s) skipped as literature-"
+        f"resolved; {len(attention)} recommended for human attention."
     )
     return 1 if failures or review_failures else 0
 

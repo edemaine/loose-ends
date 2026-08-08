@@ -272,14 +272,70 @@ Use `--solve attempt,maybe` to include exploratory recommendations, or
 options are used throughout this shortcut. Run the scripts separately when
 different solver and reviewer models are desired.
 
+## Search later literature
+
+`src/literature_review.py` is the optional Internet-enabled phase
+between triage and solving. By default it selects current `attempt` and `maybe`
+triages, groups them by paper, and uses one Codex turn per paper to search all
+selected problems together:
+
+```sh
+python src/literature_review.py papers/edemaine --dry-run
+python src/literature_review.py papers/edemaine --jobs 4
+```
+
+Use `--from-triage attempt` to narrow the triage classes, or bypass triage with
+an explicit selection:
+
+```sh
+python src/literature_review.py papers/edemaine/arXiv-... \
+  --problem OP-002
+python src/literature_review.py papers/edemaine/arXiv-... \
+  --all-problems
+python src/literature_review.py papers/edemaine --attempted
+```
+
+The per-paper run produces independent records under each problem:
+
+```text
+attempts/OP-001/
+├── literature.md
+├── literature.json
+├── literature-manifest.json
+├── literature-events.jsonl
+└── literature-run.log
+```
+
+Each record distinguishes `resolved`, `partially_resolved`,
+`no_resolution_found`, and `uncertain`. The driver accepts `resolved` only with
+high confidence and an inspected primary source explicitly identified as the
+resolution. `no_resolution_found` means only that this search found none; it
+does not certify that the problem remains open. The report also ranks later
+papers and summarizes their exact results, techniques, relevance, and
+limitations as a self-contained solver briefing.
+
+The literature agent receives all prior attempts, artifacts, and critiques, so
+it can search terminology and leads discovered during earlier work. Literature
+currentness remains independent of attempt history: otherwise a solver would
+immediately stale the report it just used before its critic runs. Use
+`--attempted --force` when a literature review should incorporate newer attempt
+history. Live first-party Codex web search is the default; use
+`--web-search indexed` or `--web-search disabled` to reduce or remove live
+access.
+
+If validation or installation preserves a completed `.literature-run-*`
+workspace, the next matching command recovers it before launching another
+Codex turn. `--force` intentionally bypasses both current results and recovery.
+
 ## Attempt solutions
 
 `src/solve_open_problems.py` runs one adaptive Codex research turn per selected
 problem. Unlike triage, every solver receives a disposable copy of the entire
 paper—PDF, submitted source, and metadata when present—together with the
 technical analysis, all triage suggestions, and all previous attempts,
-artifacts, and critiques. It is therefore not trying to solve a problem from
-its short description alone.
+artifacts, and critiques. A current literature report is also staged with its
+residual problem, source links, and solver briefing. It is therefore not trying
+to solve a problem from its short description alone.
 
 Solve all fresh `attempt` recommendations:
 
@@ -299,6 +355,12 @@ python src/solve_open_problems.py papers/edemaine/arXiv-... \
 python src/solve_open_problems.py papers/edemaine/arXiv-... \
   --all-problems
 ```
+
+A problem whose current literature record says `resolved` is skipped even when
+selected explicitly. Use `--include-literature-resolved` to reconstruct or
+audit the published resolution deliberately. Partial resolutions are not
+skipped: the solver receives the precise residual problem. Literature search
+is otherwise optional, and problems with no report continue normally.
 
 `--dry-run` shows one future adaptive attempt number for each selected problem
 and the number of triage suggestions it will receive. All suggestions go into
@@ -325,7 +387,10 @@ attempts/
 
 `attempt.md` is the human-readable research record. The structured result
 classifies the outcome and indexes exact `C-###` claims so a critic can check
-them. Code, data, and auxiliary derivations can be retained under `artifacts/`.
+them. It also records novelty status and every external source actually used;
+`known_resolution` identifies a reconstruction of published work instead of a
+new `candidate_solution`. Code, data, and auxiliary derivations can be retained
+under `artifacts/`.
 If a completed Codex turn is preserved because driver validation or
 installation fails, retrying the same solve command recovers the matching
 `.solve-run-*` workspace before starting another model turn.
@@ -345,6 +410,9 @@ python src/solve_open_problems.py papers/edemaine \
 
 The solver prints a final list of reviews that merit medium or high human
 attention, along with any unreviewed candidate solutions or counterexamples.
+Solver and critic runs default to live first-party web search. Disable it with
+`--web-search disabled`, and control a composed critic independently with
+`--review-web-search disabled`.
 
 ## Review attempts
 
@@ -374,8 +442,10 @@ attempt-001/
 ```
 
 The structured review records a verdict, claim-by-claim assessments, blocking
-gaps, and an attention level. The critic independently receives the full paper
-context and does not modify the solver's `attempt.md`.
+gaps, an attention level, and an independent novelty assessment. The critic
+receives the full paper context and current literature report, can verify
+external sources with live web search, and does not modify the solver's
+`attempt.md`.
 
 ## Human review
 
@@ -390,13 +460,16 @@ The command writes `human-review.html` and opens it in a browser. Search and
 attention filters narrow the queue. A separate claim-focus filter selects
 claimed solutions, claimed counterexamples, either kind of resolution, or only
 resolution claims that the critic rated `strong_candidate`; these attempts are
-also labeled in the queue. An always-visible problem list is grouped under
+also labeled in the queue. Known literature resolutions have a separate filter
+and badge rather than appearing as new solution claims. An always-visible
+problem list is grouped under
 paper titles, with the selected problem's attempts listed below. Each view
 starts with the paper title and full extracted open-problem statement, followed
-by Markdown-rendered solver and critic summaries, claim assessments, blocking
-gaps, and recommended next steps. The solution summary and rendered
-`attempt.md` come first; tabs then show the rendered `critique.md` and links to
-the paper analysis, structured records, and artifacts. The browser loads
+by Markdown-rendered literature, solver, and critic summaries, claim
+assessments, blocking gaps, and recommended next steps. The solution summary
+and rendered `attempt.md` come first; tabs then show the rendered `critique.md`,
+the complete literature report when available, and links to the paper analysis,
+structured records, and artifacts. The browser loads
 Markdown-it and its KaTeX plugin to render Markdown and math in one parsing
 pass, supporting `\(...\)`, `\[...\]`, `$...$`, and `$$...$$` delimiters.
 High-attention items come first.
@@ -411,8 +484,10 @@ All Codex-backed commands share the analyzer's `--model`,
 `--reasoning-effort`, `--fast`, `--codex`, concurrency, Cygwin path
 conversion, Windows ACL repair, and transient startup retry behavior.
 Automated Codex runs ignore the invoking user's Codex configuration and
-explicitly disable MCP/plugin app tools, web search, shell network access,
-automatic MCP dependency installation, and nested agent spawning. Saved Codex
+explicitly disable MCP/plugin app tools, shell network access, automatic MCP
+dependency installation, and nested agent spawning. Paper analysis and triage
+also disable web search; literature, solver, and critic runs default to live
+first-party web search, independently of shell network access. Saved Codex
 authentication is still used, as documented for `--ignore-user-config`. On
 Windows, the launcher explicitly restores the elevated sandbox implementation
 so `workspace-write` remains effective even though user configuration is

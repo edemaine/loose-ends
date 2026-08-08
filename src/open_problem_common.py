@@ -23,6 +23,11 @@ TRIAGE_RESULT = "triage.json"
 TRIAGE_MANIFEST = "triage-manifest.json"
 TRIAGE_MANIFEST_SCHEMA_VERSION = 2
 TRIAGE_RUN_FILES = ("triage-events.jsonl", "triage-run.log")
+LITERATURE_MARKDOWN = "literature.md"
+LITERATURE_RESULT = "literature.json"
+LITERATURE_MANIFEST = "literature-manifest.json"
+LITERATURE_MANIFEST_SCHEMA_VERSION = 1
+LITERATURE_RUN_FILES = ("literature-events.jsonl", "literature-run.log")
 ATTEMPT_DIRECTORY_RE = re.compile(r"^attempt-([0-9]{3,})$")
 ATTEMPT_HISTORY_FILES = (
     "attempt.md",
@@ -369,6 +374,56 @@ def triage_is_current(
     return result.get("problem_id") == problem.id
 
 
+def literature_input_digest(problem: ProblemRef) -> str:
+    """Hash the analyzed problem, independent of attempts and triage."""
+    return problem_digest(problem)
+
+
+def literature_manifest(problem: ProblemRef) -> dict | None:
+    return load_json(problem.directory / LITERATURE_MANIFEST)
+
+
+def literature_result(problem: ProblemRef) -> dict | None:
+    return load_json(problem.directory / LITERATURE_RESULT)
+
+
+def literature_is_current(
+    problem: ProblemRef,
+    *,
+    config_digest: str | None = None,
+) -> bool:
+    manifest = literature_manifest(problem)
+    result = literature_result(problem)
+    if manifest is None or result is None:
+        return False
+    if manifest.get("schema_version") != LITERATURE_MANIFEST_SCHEMA_VERSION:
+        return False
+    if manifest.get("input_digest") != literature_input_digest(problem):
+        return False
+    if (
+        config_digest is not None
+        and manifest.get("config_digest") != config_digest
+    ):
+        return False
+    return result.get("problem_id") == problem.id
+
+
+def literature_snapshot_digest(problem: ProblemRef) -> str | None:
+    """Hash the current literature packet, or return None when unavailable."""
+    if not literature_is_current(problem):
+        return None
+    return files_digest(
+        [
+            (name, problem.directory / name)
+            for name in (
+                LITERATURE_MARKDOWN,
+                LITERATURE_RESULT,
+                LITERATURE_MANIFEST,
+            )
+        ]
+    )
+
+
 def _copy_file(source: Path, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(source, destination)
@@ -402,6 +457,7 @@ def stage_context(
     include_paper: bool,
     include_history: bool = True,
     include_triage: bool = False,
+    include_literature: bool = False,
     exclude_review_for: Path | None = None,
 ) -> Path:
     """Stage disposable, sandbox-readable context for one paper."""
@@ -455,6 +511,18 @@ def stage_context(
         for problem in problems:
             destination = inputs / "triage" / problem.id
             for name in (TRIAGE_MARKDOWN, TRIAGE_RESULT, TRIAGE_MANIFEST):
+                source = problem.directory / name
+                if source.is_file():
+                    _copy_file(source, destination / name)
+
+    if include_literature:
+        for problem in problems:
+            destination = inputs / "literature" / problem.id
+            for name in (
+                LITERATURE_MARKDOWN,
+                LITERATURE_RESULT,
+                LITERATURE_MANIFEST,
+            ):
                 source = problem.directory / name
                 if source.is_file():
                     _copy_file(source, destination / name)

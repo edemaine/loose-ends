@@ -14,6 +14,7 @@ import analyze_papers
 import human_review
 import open_problem_common as common
 import review_solutions
+import literature_review
 import solve_open_problems
 import triage_open_problems
 
@@ -305,11 +306,12 @@ class OpenProblemPipelineTests(unittest.TestCase):
                     "config_digest": "triage-config",
                 },
             )
-            work, missing = solve_open_problems.build_work(
+            work, missing, resolved = solve_open_problems.build_work(
                 [problem],
                 require_triage_classes={"attempt"},
             )
             self.assertEqual(missing, [])
+            self.assertEqual(resolved, [])
             self.assertEqual(len(work), 1)
             self.assertEqual(
                 work[0].guidance["suggested_approaches"][0]["id"],
@@ -374,6 +376,8 @@ class OpenProblemPipelineTests(unittest.TestCase):
                     {
                         "status": "partial_progress",
                         "summary": "Proved a special case.",
+                        "novelty_status": "apparently_new",
+                        "external_sources": [],
                         "checkable_claims": [
                             {
                                 "id": "C-001",
@@ -446,6 +450,7 @@ class OpenProblemPipelineTests(unittest.TestCase):
                         "verdict": "plausible_progress",
                         "attention": "medium",
                         "summary": "The special case appears valid.",
+                        "novelty_assessment": "apparently_new",
                         "claim_reviews": [
                             {
                                 "claim_id": "C-001",
@@ -488,12 +493,332 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 history_before_review,
                 common.attempt_history_digest(problem),
             )
-            stale_work, skipped = solve_open_problems.build_work(
+            stale_work, skipped, resolved = solve_open_problems.build_work(
                 [problem],
                 require_triage_classes={"attempt"},
             )
             self.assertEqual(stale_work, [])
             self.assertEqual(skipped, [problem])
+            self.assertEqual(resolved, [])
+
+    def test_literature_search_batches_paper_and_skips_resolved_solver_work(self):
+        with TemporaryDirectory() as temporary:
+            paper = make_analyzed_paper(Path(temporary))
+            problems = common.discover_problem_refs([paper])
+            for problem in problems:
+                problem.directory.mkdir(parents=True, exist_ok=True)
+                if problem.id == "OP-001":
+                    prior = problem.directory / "attempt-001"
+                    prior.mkdir()
+                    (prior / "attempt.md").write_text(
+                        "# Prior attempt\n\nTry the hinge terminology.\n",
+                        encoding="utf-8",
+                    )
+                    (prior / "critique.md").write_text(
+                        "# Critique\n\nSearch the rigidity literature.\n",
+                        encoding="utf-8",
+                    )
+                common.write_json(
+                    problem.directory / common.TRIAGE_RESULT,
+                    {
+                        "problem_id": problem.id,
+                        "classification": "attempt",
+                        "rationale": "Worth searching.",
+                        "promising_features": [],
+                        "obstacles": [],
+                        "suggested_approaches": [],
+                    },
+                )
+                common.write_json(
+                    problem.directory / common.TRIAGE_MANIFEST,
+                    {
+                        "schema_version": (
+                            common.TRIAGE_MANIFEST_SCHEMA_VERSION
+                        ),
+                        "input_digest": common.triage_input_digest(problem),
+                    },
+                )
+
+            prompt = (
+                literature_review.DEFAULT_PROMPT_PATH.read_text(
+                    encoding="utf-8"
+                )
+            )
+            schema_text = (
+                literature_review.DEFAULT_SCHEMA_PATH.read_text(
+                    encoding="utf-8"
+                )
+            )
+            options = codex_cli.ModelOptions("test-model", "xhigh")
+            config_digest = codex_cli.semantic_config_digest(
+                prompt,
+                schema_text,
+                options,
+                web_search="live",
+            )
+
+            def source(role):
+                return {
+                    "id": "S0",
+                    "role": role,
+                    "priority": "high",
+                    "title": "Later Paper",
+                    "authors": ["Grace Hopper"],
+                    "publication_year": "2025",
+                    "url": "https://example.org/later-paper",
+                    "source_type": "primary_source",
+                    "result_statement": "A matching theorem is proved.",
+                    "relevance": "It addresses the extracted question.",
+                    "limitations": "Check the hypotheses carefully.",
+                }
+
+            def fake_literature(**kwargs):
+                self.assertEqual(kwargs["web_search"], "live")
+                workspace = kwargs["workspace"]
+                self.assertTrue(
+                    (workspace / "inputs" / "paper" / "paper.pdf").is_file()
+                )
+                self.assertTrue(
+                    (
+                        workspace
+                        / "inputs"
+                        / "history"
+                        / "OP-001"
+                        / "attempt-001"
+                        / "attempt.md"
+                    ).is_file()
+                )
+                self.assertTrue(
+                    (
+                        workspace
+                        / "inputs"
+                        / "history"
+                        / "OP-001"
+                        / "attempt-001"
+                        / "critique.md"
+                    ).is_file()
+                )
+                entries = [
+                    {
+                        "problem_id": "OP-001",
+                        "resolution_status": "resolved",
+                        "confidence": "high",
+                        "status_summary": "A later theorem resolves OP-001.",
+                        "exact_match_analysis": "All quantifiers match.",
+                        "residual_problem": "",
+                        "solver_briefing": "No original problem remains.",
+                        "sources": [source("resolution")],
+                        "search_queries": ["Test conjecture later theorem"],
+                        "warnings": [],
+                    },
+                    {
+                        "problem_id": "OP-002",
+                        "resolution_status": "partially_resolved",
+                        "confidence": "high",
+                        "status_summary": "A special case is known.",
+                        "exact_match_analysis": "The general case is absent.",
+                        "residual_problem": "Construct the general case.",
+                        "solver_briefing": "Adapt the special-case gadget.",
+                        "sources": [source("partial_result")],
+                        "search_queries": ["Test construction special case"],
+                        "warnings": [],
+                    },
+                ]
+                common.write_json(
+                    workspace / "agent-result.json",
+                    {
+                        "status": "complete",
+                        "literature": entries,
+                        "warnings": [],
+                    },
+                )
+                write_run_files(workspace)
+                return workspace / "agent-result.json"
+
+            with patch.object(
+                codex_cli,
+                "run_structured_codex",
+                side_effect=fake_literature,
+            ) as run:
+                outcomes = (
+                    literature_review.search_paper_literature(
+                        problems,
+                        codex="codex",
+                        codex_version="test",
+                        prompt_template=prompt,
+                        schema_path=(
+                            literature_review.DEFAULT_SCHEMA_PATH
+                        ),
+                        config_digest=config_digest,
+                        options=options,
+                        web_search="live",
+                        launch_interval=0,
+                    )
+                )
+
+            self.assertEqual(run.call_count, 1)
+            self.assertEqual(len(outcomes), 2)
+            self.assertTrue(common.literature_is_current(problems[0]))
+            self.assertTrue(common.triage_is_current(problems[0]))
+            self.assertEqual(
+                common.literature_result(problems[0])["resolution_status"],
+                "resolved",
+            )
+            work, missing, resolved = solve_open_problems.build_work(
+                problems,
+                require_triage_classes={"attempt"},
+            )
+            self.assertEqual([item.problem.id for item in work], ["OP-002"])
+            self.assertEqual(missing, [])
+            self.assertEqual(resolved, [problems[0]])
+            self.assertEqual(
+                work[0].guidance["literature"]["residual_problem"],
+                "Construct the general case.",
+            )
+            self.assertIsNotNone(work[0].literature_snapshot_digest)
+
+            included, missing, resolved = solve_open_problems.build_work(
+                problems,
+                require_triage_classes={"attempt"},
+                include_literature_resolved=True,
+            )
+            self.assertEqual(len(included), 2)
+            self.assertEqual(missing, [])
+            self.assertEqual(resolved, [])
+
+            attempt = problems[0].directory / "attempt-002"
+            attempt.mkdir()
+            (attempt / "attempt.md").write_text(
+                "# Attempt\n\nLater work.\n",
+                encoding="utf-8",
+            )
+            self.assertFalse(common.triage_is_current(problems[0]))
+            self.assertTrue(common.literature_is_current(problems[0]))
+
+    def test_literature_recovers_matching_completed_workspace(self):
+        with TemporaryDirectory() as temporary:
+            paper = make_analyzed_paper(Path(temporary))
+            problem = common.discover_problem_refs(
+                [paper], problem_ids={"OP-001"}
+            )[0]
+            attempts = paper / common.ATTEMPTS_DIRECTORY
+            attempts.mkdir()
+            workspace = attempts / ".literature-run-preserved"
+            workspace.mkdir()
+            prompt = literature_review.DEFAULT_PROMPT_PATH.read_text(
+                encoding="utf-8"
+            )
+            schema_text = (
+                literature_review.DEFAULT_SCHEMA_PATH.read_text(
+                    encoding="utf-8"
+                )
+            )
+            options = codex_cli.ModelOptions("test-model", "xhigh")
+            config_digest = codex_cli.semantic_config_digest(
+                prompt,
+                schema_text,
+                options,
+                web_search="live",
+            )
+            input_digests = {
+                problem.id: common.literature_input_digest(problem)
+            }
+            literature_review._write_work_record(
+                workspace,
+                [problem],
+                input_digests=input_digests,
+                config_digest=config_digest,
+                codex_version="test",
+                options=options,
+                web_search="live",
+            )
+            entry = {
+                "problem_id": problem.id,
+                "resolution_status": "no_resolution_found",
+                "confidence": "medium",
+                "status_summary": "No exact resolution was located.",
+                "exact_match_analysis": "Nearby results do not match.",
+                "residual_problem": "The original problem remains.",
+                "solver_briefing": "Try the nearby technique.",
+                "sources": [
+                    {
+                        "id": "S0",
+                        "role": "technique",
+                        "priority": "medium",
+                        "title": "Nearby Work",
+                        "authors": ["Grace Hopper"],
+                        "publication_year": "2025",
+                        "url": "https://example.org/nearby",
+                        "source_type": "primary_source",
+                        "result_statement": "A special technique is proved.",
+                        "relevance": "The technique may transfer.",
+                        "limitations": "It does not resolve the problem.",
+                    }
+                ],
+                "search_queries": ["test conjecture later work"],
+                "warnings": [],
+            }
+            common.write_json(
+                workspace / "agent-result.json",
+                {
+                    "status": "complete",
+                    "literature": [entry],
+                    "warnings": [],
+                },
+            )
+            (workspace / "literature-OP-001.md").write_text(
+                "# Literature OP-001\n\nCompleted report.\n",
+                encoding="utf-8",
+            )
+            write_run_files(workspace)
+
+            with patch.object(codex_cli, "run_structured_codex") as run:
+                outcomes = literature_review.search_paper_literature(
+                    [problem],
+                    codex="codex",
+                    codex_version="test",
+                    prompt_template=prompt,
+                    schema_path=literature_review.DEFAULT_SCHEMA_PATH,
+                    config_digest=config_digest,
+                    options=options,
+                    web_search="live",
+                    launch_interval=0,
+                )
+
+            run.assert_not_called()
+            self.assertEqual(outcomes[0].status, "recovered")
+            self.assertTrue(workspace.is_dir())
+            manifest = common.literature_manifest(problem)
+            self.assertEqual(
+                manifest["recovered_from_workspace"], workspace.name
+            )
+            self.assertEqual(
+                common.literature_result(problem)["sources"][0]["id"],
+                "S0",
+            )
+
+    def test_literature_attempted_selector_bypasses_triage(self):
+        with TemporaryDirectory() as temporary:
+            paper = make_analyzed_paper(Path(temporary))
+            problems = common.discover_problem_refs([paper])
+            attempted = problems[1].directory / "attempt-001"
+            attempted.mkdir(parents=True)
+            (attempted / "attempt.md").write_text(
+                "# Attempt\n\nA prior construction.\n",
+                encoding="utf-8",
+            )
+
+            output = StringIO()
+            with redirect_stdout(output):
+                returncode = literature_review.main(
+                    [str(paper), "--attempted", "--dry-run"]
+                )
+
+            contents = output.getvalue()
+            self.assertEqual(returncode, 0)
+            self.assertIn("OP-002: Test construction", contents)
+            self.assertNotIn("OP-001: Test conjecture", contents)
+            self.assertIn("1 without attempts", contents)
 
     def test_no_progress_is_not_promising_for_review(self):
         with TemporaryDirectory() as temporary:
@@ -603,6 +928,10 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 '<option value="resolution">Any claimed resolution</option>',
                 dashboard,
             )
+            self.assertIn(
+                '<option value="known">Known literature resolutions</option>',
+                dashboard,
+            )
             self.assertIn('case "strong-resolution":', dashboard)
             self.assertIn(
                 'item.solverStatus === "candidate_solution"',
@@ -610,6 +939,10 @@ class OpenProblemPipelineTests(unittest.TestCase):
             )
             self.assertIn(
                 'item.solverStatus === "candidate_counterexample"',
+                dashboard,
+            )
+            self.assertIn(
+                'item.solverStatus === "known_resolution"',
                 dashboard,
             )
             self.assertIn("HIGH BODY", dashboard)
@@ -657,6 +990,8 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 {
                     "status": "partial_progress",
                     "summary": "A lemma was proved.",
+                    "novelty_status": "apparently_new",
+                    "external_sources": [],
                     "checkable_claims": [
                         {
                             "id": "C-001",
@@ -856,12 +1191,13 @@ class OpenProblemPipelineTests(unittest.TestCase):
                     "input_digest": common.triage_input_digest(problem),
                 },
             )
-            work_items, missing = solve_open_problems.build_work(
+            work_items, missing, resolved = solve_open_problems.build_work(
                 [problem],
                 require_triage_classes={"attempt"},
             )
 
             self.assertEqual(missing, [])
+            self.assertEqual(resolved, [])
             self.assertEqual(len(work_items), 1)
             self.assertEqual(
                 work_items[0].guidance["suggested_approaches"],
@@ -958,18 +1294,49 @@ class OpenProblemPipelineTests(unittest.TestCase):
             triage_open_problems.build_parser(),
             solve_open_problems.build_parser(),
             review_solutions.build_parser(),
+            literature_review.build_parser(),
         )
         arguments = (
             ["paper"],
             ["paper"],
             ["paper", "--from-triage", "attempt"],
             ["paper"],
+            ["paper", "--all-problems"],
         )
         for parser, argv in zip(parsers, arguments):
             with self.subTest(program=parser.prog):
                 parsed = parser.parse_args(argv)
                 self.assertEqual(parsed.model, "gpt-5.6-sol")
                 self.assertEqual(parsed.reasoning_effort, "xhigh")
+
+        solver = solve_open_problems.build_parser().parse_args(
+            ["paper", "--all-problems"]
+        )
+        reviewer = review_solutions.build_parser().parse_args(["paper"])
+        literature = literature_review.build_parser().parse_args(
+            ["paper", "--all-problems"]
+        )
+        self.assertEqual(solver.web_search, "live")
+        self.assertEqual(reviewer.web_search, "live")
+        self.assertEqual(literature.web_search, "live")
+
+    def test_live_web_search_does_not_enable_shell_network_or_plugins(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            command = codex_cli.build_exec_command(
+                codex="codex",
+                workspace=root,
+                prompt="prompt",
+                schema_path=root / "schema.json",
+                result_path=root / "result.json",
+                options=codex_cli.ModelOptions(),
+                web_search="live",
+            )
+
+        self.assertIn('web_search="live"', command)
+        self.assertIn("sandbox_workspace_write.network_access=false", command)
+        self.assertIn("apps._default.enabled=false", command)
+        self.assertIn("agents.enabled=false", command)
 
 
 if __name__ == "__main__":

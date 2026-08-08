@@ -134,6 +134,8 @@ def _relevant_paths(item: HumanReviewItem) -> list[Path]:
         paper / "analysis" / "summary.md",
         paper / "analysis" / "results.md",
         paper / "analysis" / "open-problems.md",
+        attempt.problem.directory / common.LITERATURE_MARKDOWN,
+        attempt.problem.directory / common.LITERATURE_RESULT,
         attempt.directory / "attempt.md",
         attempt.directory / "solver-result.json",
         attempt.directory / "critique.md",
@@ -221,6 +223,11 @@ def _html_data(
         problem = attempt.problem
         paper = problem.paper_directory
         problem_key = (paper, problem.id)
+        literature = (
+            common.literature_result(problem)
+            if common.literature_is_current(problem)
+            else None
+        )
         if include_contents and problem_key not in problem_statements:
             problem_statements[problem_key] = (
                 _extract_open_problem_markdown(
@@ -270,6 +277,37 @@ def _html_data(
                     "status", "unknown"
                 ),
                 "solverSummary": attempt.solver_result.get("summary", ""),
+                "solverNovelty": attempt.solver_result.get(
+                    "novelty_status", "unknown"
+                ),
+                "externalSources": attempt.solver_result.get(
+                    "external_sources", []
+                ),
+                "criticNovelty": item.review_result.get(
+                    "novelty_assessment", "uncertain"
+                ),
+                "literatureStatus": (
+                    literature.get("resolution_status", "")
+                    if literature is not None
+                    else ""
+                ),
+                "literatureConfidence": (
+                    literature.get("confidence", "")
+                    if literature is not None
+                    else ""
+                ),
+                "literatureSummary": (
+                    literature.get("status_summary", "")
+                    if literature is not None
+                    else ""
+                ),
+                "literatureReport": (
+                    _read_optional_text(
+                        problem.directory / common.LITERATURE_MARKDOWN
+                    )
+                    if include_contents and literature is not None
+                    else ""
+                ),
                 "claimReviews": item.review_result.get(
                     "claim_reviews", []
                 ),
@@ -558,6 +596,14 @@ def render_human_review_html(
       color: #744192;
       background: #eee2f5;
     }
+    .badge.known {
+      color: #285f7a;
+      background: #dcecf4;
+    }
+    .badge.literature {
+      color: var(--teal);
+      background: var(--glow);
+    }
     .verdict {
       color: var(--muted);
       font-size: 13px;
@@ -593,6 +639,7 @@ def render_human_review_html(
       padding: 18px 19px;
       box-shadow: var(--shadow);
     }
+    .summary.literature-summary { grid-column: 1 / -1; }
     .summary h2, .section h2 {
       margin: 0 0 9px;
       color: var(--navy);
@@ -816,6 +863,7 @@ def render_human_review_html(
             </option>
             <option value="solution">Claimed solutions</option>
             <option value="counterexample">Claimed counterexamples</option>
+            <option value="known">Known literature resolutions</option>
           </select>
         </label>
         <div class="filters" aria-label="Attention filters">
@@ -901,6 +949,7 @@ def render_human_review_html(
       if (item.solverStatus === "candidate_counterexample") {
         return "counterexample";
       }
+      if (item.solverStatus === "known_resolution") return "known";
       return "";
     }
 
@@ -908,13 +957,16 @@ def render_human_review_html(
       const kind = resolutionKind(item);
       switch (claimFilter.value) {
         case "resolution":
-          return Boolean(kind);
+          return kind === "solution" || kind === "counterexample";
         case "strong-resolution":
-          return Boolean(kind) && item.verdict === "strong_candidate";
+          return (kind === "solution" || kind === "counterexample") &&
+            item.verdict === "strong_candidate";
         case "solution":
           return kind === "solution";
         case "counterexample":
           return kind === "counterexample";
+        case "known":
+          return kind === "known" || item.literatureStatus === "resolved";
         default:
           return true;
       }
@@ -931,7 +983,8 @@ def render_human_review_html(
           item.paperTitle, item.problemId, item.problemTitle,
           item.problemStatement,
           item.attemptName, item.criticSummary, item.solverSummary,
-          item.solverStatus, item.verdict
+          item.solverStatus, item.solverNovelty, item.criticNovelty,
+          item.literatureStatus, item.literatureSummary, item.verdict
         ].join(" ").toLowerCase();
         return haystack.includes(query);
       });
@@ -1049,7 +1102,11 @@ def render_human_review_html(
             "span",
             "",
             `${item.attention.toUpperCase()} · ${item.verdict}${
-              resolution ? ` · ${resolution.toUpperCase()} CLAIM` : ""
+              resolution === "known"
+                ? " · KNOWN LITERATURE"
+                : resolution
+                  ? ` · ${resolution.toUpperCase()} CLAIM`
+                  : ""
             }`
           )
         );
@@ -1076,7 +1133,16 @@ def render_human_review_html(
           node(
             "span",
             `badge ${resolution}`,
-            `${resolution} claim`
+            resolution === "known" ? "known literature" : `${resolution} claim`
+          )
+        );
+      }
+      if (item.literatureStatus && resolution !== "known") {
+        top.append(
+          node(
+            "span",
+            "badge literature",
+            `literature: ${item.literatureStatus.replaceAll("_", " ")}`
           )
         );
       }
@@ -1109,14 +1175,31 @@ def render_human_review_html(
       review.append(problemStatement);
 
       const summaries = node("div", "summary-grid");
+      if (item.literatureSummary) {
+        const literature = node("section", "summary literature-summary");
+        literature.append(
+          node(
+            "h2",
+            "",
+            `Literature · ${item.literatureStatus} · ` +
+              `${item.literatureConfidence} confidence`
+          ),
+          markdownBody(item.literatureSummary, "No literature summary.")
+        );
+        summaries.append(literature);
+      }
       const critic = node("section", "summary");
       critic.append(
-        node("h2", "", "Critic assessment"),
+        node("h2", "", `Critic assessment · ${item.criticNovelty}`),
         markdownBody(item.criticSummary, "No critic summary.")
       );
       const solver = node("section", "summary");
       solver.append(
-        node("h2", "", `Solver · ${item.solverStatus}`),
+        node(
+          "h2",
+          "",
+          `Solver · ${item.solverStatus} · ${item.solverNovelty}`
+        ),
         markdownBody(item.solverSummary, "No solver summary.")
       );
       summaries.append(solver, critic);
@@ -1146,13 +1229,18 @@ def render_human_review_html(
       const panels = {
         critique: item.critique,
         attempt: item.solverAttempt,
+        literature: item.literatureReport,
         files: item.files
       };
-      [
+      const tabEntries = [
         ["attempt", "Solution attempt"],
         ["critique", "Critique"],
-        ["files", `Files (${item.files.length})`]
-      ].forEach(([key, label]) => {
+      ];
+      if (item.literatureReport) {
+        tabEntries.push(["literature", "Literature"]);
+      }
+      tabEntries.push(["files", `Files (${item.files.length})`]);
+      tabEntries.forEach(([key, label]) => {
         const button = node(
           "button", `tab${state.tab === key ? " active" : ""}`, label
         );
@@ -1204,7 +1292,8 @@ def render_human_review_html(
         resolution: "claimed resolutions",
         "strong-resolution": "strong claimed resolutions",
         solution: "claimed solutions",
-        counterexample: "claimed counterexamples"
+        counterexample: "claimed counterexamples",
+        known: "known literature resolutions"
       };
       const countParts = [`${items.length} shown`];
       if (countText) countParts.push(countText);
@@ -1273,6 +1362,11 @@ def render_human_review_report(
         problem = attempt.problem
         review = item.review_result
         solver = attempt.solver_result
+        literature = (
+            common.literature_result(problem)
+            if common.literature_is_current(problem)
+            else None
+        )
         current_label = "" if item.current else " — STALE REVIEW"
         lines.extend(
             (
@@ -1291,10 +1385,28 @@ def render_human_review_report(
                 f"**Solver status:** "
                 f"`{solver.get('status', 'unknown')}`",
                 "",
+                f"**Solver novelty:** "
+                f"`{solver.get('novelty_status', 'unknown')}`",
+                "",
+                f"**Critic novelty assessment:** "
+                f"`{review.get('novelty_assessment', 'uncertain')}`",
+                "",
                 f"**Critic summary:** {review.get('summary', '')}",
                 "",
             )
         )
+        if literature is not None:
+            lines.extend(
+                (
+                    f"**Literature status:** "
+                    f"`{literature.get('resolution_status', 'unknown')}` "
+                    f"({literature.get('confidence', 'unknown')} confidence)",
+                    "",
+                    f"**Literature summary:** "
+                    f"{literature.get('status_summary', '')}",
+                    "",
+                )
+            )
         solver_summary = solver.get("summary")
         if isinstance(solver_summary, str) and solver_summary.strip():
             lines.extend(
@@ -1327,6 +1439,15 @@ def render_human_review_report(
         lines.append("")
 
         if include_contents:
+            literature_path = (
+                problem.directory / common.LITERATURE_MARKDOWN
+            )
+            if literature is not None and literature_path.is_file():
+                _append_file_contents(
+                    lines,
+                    heading="Literature search",
+                    path=literature_path,
+                )
             _append_file_contents(
                 lines,
                 heading="Solution attempt",

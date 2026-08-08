@@ -18,6 +18,7 @@ import time
 
 
 REASONING_EFFORTS = ("low", "medium", "high", "xhigh", "max", "ultra")
+WEB_SEARCH_MODES = ("disabled", "indexed", "live")
 DEFAULT_MODEL = "gpt-5.6-sol"
 DEFAULT_REASONING_EFFORT = "xhigh"
 CODEX_LAUNCH_INTERVAL_SECONDS = 1.0
@@ -104,6 +105,31 @@ def add_model_arguments(
     )
 
 
+def add_web_search_argument(
+    parser: argparse.ArgumentParser,
+    *,
+    default: str,
+    prefix: str = "",
+) -> None:
+    """Add a scoped Codex first-party web-search option."""
+    if default not in WEB_SEARCH_MODES:
+        raise ValueError(f"invalid default web-search mode: {default}")
+    option_prefix = f"{prefix}-" if prefix else ""
+    destination_prefix = f"{prefix.replace('-', '_')}_" if prefix else ""
+    parser.add_argument(
+        f"--{option_prefix}web-search",
+        dest=f"{destination_prefix}web_search",
+        choices=WEB_SEARCH_MODES,
+        default=None if prefix else default,
+        metavar="MODE",
+        help=(
+            "Codex first-party web search: disabled, indexed, or live "
+            f"(default: {'inherit the primary run' if prefix else default}); "
+            "this does not enable shell network access or MCP/plugin apps"
+        ),
+    )
+
+
 def model_options_from_args(
     args: argparse.Namespace,
     *,
@@ -124,6 +150,8 @@ def semantic_config_digest(
     prompt: str,
     schema_text: str,
     options: ModelOptions,
+    *,
+    web_search: str = "disabled",
 ) -> str:
     payload = {
         "fast": options.fast,
@@ -132,6 +160,9 @@ def semantic_config_digest(
         "reasoning_effort": options.reasoning_effort,
         "schema": schema_text,
     }
+    # Preserve existing disabled-search digests for analysis and triage.
+    if web_search != "disabled":
+        payload["web_search"] = web_search
     encoded = json.dumps(
         payload,
         ensure_ascii=False,
@@ -386,7 +417,12 @@ def build_exec_command(
     schema_path: Path,
     result_path: Path,
     options: ModelOptions,
+    web_search: str = "disabled",
 ) -> list[str]:
+    if web_search not in WEB_SEARCH_MODES:
+        raise CodexError(
+            "web search must be one of " + ", ".join(WEB_SEARCH_MODES)
+        )
     command = [
         codex,
         "exec",
@@ -397,7 +433,7 @@ def build_exec_command(
         "--disable",
         "skill_mcp_dependency_install",
         "--config",
-        'web_search="disabled"',
+        f'web_search="{web_search}"',
         "--config",
         "apps._default.enabled=false",
         "--config",
@@ -451,6 +487,7 @@ def run_structured_codex(
     events_filename: str = "events.jsonl",
     log_filename: str = "run.log",
     options: ModelOptions = ModelOptions(),
+    web_search: str = "disabled",
     launch_interval: float = CODEX_LAUNCH_INTERVAL_SECONDS,
 ) -> Path:
     """Run one structured Codex turn and return its final-response path."""
@@ -468,6 +505,7 @@ def run_structured_codex(
         schema_path=schema_path,
         result_path=result_path,
         options=options,
+        web_search=web_search,
     )
 
     completed: subprocess.CompletedProcess | None = None
