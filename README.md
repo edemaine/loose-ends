@@ -463,7 +463,10 @@ excluding problems already resolved in the literature. Claim filters also
 select only resolutions rated `strong_candidate`, known-result reconstructions,
 or attempts with no resolution claim. Literature filters distinguish full and
 partial resolutions, no resolution found, uncertainty, and missing literature
-review. These states are also labeled in the queue. An always-visible
+review. Current and stale review toggles are both enabled by default, so adding
+literature does not make older human-review candidates disappear; stale items
+are visibly labeled and can be filtered out. These states are also labeled in
+the queue. An always-visible
 problem list is grouped under
 paper titles, with the selected problem's attempts listed below. Each view
 starts with the paper title and full extracted open-problem statement, followed
@@ -478,6 +481,7 @@ High-attention items come first.
 
 Use `--latest-per-problem` to suppress older selected attempts,
 `--summary-only` for a compact index, `--attention high` to narrow the queue,
+`--current-only` to omit stale reviews before building the dashboard,
 `--output FILE` to choose the dashboard location, or `--no-open` to avoid
 launching the browser. `--terminal` retains the paged Markdown presentation.
 The command only writes its HTML output and never starts a Codex agent.

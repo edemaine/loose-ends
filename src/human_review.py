@@ -51,7 +51,7 @@ def discover_human_reviews(
     *,
     attention: set[str],
     attempt_names: set[str] | None = None,
-    include_stale: bool = False,
+    include_stale: bool = True,
     latest_per_problem: bool = False,
 ) -> list[HumanReviewItem]:
     """Find reviewed attempts selected for human inspection."""
@@ -890,6 +890,12 @@ def render_human_review_html(
           <label class="filter" id="filter-none-wrap" hidden>
             <input id="filter-none" type="checkbox" checked> None</label>
         </div>
+        <div class="filters" aria-label="Review status filters">
+          <label class="filter" id="filter-current-wrap">
+            <input id="filter-current" type="checkbox" checked> Current</label>
+          <label class="filter" id="filter-stale-wrap">
+            <input id="filter-stale" type="checkbox" checked> Stale</label>
+        </div>
       </div>
       <div class="problem-label">Papers and open problems</div>
       <div class="problem-list" id="problem-list"
@@ -900,7 +906,8 @@ def render_human_review_html(
     <main class="main">
       <div class="empty" id="empty" hidden>
         <h1>No matching reviews</h1>
-        <p>Change the search, claim type, literature, or attention filters.</p>
+        <p>Change the search, claim type, literature, review status, or
+          attention filters.</p>
       </div>
       <article class="review" id="review"></article>
     </main>
@@ -919,6 +926,8 @@ def render_human_review_html(
     const low = document.getElementById("filter-low");
     const none = document.getElementById("filter-none");
     const attentionFilters = { high, medium, low, none };
+    const current = document.getElementById("filter-current");
+    const stale = document.getElementById("filter-stale");
     const problemList = document.getElementById("problem-list");
     const attemptList = document.getElementById("attempt-list");
     const review = document.getElementById("review");
@@ -1010,6 +1019,8 @@ def render_human_review_html(
       return allItems.filter(item => {
         if (attentionFilters[item.attention] &&
             !attentionFilters[item.attention].checked) return false;
+        if (item.current && !current.checked) return false;
+        if (!item.current && !stale.checked) return false;
         if (!matchesClaimType(item)) return false;
         if (!matchesLiteratureStatus(item)) return false;
         if (!query) return true;
@@ -1342,6 +1353,8 @@ def render_human_review_html(
       };
       const countParts = [`${items.length} shown`];
       if (countText) countParts.push(countText);
+      const staleCount = items.filter(item => !item.current).length;
+      if (staleCount) countParts.push(`${staleCount} stale`);
       if (focusLabels[claimFilter.value]) {
         countParts.push(focusLabels[claimFilter.value]);
       }
@@ -1368,6 +1381,8 @@ def render_human_review_html(
     medium.addEventListener("change", updateFilters);
     low.addEventListener("change", updateFilters);
     none.addEventListener("change", updateFilters);
+    current.addEventListener("change", updateFilters);
+    stale.addEventListener("change", updateFilters);
     const requested = location.hash.slice(1);
     const requestedItem = allItems.find(item => item.id === requested);
     if (requestedItem) {
@@ -1378,6 +1393,10 @@ def render_human_review_html(
       document.getElementById(`filter-${level}-wrap`).hidden =
         !allItems.some(item => item.attention === level);
     });
+    document.getElementById("filter-current-wrap").hidden =
+      !allItems.some(item => item.current);
+    document.getElementById("filter-stale-wrap").hidden =
+      !allItems.some(item => !item.current);
     render();
   </script>
 </body>
@@ -1565,10 +1584,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="show only the newest selected attempt for each problem",
     )
-    parser.add_argument(
+    freshness = parser.add_mutually_exclusive_group()
+    freshness.add_argument(
+        "--current-only",
+        action="store_true",
+        help="exclude reviews invalidated by newer attempt or literature data",
+    )
+    freshness.add_argument(
         "--include-stale",
         action="store_true",
-        help="include reviews invalidated by later edits to their attempts",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--summary-only",
@@ -1619,7 +1644,7 @@ def main(argv: list[str] | None = None) -> int:
             attempt_names=(
                 set(args.attempt_names) if args.attempt_names else None
             ),
-            include_stale=args.include_stale,
+            include_stale=not args.current_only,
             latest_per_problem=args.latest_per_problem,
         )
         if args.terminal:

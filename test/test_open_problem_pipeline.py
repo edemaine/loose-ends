@@ -983,6 +983,23 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 problems,
                 attention={"high", "medium"},
             )
+            with patch.object(
+                review_solutions,
+                "review_is_current",
+                return_value=False,
+            ):
+                stale_items = human_review.discover_human_reviews(
+                    problems,
+                    attention={"high", "medium"},
+                )
+                with self.assertRaises(common.CodexError):
+                    human_review.discover_human_reviews(
+                        problems,
+                        attention={"high", "medium"},
+                        include_stale=False,
+                    )
+            self.assertEqual(len(stale_items), 2)
+            self.assertTrue(all(not item.current for item in stale_items))
             report = human_review.render_human_review_report(items)
 
             self.assertEqual(
@@ -1015,6 +1032,8 @@ class OpenProblemPipelineTests(unittest.TestCase):
             self.assertIn('id="attempt-list"', dashboard)
             self.assertIn('id="claim-filter"', dashboard)
             self.assertIn('id="literature-filter"', dashboard)
+            self.assertIn('id="filter-current"', dashboard)
+            self.assertIn('id="filter-stale"', dashboard)
             self.assertIn(
                 '<option value="resolution">Any candidate resolution</option>',
                 dashboard,
@@ -1029,6 +1048,10 @@ class OpenProblemPipelineTests(unittest.TestCase):
             )
             self.assertIn(
                 'return item.literatureStatus !== "resolved";',
+                dashboard,
+            )
+            self.assertIn(
+                "if (!item.current && !stale.checked) return false;",
                 dashboard,
             )
             self.assertIn('case "strong-resolution":', dashboard)
