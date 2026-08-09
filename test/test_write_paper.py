@@ -257,6 +257,32 @@ class WritePaperTests(unittest.TestCase):
         self.assertEqual(parsed.max_rounds, 3)
         self.assertIsNone(parsed.authors)
         self.assertEqual(write_paper._metadata([], None)["authors"], [])
+        revision = write_paper.build_parser().parse_args(
+            ["--revise", "draft-001", "--prompt", "Add figures"]
+        )
+        self.assertEqual(revision.revision_instruction, "Add figures")
+        self.assertEqual(
+            revision.prompt_template,
+            write_paper.DEFAULT_PROMPT_PATH,
+        )
+
+    def test_writer_prompt_includes_explicit_revision_direction(self):
+        rendered = write_paper.render_writer_prompt(
+            "{{MODE_INSTRUCTION}}\n{{CONTEXT_DIRECTORY}}\n"
+            "{{MANUSCRIPT_METADATA_JSON}}",
+            context=Path.cwd(),
+            authors=[],
+            title_hint=None,
+            previous=write_paper.DraftRef(
+                Path("draft-001"),
+                1,
+                {"status": "draft_complete"},
+            ),
+            revision_instruction="Add figures explaining the construction.",
+        )
+
+        self.assertIn("<revision_instruction>", rendered)
+        self.assertIn("Add figures explaining the construction.", rendered)
 
     def test_readiness_gate_can_only_be_overridden_explicitly(self):
         with TemporaryDirectory() as temporary:
@@ -635,6 +661,70 @@ class WritePaperTests(unittest.TestCase):
             )
 
         self.assertEqual(critic.call_count, 1)
+        self.assertEqual(outcome.reason, "needs_research")
+
+    def test_revision_prompt_starts_author_round_before_critic(self):
+        previous = write_paper.DraftRef(
+            Path("draft-001"),
+            1,
+            {"status": "draft_complete"},
+        )
+        revised = write_paper.DraftRef(
+            Path("draft-002"),
+            2,
+            {"status": "draft_complete"},
+        )
+        review = write_paper.PaperReview(
+            revised,
+            {"verdict": "needs_research"},
+        )
+        options = codex_cli.ModelOptions()
+        calls: list[str] = []
+
+        def author_round(*args, **kwargs):
+            calls.append("author")
+            self.assertEqual(kwargs["previous"], previous)
+            self.assertEqual(kwargs["revision_instruction"], "Add figures")
+            return revised
+
+        def paper_review(*args, **kwargs):
+            calls.append("critic")
+            return review
+
+        with (
+            patch.object(
+                write_paper,
+                "run_author_round",
+                side_effect=author_round,
+            ),
+            patch.object(
+                write_paper,
+                "run_paper_review",
+                side_effect=paper_review,
+            ),
+        ):
+            outcome = write_paper.run_pipeline(
+                Path("manuscript"),
+                [],
+                previous=previous,
+                authors=[],
+                title_hint=None,
+                revision_instruction="Add figures",
+                max_rounds=1,
+                codex="codex",
+                codex_version="test",
+                latexmk="latexmk",
+                prompt_template="prompt",
+                schema_path=Path("paper-schema.json"),
+                config_digest="writer",
+                options=options,
+                review_prompt_template="review prompt",
+                review_schema_path=Path("review-schema.json"),
+                review_config_digest="reviewer",
+                review_options=options,
+            )
+
+        self.assertEqual(calls, ["author", "critic"])
         self.assertEqual(outcome.reason, "needs_research")
 
 

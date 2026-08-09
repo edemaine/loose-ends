@@ -446,6 +446,7 @@ def render_writer_prompt(
     authors: Sequence[str],
     title_hint: str | None,
     previous: DraftRef | None,
+    revision_instruction: str | None = None,
 ) -> str:
     if previous is None:
         mode = (
@@ -455,11 +456,21 @@ def render_writer_prompt(
     else:
         mode = (
             "Revise the manuscript in `inputs/manuscript/`. Read its "
-            "`paper-critique.md` and `paper-review.json`, preserve correct "
-            "material, and address every P-### finding explicitly in "
+            "`paper-critique.md` and `paper-review.json` when present, "
+            "preserve correct material, and address every P-### finding "
+            "explicitly in "
             "`readiness.md` and `addressed_findings`. Write a complete "
             "replacement manuscript in the current directory; do not edit "
             "the staged prior draft."
+        )
+    if revision_instruction is not None:
+        mode += (
+            "\n\nThe user explicitly requested this revision direction:\n\n"
+            f"<revision_instruction>\n{revision_instruction}\n"
+            "</revision_instruction>\n\n"
+            "Follow it throughout this author-review invocation while "
+            "preserving mathematical correctness, evidence requirements, "
+            "and all independently verified material."
         )
     return (
         template.replace("{{MODE_INSTRUCTION}}", mode)
@@ -562,8 +573,11 @@ def _generated_files(workspace: Path, values: object) -> list[Path]:
 def _previous_finding_ids(previous: DraftRef | None) -> set[str]:
     if previous is None:
         return set()
+    review_path = previous.directory / "paper-review.json"
+    if not review_path.is_file():
+        return set()
     review = common.read_json(
-        previous.directory / "paper-review.json",
+        review_path,
         description=f"paper review for {previous.directory}",
     )
     findings = review.get("findings")
@@ -949,6 +963,7 @@ def _install_draft(
     previous: DraftRef | None,
     authors: Sequence[str],
     title_hint: str | None,
+    revision_instruction: str | None,
     config_digest: str,
     codex_version: str,
     options: codex_cli.ModelOptions,
@@ -1003,6 +1018,7 @@ def _install_draft(
                 ),
                 "authors": list(authors),
                 "title_hint": title_hint,
+                "revision_instruction": revision_instruction,
                 "config_digest": config_digest,
                 "codex_version": codex_version,
                 "requested_model": options.model,
@@ -1028,6 +1044,7 @@ def run_author_round(
     previous: DraftRef | None,
     authors: Sequence[str],
     title_hint: str | None,
+    revision_instruction: str | None,
     codex: str,
     codex_version: str,
     latexmk: str | Sequence[str],
@@ -1051,6 +1068,7 @@ def run_author_round(
             authors=authors,
             title_hint=title_hint,
             previous=previous,
+            revision_instruction=revision_instruction,
         )
         result_path = codex_cli.run_structured_codex(
             codex=codex,
@@ -1079,6 +1097,7 @@ def run_author_round(
             previous=previous,
             authors=authors,
             title_hint=title_hint,
+            revision_instruction=revision_instruction,
             config_digest=config_digest,
             codex_version=codex_version,
             options=options,
@@ -1316,6 +1335,7 @@ def run_pipeline(
     previous: DraftRef | None,
     authors: Sequence[str],
     title_hint: str | None,
+    revision_instruction: str | None = None,
     max_rounds: int,
     codex: str,
     codex_version: str,
@@ -1335,7 +1355,7 @@ def run_pipeline(
     drafts: list[DraftRef] = []
     final_review: PaperReview | None = None
     current_previous = previous
-    if current_previous is not None:
+    if current_previous is not None and revision_instruction is None:
         reviewed_now = False
         saved_review = (
             common.load_json(current_previous.directory / "paper-review.json")
@@ -1380,6 +1400,7 @@ def run_pipeline(
             previous=current_previous,
             authors=authors,
             title_hint=title_hint,
+            revision_instruction=revision_instruction,
             codex=codex,
             codex_version=codex_version,
             latexmk=latexmk,
@@ -1493,6 +1514,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="reviewed draft-NNN to revise instead of starting a manuscript",
     )
     parser.add_argument(
+        "--prompt",
+        dest="revision_instruction",
+        metavar="TEXT",
+        help="explicit revision direction; requires --revise",
+    )
+    parser.add_argument(
         "--name",
         help="manuscript directory name (default: paper dirname plus OP IDs)",
     )
@@ -1546,7 +1573,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="latexmk",
         help="latexmk executable or command name (default: latexmk)",
     )
-    parser.add_argument("--prompt", type=Path, default=DEFAULT_PROMPT_PATH)
+    parser.add_argument(
+        "--prompt-template",
+        type=Path,
+        default=DEFAULT_PROMPT_PATH,
+        help=f"writer prompt-template path (default: {DEFAULT_PROMPT_PATH})",
+    )
     parser.add_argument("--schema", type=Path, default=DEFAULT_SCHEMA_PATH)
     parser.add_argument(
         "--review-prompt",
@@ -1574,6 +1606,11 @@ def main(argv: list[str] | None = None) -> int:
             raise common.CodexError(
                 "provide one or more attempt directories, or --revise, but not both"
             )
+        if args.revision_instruction is not None:
+            if not args.revision_instruction.strip():
+                raise common.CodexError("--prompt must be nonempty")
+            if not args.revise:
+                raise common.CodexError("--prompt requires --revise")
         if args.revise:
             previous = _load_draft(args.revise)
             inputs, prior_manifest = _revision_inputs(
@@ -1613,7 +1650,7 @@ def main(argv: list[str] | None = None) -> int:
         if not all(isinstance(author, str) and author.strip() for author in authors):
             raise common.CodexError("every --author must be nonempty")
 
-        prompt_path = args.prompt.expanduser().resolve()
+        prompt_path = args.prompt_template.expanduser().resolve()
         schema_path = args.schema.expanduser().resolve()
         prompt_template = _read_text(prompt_path, "paper prompt")
         schema_text = _read_text(schema_path, "paper schema")
@@ -1665,6 +1702,8 @@ def main(argv: list[str] | None = None) -> int:
             f"Would create and independently review at most "
             f"{args.max_rounds} new draft(s)."
         )
+        if args.revision_instruction is not None:
+            print(f"Revision direction: {args.revision_instruction}")
         return 0
 
     try:
@@ -1683,6 +1722,7 @@ def main(argv: list[str] | None = None) -> int:
             previous=previous,
             authors=authors,
             title_hint=title_hint,
+            revision_instruction=args.revision_instruction,
             max_rounds=args.max_rounds,
             codex=codex,
             codex_version=codex_version,

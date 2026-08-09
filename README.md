@@ -549,6 +549,19 @@ python src/write_paper.py \
   --max-rounds 2
 ```
 
+Add a human-directed revision goal with `--prompt`. This starts an author round
+immediately, even if the selected draft has no paper review yet, and retains
+the direction across all automatic revision rounds in that invocation:
+
+```sh
+python src/write_paper.py \
+  --revise manuscripts/arXiv-..._OP-001/draft-001 \
+  --prompt "Add figures illustrating the construction"
+```
+
+Use `--prompt-template FILE` to replace the complete low-level writer prompt
+template.
+
 An interrupted review can be resumed through the same `--revise` command: the
 script reviews the installed unreviewed draft before deciding whether another
 writing round is appropriate. A successful final verdict is only readiness for
