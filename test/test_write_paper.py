@@ -99,9 +99,8 @@ def make_ready_attempt(paper: Path, problem_id: str, attempt_number: int = 1) ->
         encoding="utf-8",
     )
     solver_result = {
-        "status": "candidate_solution",
+        "claimed_result_type": "solution",
         "summary": "A complete proof.",
-        "novelty_status": "apparently_new",
         "external_sources": [],
         "checkable_claims": [
             {
@@ -124,10 +123,12 @@ def make_ready_attempt(paper: Path, problem_id: str, attempt_number: int = 1) ->
     common.write_json(
         attempt / "review-result.json",
         {
-            "verdict": "strong_candidate",
-            "attention": "high",
+            "correctness": "well_supported",
+            "reviewed_coverage": "complete",
+            "importance": "resolution",
+            "verification_confidence": "high",
+            "human_priority": "high",
             "summary": "The proof is supported.",
-            "novelty_assessment": "apparently_new",
             "claim_reviews": [
                 {
                     "claim_id": "C-001",
@@ -143,9 +144,8 @@ def make_ready_attempt(paper: Path, problem_id: str, attempt_number: int = 1) ->
     common.write_json(
         attempt / "review-manifest.json",
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "attempt_digest": common.solver_attempt_digest(attempt),
-            "literature_snapshot_digest": common.literature_snapshot_digest(problem),
         },
     )
     return attempt
@@ -205,6 +205,7 @@ def write_manuscript_files(workspace: Path, result_ids: list[str]) -> None:
         "\\documentclass{article}\n"
         "\\usepackage{amsthm}\n"
         "\\title{A Short Result}\n"
+        "\\author{}\n"
         "\\begin{document}\n\\maketitle\n"
         "\\begin{abstract}We solve an open problem.\\end{abstract}\n"
         "\\section{Introduction}The problem was posed in \\cite{origin}.\n"
@@ -254,13 +255,15 @@ class WritePaperTests(unittest.TestCase):
         self.assertEqual(parsed.reasoning_effort, "xhigh")
         self.assertEqual(parsed.web_search, "live")
         self.assertEqual(parsed.max_rounds, 3)
+        self.assertIsNone(parsed.authors)
+        self.assertEqual(write_paper._metadata([], None)["authors"], [])
 
     def test_readiness_gate_can_only_be_overridden_explicitly(self):
         with TemporaryDirectory() as temporary:
             paper = make_paper(Path(temporary))
             attempt = make_ready_attempt(paper, "OP-001")
             review = common.read_json(attempt / "review-result.json")
-            review["verdict"] = "plausible_progress"
+            review["correctness"] = "minor_gaps"
             common.write_json(attempt / "review-result.json", review)
             manifest = common.read_json(attempt / "review-manifest.json")
             manifest["attempt_digest"] = common.solver_attempt_digest(attempt)
@@ -320,6 +323,7 @@ class WritePaperTests(unittest.TestCase):
                 workspace / "agent-result.json",
                 workspace,
                 inputs,
+                authors=[],
             )
 
             self.assertEqual(result["status"], "draft_complete")

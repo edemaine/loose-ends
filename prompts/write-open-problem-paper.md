@@ -98,9 +98,9 @@ Write these files in the current working directory:
   `P-###` critic finding individually;
 - optional generated figures beneath `figures/` only.
 
-Use the requested authors exactly. If the author list is `Anonymous`, retain
-that placeholder. Do not copy authors from an originating paper into the
-manuscript author list. Do not modify `inputs/`.
+Use the requested authors exactly. If the author list is empty, write
+`\author{}` with no placeholder name. Do not copy authors from an originating
+paper into the manuscript author list. Do not modify `inputs/`.
 
 Run `latexmk -pdf -interaction=nonstopmode -halt-on-error -file-line-error
 main.tex` and repair LaTeX errors, undefined citations, and undefined references

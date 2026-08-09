@@ -44,6 +44,13 @@ ANALYSIS_FILES = (
     "manifest.json",
 )
 EXPLICITNESS_VALUES = ("explicit", "inferred", "uncertain")
+CLAIMED_RESULT_TYPES = (
+    "none",
+    "obstruction",
+    "partial_result",
+    "solution",
+    "counterexample",
+)
 CodexError = codex_cli.CodexError
 
 
@@ -77,6 +84,14 @@ class ProblemRef:
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def claimed_result_type(result: dict) -> str:
+    """Return a current solver result's mathematical claim type."""
+    claimed = result.get("claimed_result_type")
+    if claimed in CLAIMED_RESULT_TYPES:
+        return claimed
+    return "unknown"
 
 
 def read_json(path: Path, *, description: str | None = None) -> dict:

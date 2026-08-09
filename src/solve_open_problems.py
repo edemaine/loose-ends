@@ -28,21 +28,7 @@ DEFAULT_SCHEMA_PATH = (
 )
 DEFAULT_REVIEW_PROMPT_PATH = review_solutions.DEFAULT_PROMPT_PATH
 DEFAULT_REVIEW_SCHEMA_PATH = review_solutions.DEFAULT_SCHEMA_PATH
-SOLUTION_STATUSES = (
-    "no_checkable_progress",
-    "useful_negative_result",
-    "partial_progress",
-    "candidate_counterexample",
-    "candidate_solution",
-    "known_resolution",
-)
-NOVELTY_STATUSES = (
-    "apparently_new",
-    "known_result_reconstruction",
-    "new_extension",
-    "mixed",
-    "unknown",
-)
+SOLUTION_STATUSES = common.CLAIMED_RESULT_TYPES
 CLAIM_ID_RE = re.compile(r"^C-[0-9]{3,}$")
 CORE_OUTPUT_PATHS = {"attempt.md"}
 WORK_RECORD_FILE = "work-record.json"
@@ -65,7 +51,7 @@ class SolveWork:
 class SolveOutcome:
     work: SolveWork
     attempt: review_solutions.AttemptRef
-    status: str
+    claimed_result_type: str
     claim_count: int
     message: str
 
@@ -241,16 +227,15 @@ def validate_solver_result(
     workspace: Path,
 ) -> tuple[dict, list[Path]]:
     result = common.read_json(result_path, description="solver response")
-    status = result.get("status")
-    if status not in SOLUTION_STATUSES:
-        raise common.CodexError("solver response has an invalid status")
+    claimed_result_type = result.get("claimed_result_type")
+    if claimed_result_type not in SOLUTION_STATUSES:
+        raise common.CodexError(
+            "solver response has an invalid claimed_result_type"
+        )
     if not isinstance(result.get("summary"), str) or not result[
         "summary"
     ].strip():
         raise common.CodexError("solver response has no summary")
-    novelty_status = result.get("novelty_status")
-    if novelty_status not in NOVELTY_STATUSES:
-        raise common.CodexError("solver response has invalid novelty_status")
     external_sources = result.get("external_sources")
     if not isinstance(external_sources, list):
         raise common.CodexError("solver response has invalid external_sources")
@@ -264,20 +249,6 @@ def validate_solver_result(
                 )
         if not source["url"].startswith(("https://", "http://")):
             raise common.CodexError("solver external source has invalid URL")
-    if (
-        status == "known_resolution"
-        and novelty_status != "known_result_reconstruction"
-    ):
-        raise common.CodexError(
-            "known_resolution requires known_result_reconstruction novelty"
-        )
-    if (
-        status == "candidate_solution"
-        and novelty_status == "known_result_reconstruction"
-    ):
-        raise common.CodexError(
-            "a reconstructed published result must use known_resolution"
-        )
     warnings = result.get("warnings")
     if not isinstance(warnings, list) or not all(
         isinstance(value, str) for value in warnings
@@ -318,13 +289,13 @@ def validate_solver_result(
                 raise common.CodexError(
                     f"solver claim {claim_id} has invalid {field}"
                 )
-    if status == "no_checkable_progress" and claims:
+    if claimed_result_type == "none" and claims:
         raise common.CodexError(
-            "no_checkable_progress response unexpectedly contains claims"
+            "none response unexpectedly contains claims"
         )
-    if status != "no_checkable_progress" and not claims:
+    if claimed_result_type != "none" and not claims:
         raise common.CodexError(
-            f"{status} response contains no checkable claims"
+            f"{claimed_result_type} response contains no checkable claims"
         )
     contents = common.validate_markdown(
         workspace / "attempt.md",
@@ -368,7 +339,7 @@ def _install_attempt(
         shutil.copyfile(workspace / "attempt.md", staging / "attempt.md")
         common.write_json(staging / "solver-result.json", result)
         manifest = {
-            "schema_version": 2,
+            "schema_version": 3,
             "generated_at": common.utc_now(),
             "problem_id": work.problem.id,
             "problem_digest": common.problem_digest(work.problem),
@@ -385,7 +356,7 @@ def _install_attempt(
             "requested_reasoning_effort": options.reasoning_effort,
             "requested_fast_mode": options.fast,
             "requested_web_search": web_search,
-            "status": result["status"],
+            "claimed_result_type": result["claimed_result_type"],
             "claim_count": len(result["checkable_claims"]),
         }
         if recovered_from is not None:
@@ -527,10 +498,10 @@ def recover_solver_work(
         return SolveOutcome(
             work,
             attempt,
-            result["status"],
+            result["claimed_result_type"],
             len(result["checkable_claims"]),
             (
-                f"recovered {result['status']}; "
+                f"recovered {result['claimed_result_type']}; "
                 f"{len(result['checkable_claims'])} claim(s); "
                 f"preserved {workspace.name}"
             ),
@@ -618,13 +589,16 @@ def solve_work(
         installed_log=destination / "run.log",
     )
     attempt = review_solutions.AttemptRef(work.problem, destination, result)
-    message = f"{result['status']}; {len(result['checkable_claims'])} claim(s)"
+    message = (
+        f"{result['claimed_result_type']}; "
+        f"{len(result['checkable_claims'])} claim(s)"
+    )
     if warning:
         message += "; temporary workspace preserved"
     return SolveOutcome(
         work,
         attempt,
-        result["status"],
+        result["claimed_result_type"],
         len(result["checkable_claims"]),
         message,
     )
@@ -1044,23 +1018,24 @@ def main(argv: list[str] | None = None) -> int:
                     file=sys.stderr,
                 )
 
-    attention = [
+    priority_items = [
         outcome
         for outcome in review_outcomes
-        if outcome.attention in {"medium", "high"}
+        if outcome.priority in {"medium", "high"}
     ]
-    if attention:
-        print("Human attention recommended:")
+    if priority_items:
+        print("Human review recommended:")
         for outcome in sorted(
-            attention,
+            priority_items,
             key=lambda item: (
-                item.attention != "high",
+                item.priority != "high",
                 str(item.attempt.directory),
             ),
         ):
             print(
-                f"  {outcome.attention}: {outcome.attempt.directory} "
-                f"({outcome.verdict})"
+                f"  {outcome.priority}: {outcome.attempt.directory} "
+                f"({outcome.correctness}; {outcome.coverage}; "
+                f"{outcome.importance})"
             )
         print("Open the human-review dashboard with:")
         print(
@@ -1076,7 +1051,7 @@ def main(argv: list[str] | None = None) -> int:
     unreviewed_candidates = [
         outcome
         for outcome in outcomes
-        if outcome.status in {"candidate_counterexample", "candidate_solution"}
+        if outcome.claimed_result_type in {"counterexample", "solution"}
         and not (outcome.attempt.directory / "review-result.json").is_file()
     ]
     if unreviewed_candidates:
@@ -1090,7 +1065,7 @@ def main(argv: list[str] | None = None) -> int:
         f"skipped for no checkable progress; "
         f"{len(review_failures)} review failure(s); "
         f"{len(literature_resolved)} problem(s) skipped as literature-"
-        f"resolved; {len(attention)} recommended for human attention."
+        f"resolved; {len(priority_items)} recommended for human review."
     )
     return 1 if failures or review_failures else 0
 

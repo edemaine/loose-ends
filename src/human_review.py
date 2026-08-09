@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Present solver attempts that merit human attention."""
+"""Present solver attempts selected for human review."""
 
 from __future__ import annotations
 
@@ -21,8 +21,8 @@ import open_problem_common as common
 import review_solutions
 
 
-DEFAULT_ATTENTION = "high,medium"
-ATTENTION_RANK = {
+DEFAULT_PRIORITY = "high,medium"
+PRIORITY_RANK = {
     "high": 0,
     "medium": 1,
     "low": 2,
@@ -37,7 +37,10 @@ class HumanReviewItem:
     current: bool
 
     @property
-    def attention(self) -> str:
+    def priority(self) -> str:
+        value = self.review_result.get("human_priority")
+        if value in review_solutions.HUMAN_PRIORITY_LEVELS:
+            return value
         return self.review_result["attention"]
 
 
@@ -49,7 +52,7 @@ def _attempt_number(attempt: review_solutions.AttemptRef) -> int:
 def discover_human_reviews(
     problems: Iterable[common.ProblemRef],
     *,
-    attention: set[str],
+    priority: set[str],
     attempt_names: set[str] | None = None,
     include_stale: bool = True,
     latest_per_problem: bool = False,
@@ -65,12 +68,12 @@ def discover_human_reviews(
         result = common.load_json(result_path)
         if result is None:
             continue
-        level = result.get("attention")
-        if level not in review_solutions.ATTENTION_LEVELS:
+        level = result.get("human_priority", result.get("attention"))
+        if level not in review_solutions.HUMAN_PRIORITY_LEVELS:
             raise common.CodexError(
-                f"review has invalid attention level: {result_path}"
+                f"review has invalid human priority: {result_path}"
             )
-        if level not in attention:
+        if level not in priority:
             continue
         current = review_solutions.review_is_current(attempt)
         if not current and not include_stale:
@@ -95,7 +98,7 @@ def discover_human_reviews(
 
     items.sort(
         key=lambda item: (
-            ATTENTION_RANK[item.attention],
+            PRIORITY_RANK[item.priority],
             os.path.normcase(
                 str(item.attempt.problem.paper_directory)
             ),
@@ -105,11 +108,11 @@ def discover_human_reviews(
     )
     if not items:
         levels = ", ".join(
-            sorted(attention, key=ATTENTION_RANK.__getitem__)
+            sorted(priority, key=PRIORITY_RANK.__getitem__)
         )
         qualifier = "current " if not include_stale else ""
         raise common.CodexError(
-            f"no matching {qualifier}reviews have attention {levels}"
+            f"no matching {qualifier}reviews have priority {levels}"
         )
     return items
 
@@ -270,22 +273,34 @@ def _html_data(
                 "attemptName": attempt.name,
                 "attemptDirectory": str(attempt.directory),
                 "attemptNumber": _attempt_number(attempt),
-                "attention": item.attention,
+                "priority": item.priority,
                 "current": item.current,
-                "verdict": item.review_result.get("verdict", "unknown"),
+                "legacyVerdict": item.review_result.get("verdict", ""),
+                "reviewSchema": (
+                    "current"
+                    if item.review_result.get("correctness")
+                    in review_solutions.CORRECTNESS_LEVELS
+                    else "legacy"
+                ),
+                "correctness": item.review_result.get(
+                    "correctness", "legacy"
+                ),
+                "reviewedCoverage": item.review_result.get(
+                    "reviewed_coverage", "legacy"
+                ),
+                "importance": item.review_result.get(
+                    "importance", "legacy"
+                ),
+                "verificationConfidence": item.review_result.get(
+                    "verification_confidence", "legacy"
+                ),
                 "criticSummary": item.review_result.get("summary", ""),
-                "solverStatus": attempt.solver_result.get(
-                    "status", "unknown"
+                "claimedResultType": common.claimed_result_type(
+                    attempt.solver_result
                 ),
                 "solverSummary": attempt.solver_result.get("summary", ""),
-                "solverNovelty": attempt.solver_result.get(
-                    "novelty_status", "unknown"
-                ),
                 "externalSources": attempt.solver_result.get(
                     "external_sources", []
-                ),
-                "criticNovelty": item.review_result.get(
-                    "novelty_assessment", "uncertain"
                 ),
                 "literatureStatus": (
                     literature.get("resolution_status", "")
@@ -437,6 +452,23 @@ def render_human_review_html(
       color: var(--muted);
     }
     .controls { display: grid; gap: 11px; }
+    .advanced-filters {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--surface);
+      padding: 8px 10px;
+    }
+    .advanced-filters summary {
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 800;
+    }
+    .advanced-filter-grid {
+      display: grid;
+      gap: 10px;
+      margin-top: 10px;
+    }
     label.control {
       display: grid;
       gap: 5px;
@@ -865,16 +897,71 @@ def render_human_review_html(
         <label class="control">Claim type
           <select id="claim-filter">
             <option value="all">All reviewed attempts</option>
-            <option value="resolution">Any candidate resolution</option>
-            <option value="strong-resolution">
-              Strong candidate resolution
-            </option>
-            <option value="solution">Candidate solutions</option>
-            <option value="counterexample">Candidate counterexamples</option>
-            <option value="known">Known-result reconstructions</option>
-            <option value="none">No resolution claim</option>
+            <option value="resolution">Any resolution claim</option>
+            <option value="solution">Solution</option>
+            <option value="counterexample">Counterexample</option>
+            <option value="partial_result">Partial result</option>
+            <option value="obstruction">Obstruction</option>
+            <option value="none">No result</option>
           </select>
         </label>
+        <details class="advanced-filters">
+          <summary>Advanced review filters</summary>
+          <div class="advanced-filter-grid">
+        <label class="control">Correctness
+          <select id="correctness-filter">
+            <option value="all">Any correctness</option>
+            <option value="credible">Plausible or well supported</option>
+            <option value="no_major_error">Minor gaps or better</option>
+            <option value="well_supported">Well supported</option>
+            <option value="plausible">Plausible</option>
+            <option value="minor_gaps">Minor gaps</option>
+            <option value="major_gaps">Major gaps</option>
+            <option value="incorrect">Incorrect</option>
+            <option value="not_applicable">Not applicable</option>
+            <option value="legacy">Legacy review</option>
+          </select>
+        </label>
+        <label class="control">Coverage
+          <select id="coverage-filter">
+            <option value="all">Any coverage</option>
+            <option value="complete_any">Any complete coverage</option>
+            <option value="substantial">Near complete or complete</option>
+            <option value="complete">Complete</option>
+            <option value="complete_under_stated_interpretation">
+              Complete under stated interpretation
+            </option>
+            <option value="near_complete">Near complete</option>
+            <option value="partial">Partial</option>
+            <option value="special_case">Special case</option>
+            <option value="auxiliary">Auxiliary</option>
+            <option value="none">None</option>
+            <option value="legacy">Legacy review</option>
+          </select>
+        </label>
+        <label class="control">Importance
+          <select id="importance-filter">
+            <option value="all">Any importance</option>
+            <option value="major_or_resolution">Major or resolution</option>
+            <option value="resolution">Resolution</option>
+            <option value="major">Major</option>
+            <option value="moderate">Moderate</option>
+            <option value="minor">Minor</option>
+            <option value="none">None</option>
+            <option value="legacy">Legacy review</option>
+          </select>
+        </label>
+        <label class="control">Verification confidence
+          <select id="confidence-filter">
+            <option value="all">Any confidence</option>
+            <option value="high">High</option>
+            <option value="medium">Medium</option>
+            <option value="low">Low</option>
+            <option value="legacy">Legacy review</option>
+          </select>
+        </label>
+          </div>
+        </details>
         <label class="control">Literature status
           <select id="literature-filter">
             <option value="all">Any literature status</option>
@@ -888,7 +975,7 @@ def render_human_review_html(
             <option value="missing">No literature review</option>
           </select>
         </label>
-        <div class="filters" aria-label="Attention filters">
+        <div class="filters" aria-label="Human priority filters">
           <label class="filter"><input id="filter-high" type="checkbox" checked>
             High</label>
           <label class="filter"><input id="filter-medium" type="checkbox" checked>
@@ -914,8 +1001,8 @@ def render_human_review_html(
     <main class="main">
       <div class="empty" id="empty" hidden>
         <h1>No matching reviews</h1>
-        <p>Change the search, claim type, literature, review status, or
-          attention filters.</p>
+        <p>Change the search, mathematical assessment, literature, review
+          status, or human-priority filters.</p>
       </div>
       <article class="review" id="review"></article>
     </main>
@@ -928,12 +1015,16 @@ def render_human_review_html(
     const state = { selectedProblem: "", selectedItem: "", tab: "attempt" };
     const search = document.getElementById("search");
     const claimFilter = document.getElementById("claim-filter");
+    const correctnessFilter = document.getElementById("correctness-filter");
+    const coverageFilter = document.getElementById("coverage-filter");
+    const importanceFilter = document.getElementById("importance-filter");
+    const confidenceFilter = document.getElementById("confidence-filter");
     const literatureFilter = document.getElementById("literature-filter");
     const high = document.getElementById("filter-high");
     const medium = document.getElementById("filter-medium");
     const low = document.getElementById("filter-low");
     const none = document.getElementById("filter-none");
-    const attentionFilters = { high, medium, low, none };
+    const priorityFilters = { high, medium, low, none };
     const current = document.getElementById("filter-current");
     const stale = document.getElementById("filter-stale");
     const problemList = document.getElementById("problem-list");
@@ -976,34 +1067,56 @@ def render_human_review_html(
       return element;
     }
 
-    function resolutionKind(item) {
-      if (item.solverStatus === "candidate_solution") return "solution";
-      if (item.solverStatus === "candidate_counterexample") {
-        return "counterexample";
-      }
-      if (item.solverStatus === "known_resolution") return "known";
-      return "";
-    }
-
     function matchesClaimType(item) {
-      const kind = resolutionKind(item);
+      const kind = item.claimedResultType;
       switch (claimFilter.value) {
         case "resolution":
           return kind === "solution" || kind === "counterexample";
-        case "strong-resolution":
-          return (kind === "solution" || kind === "counterexample") &&
-            item.verdict === "strong_candidate";
         case "solution":
-          return kind === "solution";
         case "counterexample":
-          return kind === "counterexample";
-        case "known":
-          return kind === "known";
+        case "partial_result":
+        case "obstruction":
         case "none":
-          return kind === "";
+          return kind === claimFilter.value;
         default:
           return true;
       }
+    }
+
+    function matchesDimension(select, value) {
+      return select.value === "all" || select.value === value;
+    }
+
+    function matchesCorrectness(item) {
+      if (correctnessFilter.value === "credible") {
+        return ["plausible", "well_supported"].includes(item.correctness);
+      }
+      if (correctnessFilter.value === "no_major_error") {
+        return ["minor_gaps", "plausible", "well_supported"].includes(
+          item.correctness
+        );
+      }
+      return matchesDimension(correctnessFilter, item.correctness);
+    }
+
+    function matchesCoverage(item) {
+      const complete = [
+        "complete_under_stated_interpretation", "complete"
+      ];
+      if (coverageFilter.value === "complete_any") {
+        return complete.includes(item.reviewedCoverage);
+      }
+      if (coverageFilter.value === "substantial") {
+        return ["near_complete", ...complete].includes(item.reviewedCoverage);
+      }
+      return matchesDimension(coverageFilter, item.reviewedCoverage);
+    }
+
+    function matchesImportance(item) {
+      if (importanceFilter.value === "major_or_resolution") {
+        return ["major", "resolution"].includes(item.importance);
+      }
+      return matchesDimension(importanceFilter, item.importance);
     }
 
     function matchesLiteratureStatus(item) {
@@ -1025,19 +1138,26 @@ def render_human_review_html(
     function filteredItems() {
       const query = search.value.trim().toLowerCase();
       return allItems.filter(item => {
-        if (attentionFilters[item.attention] &&
-            !attentionFilters[item.attention].checked) return false;
+        if (priorityFilters[item.priority] &&
+            !priorityFilters[item.priority].checked) return false;
         if (item.current && !current.checked) return false;
         if (!item.current && !stale.checked) return false;
         if (!matchesClaimType(item)) return false;
+        if (!matchesCorrectness(item)) return false;
+        if (!matchesCoverage(item)) return false;
+        if (!matchesImportance(item)) return false;
+        if (!matchesDimension(
+          confidenceFilter, item.verificationConfidence
+        )) return false;
         if (!matchesLiteratureStatus(item)) return false;
         if (!query) return true;
         const haystack = [
           item.paperTitle, item.problemId, item.problemTitle,
           item.problemStatement,
           item.attemptName, item.criticSummary, item.solverSummary,
-          item.solverStatus, item.solverNovelty, item.criticNovelty,
-          item.literatureStatus, item.literatureSummary, item.verdict
+          item.claimedResultType, item.correctness, item.reviewedCoverage,
+          item.importance, item.verificationConfidence,
+          item.literatureStatus, item.literatureSummary, item.legacyVerdict
         ].join(" ").toLowerCase();
         return haystack.includes(query);
       });
@@ -1101,7 +1221,7 @@ def render_human_review_html(
             .map(level => [
               level,
               problemAttempts.filter(
-                attempt => attempt.attention === level
+                attempt => attempt.priority === level
               ).length
             ])
             .filter(([, count]) => count)
@@ -1148,19 +1268,14 @@ def render_human_review_html(
           `attempt-card${item.id === state.selectedItem ? " active" : ""}`
         );
         button.type = "button";
-        const resolution = resolutionKind(item);
         button.append(
           node("strong", "", item.attemptName),
           node(
             "span",
             "",
-            `${item.attention.toUpperCase()} · ${item.verdict}${
-              resolution === "known"
-                ? " · KNOWN-RESULT RECONSTRUCTION"
-                : resolution
-                  ? ` · ${resolution.toUpperCase()} CLAIM`
-                  : ""
-            }`
+            `${item.priority.toUpperCase()} · ` +
+              `${item.claimedResultType.replaceAll("_", " ").toUpperCase()} · ` +
+              `${item.correctness.replaceAll("_", " ")}`
           )
         );
         button.addEventListener("click", () => {
@@ -1177,21 +1292,23 @@ def render_human_review_html(
       review.replaceChildren();
       const top = node("div", "topline");
       top.append(
-        node("span", `badge ${item.attention}`, item.attention),
-        node("span", "verdict", `${item.verdict} · ${item.attemptName}`)
+        node("span", `badge ${item.priority}`, item.priority),
+        node(
+          "span",
+          "verdict",
+          `${item.claimedResultType.replaceAll("_", " ")} · ${item.attemptName}`
+        )
       );
-      const resolution = resolutionKind(item);
-      if (resolution) {
-        top.append(
-          node(
-            "span",
-            `badge ${resolution}`,
-            resolution === "known"
-              ? "known-result reconstruction"
-              : `${resolution} claim`
-          )
-        );
-      }
+      top.append(
+        node("span", "badge", item.correctness.replaceAll("_", " ")),
+        node(
+          "span", "badge", `coverage: ${item.reviewedCoverage.replaceAll("_", " ")}`
+        ),
+        node("span", "badge", `importance: ${item.importance}`),
+        node(
+          "span", "badge", `verification: ${item.verificationConfidence}`
+        )
+      );
       if (item.literatureStatus) {
         top.append(
           node(
@@ -1202,6 +1319,9 @@ def render_human_review_html(
         );
       }
       if (!item.current) top.append(node("span", "stale", "STALE REVIEW"));
+      if (item.reviewSchema === "legacy") {
+        top.append(node("span", "stale", "LEGACY ASSESSMENT"));
+      }
       review.append(top);
       review.append(node("h1", "", item.paperTitle));
       review.append(
@@ -1248,7 +1368,13 @@ def render_human_review_html(
       }
       const critic = node("section", "summary");
       critic.append(
-        node("h2", "", `Critic assessment · ${item.criticNovelty}`),
+        node(
+          "h2",
+          "",
+          item.reviewSchema === "legacy"
+            ? `Critic · legacy ${item.legacyVerdict}`
+            : `Critic · ${item.correctness} · ${item.reviewedCoverage}`
+        ),
         markdownBody(item.criticSummary, "No critic summary.")
       );
       const solver = node("section", "summary");
@@ -1256,7 +1382,7 @@ def render_human_review_html(
         node(
           "h2",
           "",
-          `Solver · ${item.solverStatus} · ${item.solverNovelty}`
+          `Solver claim · ${item.claimedResultType}`
         ),
         markdownBody(item.solverSummary, "No solver summary.")
       );
@@ -1341,18 +1467,18 @@ def render_human_review_html(
       const countText = levels
         .map(level => [
           level,
-          items.filter(item => item.attention === level).length
+          items.filter(item => item.priority === level).length
         ])
         .filter(([, count]) => count)
         .map(([level, count]) => `${count} ${level}`)
         .join(" · ");
       const focusLabels = {
-        resolution: "candidate resolutions",
-        "strong-resolution": "strong candidate resolutions",
-        solution: "candidate solutions",
-        counterexample: "candidate counterexamples",
-        known: "known-result reconstructions",
-        none: "no resolution claim"
+        resolution: "resolution claims",
+        solution: "solution claims",
+        counterexample: "counterexample claims",
+        partial_result: "partial results",
+        obstruction: "obstructions",
+        none: "no result claim"
       };
       const literatureLabels = {
         "exclude-resolved": "excluding known full resolutions",
@@ -1387,6 +1513,10 @@ def render_human_review_html(
     }
     search.addEventListener("input", updateFilters);
     claimFilter.addEventListener("change", updateFilters);
+    correctnessFilter.addEventListener("change", updateFilters);
+    coverageFilter.addEventListener("change", updateFilters);
+    importanceFilter.addEventListener("change", updateFilters);
+    confidenceFilter.addEventListener("change", updateFilters);
     literatureFilter.addEventListener("change", updateFilters);
     high.addEventListener("change", updateFilters);
     medium.addEventListener("change", updateFilters);
@@ -1402,7 +1532,7 @@ def render_human_review_html(
     }
     ["low", "none"].forEach(level => {
       document.getElementById(`filter-${level}-wrap`).hidden =
-        !allItems.some(item => item.attention === level);
+        !allItems.some(item => item.priority === level);
     });
     document.getElementById("filter-current-wrap").hidden =
       !allItems.some(item => item.current);
@@ -1421,7 +1551,7 @@ def render_human_review_report(
     include_contents: bool = True,
 ) -> str:
     """Build a Markdown review queue with critic and solver evidence."""
-    counts = Counter(item.attention for item in items)
+    counts = Counter(item.priority for item in items)
     count_text = ", ".join(
         f"{counts[level]} {level}"
         for level in ("high", "medium", "low", "none")
@@ -1432,7 +1562,7 @@ def render_human_review_report(
         "",
         f"{len(items)} attempt(s): {count_text}.",
         "",
-        "Items are ordered by attention level, paper, problem, and newest "
+        "Items are ordered by human priority, paper, problem, and newest "
         "attempt first.",
         "",
     ]
@@ -1451,7 +1581,7 @@ def render_human_review_report(
             (
                 "---",
                 "",
-                f"## {index}. {item.attention.upper()} — "
+                f"## {index}. {item.priority.upper()} — "
                 f"{problem.id}/{attempt.name}{current_label}",
                 "",
                 f"**Attempt path:** `{attempt.directory}`",
@@ -1461,16 +1591,20 @@ def render_human_review_report(
                 f"**Problem:** {problem.title} "
                 f"(`{problem.explicitness}`)",
                 "",
-                f"**Verdict:** `{review.get('verdict', 'unknown')}`",
+                f"**Claimed result type:** "
+                f"`{common.claimed_result_type(solver)}`",
                 "",
-                f"**Solver status:** "
-                f"`{solver.get('status', 'unknown')}`",
+                f"**Correctness:** "
+                f"`{review.get('correctness', 'legacy')}`",
                 "",
-                f"**Solver novelty:** "
-                f"`{solver.get('novelty_status', 'unknown')}`",
+                f"**Reviewed coverage:** "
+                f"`{review.get('reviewed_coverage', 'legacy')}`",
                 "",
-                f"**Critic novelty assessment:** "
-                f"`{review.get('novelty_assessment', 'uncertain')}`",
+                f"**Importance:** "
+                f"`{review.get('importance', 'legacy')}`",
+                "",
+                f"**Verification confidence:** "
+                f"`{review.get('verification_confidence', 'legacy')}`",
                 "",
                 f"**Critic summary:** {review.get('summary', '')}",
                 "",
@@ -1545,11 +1679,11 @@ def render_human_review_report(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "show reviewed solver attempts that merit human attention"
+            "show solver attempts by derived human-review priority"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""examples:
-  Build and open the high- and medium-attention dashboard:
+  Build and open the high- and medium-priority dashboard:
     python src/human_review.py papers/edemaine
 
   Show only the newest selected attempt for each problem:
@@ -1570,11 +1704,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="paper directories or parent directories containing papers",
     )
     parser.add_argument(
+        "--priority",
         "--attention",
-        default=DEFAULT_ATTENTION,
+        dest="priority",
+        default=DEFAULT_PRIORITY,
         metavar="LEVELS",
         help=(
-            "comma-separated attention levels to show "
+            "comma-separated human-priority levels to show "
             "(default: high,medium)"
         ),
     )
@@ -1601,7 +1737,7 @@ def build_parser() -> argparse.ArgumentParser:
     freshness.add_argument(
         "--current-only",
         action="store_true",
-        help="exclude reviews invalidated by newer attempt or literature data",
+        help="exclude reviews invalidated by a newer attempt or review schema",
     )
     freshness.add_argument(
         "--include-stale",
@@ -1642,10 +1778,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        attention = common.parse_csv_values(
-            args.attention,
-            allowed=review_solutions.ATTENTION_LEVELS,
-            label="--attention",
+        priority = common.parse_csv_values(
+            args.priority,
+            allowed=review_solutions.HUMAN_PRIORITY_LEVELS,
+            label="--priority",
         )
         problems = common.discover_problem_refs(
             args.paths,
@@ -1653,7 +1789,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         items = discover_human_reviews(
             problems,
-            attention=attention,
+            priority=priority,
             attempt_names=(
                 set(args.attempt_names) if args.attempt_names else None
             ),

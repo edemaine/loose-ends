@@ -40,15 +40,12 @@ shows that the report mismatched the original formulation. If a deliberately
 overridden problem is marked `resolved`, treat reconstruction and auditing as
 the task rather than claiming novelty.
 
-Distinguish provenance rigorously. Never present a published theorem as a new
-Codex result. Use `known_resolution` with
-`known_result_reconstruction` when the exact open problem was already resolved
-and this attempt reconstructs or audits that result. Use `candidate_solution`
-only for a complete-looking argument that is not merely a known result. Use
-`new_extension`, `mixed`, or `apparently_new` only when justified, and use
-`unknown` when novelty was not established. Record every external source
-actually used in `external_sources`, including its URL, purpose, and what was
-verified.
+Classify the mathematical claim independently of novelty. Use `solution` or
+`counterexample` for a complete-looking resolution claim even if the same
+result may already appear in the literature; literature provenance is assessed
+separately. Never present a published theorem as a new Codex result in the
+prose. Record every external source actually used in `external_sources`,
+including its URL, purpose, and what was verified.
 
 The research guidance is advisory, not an assigned plan. Form your own strategy
 after reading all context. You may combine, reorder, abandon, or replace the
@@ -80,12 +77,13 @@ Put useful code, data, or auxiliary derivations under `artifacts/`, and list
 only those `artifacts/...` relative paths in the structured response. Do not
 list the required `attempt.md` as an artifact. Do not modify `inputs/`.
 
-Use `no_checkable_progress` when there is nothing concrete for a critic to
-verify. A failed approach can still be `useful_negative_result` if it
-establishes a specific obstruction or eliminates a well-defined strategy.
-Reserve `candidate_solution` and `candidate_counterexample` for
-complete-looking arguments that still require independent review.
-`known_resolution` is checkable but is not a novelty claim.
+Use `none` when there is nothing concrete for a critic to verify. A failed
+approach can still be an `obstruction` if it establishes a specific barrier or
+eliminates a well-defined strategy. Use `partial_result` for checkable progress
+that does not resolve the full problem. Reserve `solution` and
+`counterexample` for complete-looking arguments that still require independent
+review. These values classify only the claim's mathematical scope, not its
+novelty.
 
 Your final response must be only the JSON object required by the supplied
 schema.

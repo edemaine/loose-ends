@@ -25,22 +25,27 @@ DEFAULT_PROMPT_PATH = (
 DEFAULT_SCHEMA_PATH = (
     PROJECT_ROOT / "schemas" / "open-problem-review.schema.json"
 )
-VERDICTS = (
-    "invalid",
-    "no_progress",
-    "useful_but_flawed",
-    "plausible_progress",
-    "strong_candidate",
+CORRECTNESS_LEVELS = (
+    "not_applicable",
+    "incorrect",
+    "major_gaps",
+    "minor_gaps",
+    "plausible",
+    "well_supported",
 )
-ATTENTION_LEVELS = ("none", "low", "medium", "high")
+REVIEWED_COVERAGE_LEVELS = (
+    "none",
+    "auxiliary",
+    "special_case",
+    "partial",
+    "near_complete",
+    "complete_under_stated_interpretation",
+    "complete",
+)
+IMPORTANCE_LEVELS = ("none", "minor", "moderate", "major", "resolution")
+VERIFICATION_CONFIDENCE_LEVELS = ("low", "medium", "high")
+HUMAN_PRIORITY_LEVELS = ("none", "low", "medium", "high")
 REVIEW_MODES = ("promising", "all")
-NOVELTY_ASSESSMENTS = (
-    "apparently_new",
-    "known_result",
-    "new_extension",
-    "mixed",
-    "uncertain",
-)
 
 
 @dataclass(frozen=True)
@@ -58,9 +63,40 @@ class AttemptRef:
 class ReviewOutcome:
     attempt: AttemptRef
     status: str
-    verdict: str
-    attention: str
+    correctness: str
+    coverage: str
+    importance: str
+    priority: str
     message: str
+
+
+def derive_human_priority(result: dict) -> str:
+    """Derive human-review priority from mathematical review dimensions."""
+    correctness = result.get("correctness")
+    coverage = result.get("reviewed_coverage")
+    importance = result.get("importance")
+    if (
+        correctness in {"not_applicable", "incorrect"}
+        or coverage == "none"
+        or importance == "none"
+    ):
+        return "none"
+    if correctness == "major_gaps":
+        return "medium" if importance in {"major", "resolution"} else "low"
+    if correctness == "minor_gaps":
+        return (
+            "medium"
+            if importance in {"moderate", "major", "resolution"}
+            else "low"
+        )
+    if correctness in {"plausible", "well_supported"}:
+        if importance in {"major", "resolution"}:
+            return "high"
+        if importance == "moderate":
+            return "medium"
+        if importance == "minor":
+            return "low"
+    return "none"
 
 
 def discover_attempt_refs(
@@ -86,7 +122,7 @@ def discover_attempt_refs(
 def is_promising(attempt: AttemptRef) -> bool:
     claims = attempt.solver_result.get("checkable_claims")
     return (
-        attempt.solver_result.get("status") != "no_checkable_progress"
+        common.claimed_result_type(attempt.solver_result) != "none"
         and isinstance(claims, list)
         and bool(claims)
     )
@@ -105,16 +141,23 @@ def review_is_current(
         attempt.directory
     ):
         return False
-    if manifest.get(
-        "literature_snapshot_digest"
-    ) != common.literature_snapshot_digest(attempt.problem):
-        return False
     if (
         config_digest is not None
         and manifest.get("config_digest") != config_digest
     ):
         return False
-    return result.get("verdict") in VERDICTS
+    if result.get("correctness") not in CORRECTNESS_LEVELS:
+        return False
+    if result.get("reviewed_coverage") not in REVIEWED_COVERAGE_LEVELS:
+        return False
+    if result.get("importance") not in IMPORTANCE_LEVELS:
+        return False
+    if (
+        result.get("verification_confidence")
+        not in VERIFICATION_CONFIDENCE_LEVELS
+    ):
+        return False
+    return result.get("human_priority") == derive_human_priority(result)
 
 
 def render_prompt(
@@ -148,18 +191,23 @@ def validate_review_result(
     attempt: AttemptRef,
 ) -> dict:
     result = common.read_json(result_path, description="review response")
-    if result.get("verdict") not in VERDICTS:
-        raise common.CodexError("review response has an invalid verdict")
-    if result.get("attention") not in ATTENTION_LEVELS:
-        raise common.CodexError("review response has invalid attention")
+    if result.get("correctness") not in CORRECTNESS_LEVELS:
+        raise common.CodexError("review response has invalid correctness")
+    if result.get("reviewed_coverage") not in REVIEWED_COVERAGE_LEVELS:
+        raise common.CodexError("review response has invalid coverage")
+    if result.get("importance") not in IMPORTANCE_LEVELS:
+        raise common.CodexError("review response has invalid importance")
+    if (
+        result.get("verification_confidence")
+        not in VERIFICATION_CONFIDENCE_LEVELS
+    ):
+        raise common.CodexError(
+            "review response has invalid verification confidence"
+        )
     if not isinstance(result.get("summary"), str) or not result[
         "summary"
     ].strip():
         raise common.CodexError("review response has no summary")
-    if result.get("novelty_assessment") not in NOVELTY_ASSESSMENTS:
-        raise common.CodexError(
-            "review response has invalid novelty_assessment"
-        )
     for field in ("blocking_gaps", "recommended_next_steps", "warnings"):
         values = result.get(field)
         if not isinstance(values, list) or not all(
@@ -213,6 +261,23 @@ def validate_review_result(
         raise common.CodexError(
             "review response omitted claims: " + ", ".join(sorted(missing))
         )
+    claimed = common.claimed_result_type(attempt.solver_result)
+    if claimed == "none" and (
+        result["correctness"] != "not_applicable"
+        or result["reviewed_coverage"] != "none"
+        or result["importance"] != "none"
+    ):
+        raise common.CodexError(
+            "a no-result attempt requires not_applicable correctness and "
+            "none coverage/importance"
+        )
+    if result["importance"] == "resolution" and result[
+        "reviewed_coverage"
+    ] not in {"complete", "complete_under_stated_interpretation"}:
+        raise common.CodexError(
+            "resolution importance requires complete coverage"
+        )
+    result["human_priority"] = derive_human_priority(result)
     common.validate_markdown(
         workspace / "critique.md",
         description="review critique",
@@ -243,20 +308,22 @@ def _install_review(
         common.write_json(
             staging / "review-manifest.json",
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "generated_at": common.utc_now(),
                 "attempt_digest": attempt_digest,
-                "literature_snapshot_digest": (
-                    common.literature_snapshot_digest(attempt.problem)
-                ),
                 "config_digest": config_digest,
                 "codex_version": codex_version,
                 "requested_model": options.model,
                 "requested_reasoning_effort": options.reasoning_effort,
                 "requested_fast_mode": options.fast,
                 "requested_web_search": web_search,
-                "verdict": result["verdict"],
-                "attention": result["attention"],
+                "correctness": result["correctness"],
+                "reviewed_coverage": result["reviewed_coverage"],
+                "importance": result["importance"],
+                "verification_confidence": result[
+                    "verification_confidence"
+                ],
+                "human_priority": result["human_priority"],
             },
         )
         shutil.copyfile(
@@ -306,9 +373,7 @@ def review_attempt(
             include_paper=True,
             include_history=True,
             include_triage=True,
-            include_literature=common.literature_is_current(
-                attempt.problem
-            ),
+            include_literature=False,
             exclude_review_for=attempt.directory,
         )
         prompt = render_prompt(
@@ -344,14 +409,20 @@ def review_attempt(
         workspace,
         installed_log=attempt.directory / "review-run.log",
     )
-    message = f"{result['verdict']}; attention {result['attention']}"
+    message = (
+        f"{result['correctness']}; coverage {result['reviewed_coverage']}; "
+        f"importance {result['importance']}; priority "
+        f"{result['human_priority']}"
+    )
     if warning:
         message += "; temporary workspace preserved"
     return ReviewOutcome(
         attempt,
         "reviewed",
-        result["verdict"],
-        result["attention"],
+        result["correctness"],
+        result["reviewed_coverage"],
+        result["importance"],
+        result["human_priority"],
         message,
     )
 
@@ -535,8 +606,10 @@ def main(argv: list[str] | None = None) -> int:
                 ReviewOutcome(
                     attempt,
                     "current",
-                    result["verdict"],
-                    result["attention"],
+                    result["correctness"],
+                    result["reviewed_coverage"],
+                    result["importance"],
+                    result["human_priority"],
                     "review matches the attempt and prompt",
                 )
             )
@@ -589,7 +662,9 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"Current: {outcome.attempt.problem.paper_directory} "
             f"{outcome.attempt.problem.id}/{outcome.attempt.name} "
-            f"({outcome.verdict}; attention {outcome.attention})"
+            f"({outcome.correctness}; coverage {outcome.coverage}; "
+            f"importance {outcome.importance}; priority "
+            f"{outcome.priority})"
         )
     for attempt, message in failures:
         print(
@@ -598,28 +673,29 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
     combined = outcomes + current
-    attention = [
+    priority_items = [
         outcome
         for outcome in combined
-        if outcome.attention in {"medium", "high"}
+        if outcome.priority in {"medium", "high"}
     ]
-    if attention:
-        print("Human attention recommended:")
+    if priority_items:
+        print("Human review recommended:")
         for outcome in sorted(
-            attention,
+            priority_items,
             key=lambda item: (
-                item.attention != "high",
+                item.priority != "high",
                 str(item.attempt.directory),
             ),
         ):
             print(
-                f"  {outcome.attention}: {outcome.attempt.directory} "
-                f"({outcome.verdict})"
+                f"  {outcome.priority}: {outcome.attempt.directory} "
+                f"({outcome.correctness}; {outcome.coverage}; "
+                f"{outcome.importance})"
             )
     print(
         f"Completed {len(outcomes)} review(s); {len(current)} current; "
         f"{skipped} skipped by mode; {len(failures)} failed. "
-        f"Human-attention total: {len(attention)} medium/high."
+        f"Human-priority total: {len(priority_items)} medium/high."
     )
     return 1 if failures else 0
 

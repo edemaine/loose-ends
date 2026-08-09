@@ -15,6 +15,7 @@ import human_review
 import open_problem_common as common
 import review_solutions
 import literature_review
+import migrate_solver_claims
 import solve_open_problems
 import triage_open_problems
 
@@ -75,6 +76,89 @@ def write_run_files(workspace: Path) -> None:
 
 
 class OpenProblemPipelineTests(unittest.TestCase):
+    def test_legacy_solver_migration_preserves_audit_metadata(self):
+        with TemporaryDirectory() as temporary:
+            paper = make_analyzed_paper(Path(temporary))
+            problem = common.discover_problem_refs(
+                [paper], problem_ids={"OP-001"}
+            )[0]
+            attempt = problem.directory / "attempt-001"
+            attempt.mkdir(parents=True)
+            common.write_json(
+                attempt / "solver-result.json",
+                {
+                    "status": "known_resolution",
+                    "novelty_status": "known_result_reconstruction",
+                    "summary": "Reconstructed a theorem.",
+                    "external_sources": [],
+                    "checkable_claims": [{"id": "C-001"}],
+                    "artifacts": [],
+                    "warnings": [],
+                },
+            )
+            common.write_json(
+                attempt / "manifest.json",
+                {"schema_version": 2, "status": "known_resolution"},
+            )
+
+            self.assertEqual(
+                migrate_solver_claims.migrate_result(
+                    attempt / "solver-result.json", apply=False
+                ),
+                "known_resolution -> solution",
+            )
+            self.assertIn(
+                "status",
+                common.read_json(attempt / "solver-result.json"),
+            )
+            migrate_solver_claims.migrate_result(
+                attempt / "solver-result.json", apply=True
+            )
+            result = common.read_json(attempt / "solver-result.json")
+            manifest = common.read_json(attempt / "manifest.json")
+            self.assertEqual(result["claimed_result_type"], "solution")
+            self.assertNotIn("status", result)
+            self.assertNotIn("novelty_status", result)
+            self.assertEqual(
+                manifest["legacy_solver_status"], "known_resolution"
+            )
+            self.assertEqual(
+                manifest["legacy_solver_novelty_status"],
+                "known_result_reconstruction",
+            )
+
+    def test_human_priority_is_derived_from_merit_axes(self):
+        base = {
+            "correctness": "plausible",
+            "reviewed_coverage": "partial",
+            "importance": "minor",
+        }
+        self.assertEqual(
+            review_solutions.derive_human_priority(base), "low"
+        )
+        self.assertEqual(
+            review_solutions.derive_human_priority(
+                {**base, "importance": "moderate"}
+            ),
+            "medium",
+        )
+        self.assertEqual(
+            review_solutions.derive_human_priority(
+                {**base, "importance": "major"}
+            ),
+            "high",
+        )
+        self.assertEqual(
+            review_solutions.derive_human_priority(
+                {
+                    **base,
+                    "correctness": "major_gaps",
+                    "importance": "resolution",
+                }
+            ),
+            "medium",
+        )
+
     def setUp(self):
         patcher = patch.object(codex_cli, "grant_sandbox_read_access")
         patcher.start()
@@ -374,9 +458,8 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 common.write_json(
                     workspace / "agent-result.json",
                     {
-                        "status": "partial_progress",
+                        "claimed_result_type": "partial_result",
                         "summary": "Proved a special case.",
-                        "novelty_status": "apparently_new",
                         "external_sources": [],
                         "checkable_claims": [
                             {
@@ -447,10 +530,11 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 common.write_json(
                     workspace / "agent-result.json",
                     {
-                        "verdict": "plausible_progress",
-                        "attention": "medium",
+                        "correctness": "plausible",
+                        "reviewed_coverage": "special_case",
+                        "importance": "moderate",
+                        "verification_confidence": "medium",
                         "summary": "The special case appears valid.",
-                        "novelty_assessment": "apparently_new",
                         "claim_reviews": [
                             {
                                 "claim_id": "C-001",
@@ -482,7 +566,7 @@ class OpenProblemPipelineTests(unittest.TestCase):
                     launch_interval=0,
                 )
 
-            self.assertEqual(review_outcome.attention, "medium")
+            self.assertEqual(review_outcome.priority, "medium")
             self.assertTrue(
                 review_solutions.review_is_current(
                     attempt,
@@ -920,7 +1004,7 @@ class OpenProblemPipelineTests(unittest.TestCase):
             directory = problem.directory / "attempt-001"
             directory.mkdir(parents=True)
             result = {
-                "status": "no_checkable_progress",
+                "claimed_result_type": "none",
                 "summary": "No concrete advance.",
                 "checkable_claims": [],
                 "artifacts": [],
@@ -943,7 +1027,7 @@ class OpenProblemPipelineTests(unittest.TestCase):
                     encoding="utf-8",
                 )
                 solver_result = {
-                    "status": "partial_progress",
+                    "claimed_result_type": "partial_result",
                     "summary": f"{level} solver summary",
                     "checkable_claims": [],
                     "artifacts": [],
@@ -961,8 +1045,13 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 common.write_json(
                     directory / "review-result.json",
                     {
-                        "verdict": "plausible_progress",
-                        "attention": level,
+                        "correctness": "plausible",
+                        "reviewed_coverage": (
+                            "partial" if level == "high" else "special_case"
+                        ),
+                        "importance": "major" if level == "high" else "moderate",
+                        "verification_confidence": "medium",
+                        "human_priority": level,
                         "summary": f"{level} critic summary",
                         "claim_reviews": [],
                         "blocking_gaps": ["One gap."],
@@ -981,7 +1070,7 @@ class OpenProblemPipelineTests(unittest.TestCase):
 
             items = human_review.discover_human_reviews(
                 problems,
-                attention={"high", "medium"},
+                priority={"high", "medium"},
             )
             with patch.object(
                 review_solutions,
@@ -990,12 +1079,12 @@ class OpenProblemPipelineTests(unittest.TestCase):
             ):
                 stale_items = human_review.discover_human_reviews(
                     problems,
-                    attention={"high", "medium"},
+                    priority={"high", "medium"},
                 )
                 with self.assertRaises(common.CodexError):
                     human_review.discover_human_reviews(
                         problems,
-                        attention={"high", "medium"},
+                        priority={"high", "medium"},
                         include_stale=False,
                     )
             self.assertEqual(len(stale_items), 2)
@@ -1003,7 +1092,7 @@ class OpenProblemPipelineTests(unittest.TestCase):
             report = human_review.render_human_review_report(items)
 
             self.assertEqual(
-                [item.attention for item in items],
+                [item.priority for item in items],
                 ["high", "medium"],
             )
             self.assertLess(
@@ -1044,15 +1133,19 @@ class OpenProblemPipelineTests(unittest.TestCase):
             self.assertNotIn('id="problem-select"', dashboard)
             self.assertIn('id="attempt-list"', dashboard)
             self.assertIn('id="claim-filter"', dashboard)
+            self.assertIn('id="correctness-filter"', dashboard)
+            self.assertIn('id="coverage-filter"', dashboard)
+            self.assertIn('id="importance-filter"', dashboard)
+            self.assertIn('id="confidence-filter"', dashboard)
             self.assertIn('id="literature-filter"', dashboard)
             self.assertIn('id="filter-current"', dashboard)
             self.assertIn('id="filter-stale"', dashboard)
             self.assertIn(
-                '<option value="resolution">Any candidate resolution</option>',
+                '<option value="resolution">Any resolution claim</option>',
                 dashboard,
             )
             self.assertIn(
-                '<option value="known">Known-result reconstructions</option>',
+                '<option value="partial_result">Partial result</option>',
                 dashboard,
             )
             self.assertIn(
@@ -1067,17 +1160,20 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 "if (!item.current && !stale.checked) return false;",
                 dashboard,
             )
-            self.assertIn('case "strong-resolution":', dashboard)
             self.assertIn(
-                'item.solverStatus === "candidate_solution"',
+                'kind === "solution" || kind === "counterexample"',
                 dashboard,
             )
             self.assertIn(
-                'item.solverStatus === "candidate_counterexample"',
+                'function matchesCorrectness(item)',
                 dashboard,
             )
             self.assertIn(
-                'item.solverStatus === "known_resolution"',
+                'function matchesCoverage(item)',
+                dashboard,
+            )
+            self.assertIn(
+                '<option value="major_or_resolution">Major or resolution</option>',
                 dashboard,
             )
             self.assertIn("HIGH BODY", dashboard)
@@ -1123,9 +1219,8 @@ class OpenProblemPipelineTests(unittest.TestCase):
             common.write_json(
                 workspace / "agent-result.json",
                 {
-                    "status": "partial_progress",
+                    "claimed_result_type": "partial_result",
                     "summary": "A lemma was proved.",
-                    "novelty_status": "apparently_new",
                     "external_sources": [],
                     "checkable_claims": [
                         {
@@ -1355,14 +1450,14 @@ class OpenProblemPipelineTests(unittest.TestCase):
                     problem,
                     directory,
                     {
-                        "status": "partial_progress",
+                        "claimed_result_type": "partial_result",
                         "checkable_claims": [{"id": "C-001"}],
                     },
                 )
                 return solve_open_problems.SolveOutcome(
                     work,
                     attempt,
-                    "partial_progress",
+                    "partial_result",
                     1,
                     "partial progress",
                 )

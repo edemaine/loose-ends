@@ -1,41 +1,44 @@
 {
   "type": "object",
   "properties": {
-    "verdict": {
+    "correctness": {
       "type": "string",
       "enum": [
-        "invalid",
-        "no_progress",
-        "useful_but_flawed",
-        "plausible_progress",
-        "strong_candidate"
+        "not_applicable",
+        "incorrect",
+        "major_gaps",
+        "minor_gaps",
+        "plausible",
+        "well_supported"
       ]
     },
-    "attention": {
-      "type": "string",
-      "enum": ["none", "low", "medium", "high"]
-    },
-    "summary": {
-      "type": "string"
-    },
-    "novelty_assessment": {
+    "reviewed_coverage": {
       "type": "string",
       "enum": [
-        "apparently_new",
-        "known_result",
-        "new_extension",
-        "mixed",
-        "uncertain"
+        "none",
+        "auxiliary",
+        "special_case",
+        "partial",
+        "near_complete",
+        "complete_under_stated_interpretation",
+        "complete"
       ]
     },
+    "importance": {
+      "type": "string",
+      "enum": ["none", "minor", "moderate", "major", "resolution"]
+    },
+    "verification_confidence": {
+      "type": "string",
+      "enum": ["low", "medium", "high"]
+    },
+    "summary": {"type": "string"},
     "claim_reviews": {
       "type": "array",
       "items": {
         "type": "object",
         "properties": {
-          "claim_id": {
-            "type": "string"
-          },
+          "claim_id": {"type": "string"},
           "assessment": {
             "type": "string",
             "enum": [
@@ -45,9 +48,7 @@
               "incorrect"
             ]
           },
-          "explanation": {
-            "type": "string"
-          }
+          "explanation": {"type": "string"}
         },
         "required": ["claim_id", "assessment", "explanation"],
         "additionalProperties": false
@@ -67,10 +68,11 @@
     }
   },
   "required": [
-    "verdict",
-    "attention",
+    "correctness",
+    "reviewed_coverage",
+    "importance",
+    "verification_confidence",
     "summary",
-    "novelty_assessment",
     "claim_reviews",
     "blocking_gaps",
     "recommended_next_steps",

@@ -390,17 +390,22 @@ attempts/
 ```
 
 `attempt.md` is the human-readable research record. The structured result
-classifies the outcome and indexes exact `C-###` claims so a critic can check
-them. It also records novelty status and every external source actually used;
-`known_resolution` identifies a reconstruction of published work instead of a
-new `candidate_solution`. Code, data, and auxiliary derivations can be retained
-under `artifacts/`.
+records the solver-owned `claimed_result_type` (`none`, `obstruction`,
+`partial_result`, `solution`, or `counterexample`) and indexes exact `C-###`
+claims so a critic can check them. Claim type is independent of novelty: a
+reconstruction of published work is still mathematically a `solution`.
+External sources actually used are recorded, while literature provenance is
+owned by `literature_review.py`. Code, data, and auxiliary derivations can be
+retained under `artifacts/`.
+Repositories containing pre-migration attempts can rewrite them once with
+`python src/migrate_solver_claims.py papers --apply`; the old solver status and
+novelty label are retained only as audit metadata in each attempt manifest.
 If a completed Codex turn is preserved because driver validation or
 installation fails, retrying the same solve command recovers the matching
 `.solve-run-*` workspace before starting another model turn.
 
 By default, newly installed attempts with at least one checkable claim are
-passed to `review_solutions.py`; `no_checkable_progress` attempts do not spend a
+passed to `review_solutions.py`; `none` attempts do not spend a
 critic turn. Control this with `--review promising`, `--review all`, or
 `--review none`. Reviewer model flags inherit the solver flags unless
 overridden:
@@ -412,8 +417,8 @@ python src/solve_open_problems.py papers/edemaine \
   --review-model gpt-5.6-sol --review-reasoning-effort ultra
 ```
 
-The solver prints a final list of reviews that merit medium or high human
-attention, along with any unreviewed candidate solutions or counterexamples.
+The solver prints a final list of reviews with medium or high derived human
+priority, along with any unreviewed solution or counterexample claims.
 Solver and critic runs default to live first-party web search. Disable it with
 `--web-search disabled`, and control a composed critic independently with
 `--review-web-search disabled`.
@@ -445,20 +450,23 @@ attempt-001/
 └── review-run.log
 ```
 
-The structured review records a verdict, claim-by-claim assessments, blocking
-gaps, an attention level, and an independent novelty assessment. The critic
-receives the full paper context and current literature report, can verify
-external sources with live web search, and does not modify the solver's
-`attempt.md`.
+The structured review independently records mathematical correctness, coverage
+of the original problem, importance relative to that problem, verification
+confidence, claim-by-claim assessments, and blocking gaps. Human priority is
+derived deterministically from correctness and importance instead of being a
+free critic judgment. The critic does not assess novelty; it may use live web
+search only to verify an external theorem invoked by the attempt. Literature
+changes therefore do not invalidate mathematical reviews.
 
 ## Write a paper
 
 `src/write_paper.py` composes one deliberate research-paper manuscript from
 one or more explicitly selected solver attempts. Each selected attempt must by
-default be a candidate solution or counterexample with a current
-`strong_candidate` review, no blocking gaps, new-result provenance, supported
-claims, and a current literature report that does not mark the problem
-resolved. Currentness is content-based; there is no age or freshness cutoff.
+default claim a solution or counterexample, have a current `well_supported`
+review with complete coverage and major or resolution-level importance, have
+no blocking gaps and supported claims, and have a current literature report
+that does not mark the problem resolved. Currentness is content-based; there is
+no age or freshness cutoff.
 
 The attempt directories are positional inputs to the same paper:
 
@@ -478,8 +486,8 @@ Without `--name`, a single-source manuscript is named from the paper directory
 and sorted problem IDs, such as
 `manuscripts/arXiv-1406.6576v2_OP-001_OP-004/`. Cross-paper names join those
 components with `__`; unusually long names are truncated with a stable digest.
-The script never infers authors from an originating paper and uses `Anonymous`
-when no `--author` is supplied. Use `--dry-run` to inspect the selection and
+The script never infers authors from an originating paper and emits
+`\author{}` when no `--author` is supplied. Use `--dry-run` to inspect the selection and
 destination without starting Codex. `--allow-not-ready` is an explicit escape
 hatch that asks the writer to attempt a full, critic-reviewed paper despite
 upstream readiness warnings. The warnings remain visible to the writer and
@@ -548,24 +556,22 @@ human expert review, never an assertion that the paper is publication-ready.
 
 ## Human review
 
-`src/human_review.py` turns the critic's high- and medium-attention
+`src/human_review.py` turns the derived high- and medium-priority
 recommendations into a local HTML dashboard:
 
 ```sh
 python src/human_review.py papers/edemaine
 ```
 
-The command writes `human-review.html` and opens it in a browser. Search and
-attention filters narrow the queue. Independent claim-type and literature-status
-filters can, for example, show candidate solutions or counterexamples while
-excluding problems already resolved in the literature. Claim filters also
-select only resolutions rated `strong_candidate`, known-result reconstructions,
-or attempts with no resolution claim. Literature filters distinguish full and
-partial resolutions, no resolution found, uncertainty, and missing literature
-review. Current and stale review toggles are both enabled by default, so adding
-literature does not make older human-review candidates disappear; stale items
-are visibly labeled and can be filtered out. These states are also labeled in
-the queue. An always-visible
+The command writes `human-review.html` and opens it in a browser. Independent
+filters cover solver claim type, critic correctness, reviewed coverage,
+importance, verification confidence, derived human priority, literature
+status, and current versus stale/legacy review state. They can, for example,
+show well-supported solution claims of major importance while excluding
+problems already resolved in the literature. Literature filters distinguish
+full and partial resolutions, no resolution found, uncertainty, and missing
+literature review. Current and stale review toggles are both enabled by default;
+stale and legacy assessments are visibly labeled. An always-visible
 problem list is grouped under
 paper titles, with the selected problem's attempts listed below. Each view
 starts with the paper title and full extracted open-problem statement, followed
@@ -576,10 +582,10 @@ the complete literature report when available, and links to the paper analysis,
 structured records, and artifacts. The browser loads
 Markdown-it and its KaTeX plugin to render Markdown and math in one parsing
 pass, supporting `\(...\)`, `\[...\]`, `$...$`, and `$$...$$` delimiters.
-High-attention items come first.
+High-priority items come first.
 
 Use `--latest-per-problem` to suppress older selected attempts,
-`--summary-only` for a compact index, `--attention high` to narrow the queue,
+`--summary-only` for a compact index, `--priority high` to narrow the queue,
 `--current-only` to omit stale reviews before building the dashboard,
 `--output FILE` to choose the dashboard location, or `--no-open` to avoid
 launching the browser. `--terminal` retains the paged Markdown presentation.

@@ -1,29 +1,18 @@
 {
   "type": "object",
   "properties": {
-    "status": {
+    "claimed_result_type": {
       "type": "string",
       "enum": [
-        "no_checkable_progress",
-        "useful_negative_result",
-        "partial_progress",
-        "candidate_counterexample",
-        "candidate_solution",
-        "known_resolution"
+        "none",
+        "obstruction",
+        "partial_result",
+        "solution",
+        "counterexample"
       ]
     },
     "summary": {
       "type": "string"
-    },
-    "novelty_status": {
-      "type": "string",
-      "enum": [
-        "apparently_new",
-        "known_result_reconstruction",
-        "new_extension",
-        "mixed",
-        "unknown"
-      ]
     },
     "external_sources": {
       "type": "array",
@@ -90,9 +79,8 @@
     }
   },
   "required": [
-    "status",
+    "claimed_result_type",
     "summary",
-    "novelty_status",
     "external_sources",
     "checkable_claims",
     "artifacts",

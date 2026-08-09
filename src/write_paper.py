@@ -139,10 +139,10 @@ def _attempt_from_path(path: Path) -> review_solutions.AttemptRef:
 
 def _readiness_issues(attempt: review_solutions.AttemptRef) -> list[str]:
     issues: list[str] = []
-    status = attempt.solver_result.get("status")
-    if status not in {"candidate_solution", "candidate_counterexample"}:
+    claimed = common.claimed_result_type(attempt.solver_result)
+    if claimed not in {"solution", "counterexample"}:
         issues.append(
-            "solver status is not candidate_solution or candidate_counterexample"
+            "solver does not claim a solution or counterexample"
         )
     if not review_solutions.review_is_current(attempt):
         issues.append("the independent solution review is missing or stale")
@@ -152,16 +152,18 @@ def _readiness_issues(attempt: review_solutions.AttemptRef) -> list[str]:
             attempt.directory / "review-result.json",
             description=f"solution review for {attempt.directory}",
         )
-    if review.get("verdict") != "strong_candidate":
-        issues.append("solution review verdict is not strong_candidate")
+    if review.get("correctness") != "well_supported":
+        issues.append("solution review is not well_supported")
+    if review.get("reviewed_coverage") not in {
+        "complete",
+        "complete_under_stated_interpretation",
+    }:
+        issues.append("solution review does not find complete coverage")
+    if review.get("importance") not in {"major", "resolution"}:
+        issues.append("solution review does not find major importance")
     gaps = review.get("blocking_gaps")
     if not isinstance(gaps, list) or gaps:
         issues.append("solution review has blocking gaps")
-    if review.get("novelty_assessment") not in {
-        "apparently_new",
-        "new_extension",
-    }:
-        issues.append("solution review does not establish new-result provenance")
     claim_reviews = review.get("claim_reviews")
     if not isinstance(claim_reviews, list) or not any(
         isinstance(item, dict) and item.get("assessment") == "supported"
@@ -388,8 +390,18 @@ def stage_paper_context(
             "paper_id": paper_ids[attempt.problem.paper_directory],
             "problem": attempt.problem.problem,
             "attempt_name": attempt.name,
-            "solver_status": attempt.solver_result.get("status"),
-            "solution_review_verdict": item.review_result.get("verdict"),
+            "claimed_result_type": common.claimed_result_type(
+                attempt.solver_result
+            ),
+            "solution_review_correctness": item.review_result.get(
+                "correctness"
+            ),
+            "solution_review_coverage": item.review_result.get(
+                "reviewed_coverage"
+            ),
+            "solution_review_importance": item.review_result.get(
+                "importance"
+            ),
             "literature_status": item.literature_result.get(
                 "resolution_status"
             ),
@@ -422,7 +434,7 @@ def stage_paper_context(
 
 def _metadata(authors: Sequence[str], title_hint: str | None) -> dict:
     return {
-        "authors": list(authors) if authors else ["Anonymous"],
+        "authors": list(authors),
         "title_hint": title_hint or "",
     }
 
@@ -573,6 +585,7 @@ def validate_paper_result(
     inputs: Sequence[PaperInput],
     *,
     previous: DraftRef | None = None,
+    authors: Sequence[str] | None = None,
 ) -> tuple[dict, list[Path]]:
     result = common.read_json(result_path, description="paper response")
     status = result.get("status")
@@ -706,6 +719,10 @@ def validate_paper_result(
             raise common.CodexError(f"main.tex omits {required}")
     if not re.search(r"\\title\s*\{", tex):
         raise common.CodexError("main.tex has no title")
+    if authors is not None and not authors and not re.search(
+        r"\\author\s*\{\s*\}", tex
+    ):
+        raise common.CodexError("main.tex must use \\author{} when no author is supplied")
     if not re.search(r"\\begin\s*\{abstract\}", tex):
         raise common.CodexError("main.tex has no abstract")
     citation_keys = _tex_citation_keys(tex)
@@ -1049,6 +1066,7 @@ def run_author_round(
             workspace,
             inputs,
             previous=previous,
+            authors=authors,
         )
         compile_latex(workspace, latexmk)
         draft = _install_draft(
@@ -1489,7 +1507,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         dest="authors",
         metavar="NAME",
-        help="manuscript author; may be repeated (default: Anonymous)",
+        help="manuscript author; may be repeated (default: empty author)",
     )
     parser.add_argument(
         "--title",
@@ -1565,7 +1583,7 @@ def main(argv: list[str] | None = None) -> int:
             manuscript_directory = previous.directory.parent
             if args.name:
                 raise common.CodexError("--name cannot be used with --revise")
-            authors = args.authors or prior_manifest.get("authors") or ["Anonymous"]
+            authors = args.authors or prior_manifest.get("authors") or []
             title_hint = (
                 args.title_hint
                 if args.title_hint is not None
@@ -1590,7 +1608,7 @@ def main(argv: list[str] | None = None) -> int:
                     f"manuscript already has drafts: {manuscript_directory}; "
                     "use --revise on a reviewed draft or choose --name"
                 )
-            authors = args.authors or ["Anonymous"]
+            authors = args.authors or []
             title_hint = args.title_hint
         if not all(isinstance(author, str) and author.strip() for author in authors):
             raise common.CodexError("every --author must be nonempty")
