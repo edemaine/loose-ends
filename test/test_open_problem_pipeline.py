@@ -159,6 +159,125 @@ class OpenProblemPipelineTests(unittest.TestCase):
             "medium",
         )
 
+    def test_review_many_reports_each_completion(self):
+        attempt = review_solutions.AttemptRef(
+            problem=None,  # type: ignore[arg-type]
+            directory=Path("attempt-001"),
+            solver_result={},
+        )
+        outcome = review_solutions.ReviewOutcome(
+            attempt,
+            "reviewed",
+            "plausible",
+            "partial",
+            "moderate",
+            "medium",
+            "reviewed",
+        )
+        finished = []
+        with patch.object(
+            review_solutions,
+            "review_attempt",
+            return_value=outcome,
+        ):
+            outcomes, failures = review_solutions.review_many(
+                [attempt],
+                codex="codex",
+                codex_version="test",
+                prompt_template="prompt",
+                schema_path=Path("schema"),
+                config_digest="config",
+                options=codex_cli.ModelOptions(),
+                jobs=1,
+                on_finished=lambda item, result, error: finished.append(
+                    (item, result, error)
+                ),
+            )
+        self.assertEqual(outcomes, [outcome])
+        self.assertEqual(failures, [])
+        self.assertEqual(finished, [(attempt, outcome, None)])
+
+    def test_review_recovers_matching_completed_workspace(self):
+        with TemporaryDirectory() as temporary:
+            paper = make_analyzed_paper(Path(temporary))
+            problem = common.discover_problem_refs(
+                [paper], problem_ids={"OP-001"}
+            )[0]
+            problem.directory.mkdir(parents=True)
+            directory = problem.directory / "attempt-001"
+            directory.mkdir()
+            (directory / "attempt.md").write_text(
+                "# Attempt\n\n## C-001\n\nA special case holds.\n",
+                encoding="utf-8",
+            )
+            solver_result = {
+                "claimed_result_type": "partial_result",
+                "checkable_claims": [{"id": "C-001"}],
+            }
+            common.write_json(directory / "solver-result.json", solver_result)
+            common.write_json(directory / "manifest.json", {"schema_version": 3})
+            attempt = review_solutions.AttemptRef(
+                problem,
+                directory,
+                solver_result,
+            )
+            workspace = problem.directory / ".review-run-finished"
+            workspace.mkdir()
+            options = codex_cli.ModelOptions("test-model", "xhigh", False)
+            review_solutions._write_work_record(
+                workspace,
+                attempt,
+                attempt_digest=common.solver_attempt_digest(directory),
+                config_digest="config",
+                codex_version="test",
+                options=options,
+                web_search="live",
+            )
+            (workspace / "critique.md").write_text(
+                "# Critique\n\nThe special case is supported.\n",
+                encoding="utf-8",
+            )
+            common.write_json(
+                workspace / "agent-result.json",
+                {
+                    "correctness": "well_supported",
+                    "reviewed_coverage": "special_case",
+                    "importance": "moderate",
+                    "verification_confidence": "high",
+                    "summary": "The special case is valid.",
+                    "claim_reviews": [
+                        {
+                            "claim_id": "C-001",
+                            "assessment": "supported",
+                            "explanation": "Independently checked.",
+                        }
+                    ],
+                    "blocking_gaps": ["The general case remains."],
+                    "recommended_next_steps": ["Generalize it."],
+                    "warnings": [],
+                },
+            )
+            write_run_files(workspace)
+
+            outcome = review_solutions.recover_review(
+                attempt,
+                codex="codex",
+                codex_version="test",
+                config_digest="config",
+                options=options,
+                web_search="live",
+            )
+
+            self.assertIsNotNone(outcome)
+            assert outcome is not None
+            self.assertEqual(outcome.status, "recovered")
+            self.assertTrue((directory / "review-result.json").is_file())
+            manifest = common.read_json(directory / "review-manifest.json")
+            self.assertEqual(
+                manifest["recovered_from_workspace"], workspace.name
+            )
+            self.assertTrue(workspace.is_dir())
+
     def setUp(self):
         patcher = patch.object(codex_cli, "grant_sandbox_read_access")
         patcher.start()

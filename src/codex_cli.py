@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import signal
 import shutil
 import subprocess
 import sys
@@ -23,6 +24,8 @@ DEFAULT_MODEL = "gpt-5.6-sol"
 DEFAULT_REASONING_EFFORT = "xhigh"
 CODEX_LAUNCH_INTERVAL_SECONDS = 1.0
 MAX_CODEX_START_ATTEMPTS = 3
+CODEX_POLL_INTERVAL_SECONDS = 0.5
+CODEX_STOP_GRACE_SECONDS = 10.0
 _CODEX_LAUNCH_LOCK = threading.Lock()
 _next_codex_launch_at = 0.0
 
@@ -50,6 +53,13 @@ def positive_integer(value: str) -> int:
     number = int(value)
     if number < 1:
         raise argparse.ArgumentTypeError("must be at least 1")
+    return number
+
+
+def positive_number(value: str) -> float:
+    number = float(value)
+    if number <= 0:
+        raise argparse.ArgumentTypeError("must be greater than 0")
     return number
 
 
@@ -428,6 +438,130 @@ def is_transient_startup_failure(
     )
 
 
+def structured_turn_is_complete(events_path: Path, result_path: Path) -> bool:
+    """Return whether Codex wrote both its final event and valid JSON result."""
+    try:
+        with result_path.open(encoding="utf-8") as source:
+            json.load(source)
+        with events_path.open(encoding="utf-8") as source:
+            return any(
+                isinstance(event, dict)
+                and event.get("type") == "turn.completed"
+                for line in source
+                if line.strip()
+                for event in (json.loads(line),)
+            )
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+
+
+def _stop_codex_process(process: subprocess.Popen) -> None:
+    """Ask a Codex process group to stop, then escalate if necessary."""
+    if process.poll() is not None:
+        return
+    try:
+        if os.name == "nt" and hasattr(signal, "CTRL_BREAK_EVENT"):
+            process.send_signal(signal.CTRL_BREAK_EVENT)
+        else:
+            os.killpg(process.pid, signal.SIGINT)
+    except (OSError, ProcessLookupError):
+        pass
+    try:
+        process.wait(timeout=CODEX_STOP_GRACE_SECONDS)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        process.terminate()
+    except OSError:
+        pass
+    try:
+        process.wait(timeout=CODEX_STOP_GRACE_SECONDS)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        process.kill()
+    except OSError:
+        pass
+    try:
+        process.wait(timeout=CODEX_STOP_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def _run_codex_process(
+    command: list[str],
+    *,
+    workspace: Path,
+    environment: dict[str, str],
+    events,
+    log,
+    events_path: Path,
+    result_path: Path,
+    timeout_seconds: float | None,
+    completion_grace_seconds: float | None,
+) -> tuple[subprocess.CompletedProcess, bool, bool]:
+    """Run Codex while detecting completed turns with lingering tools."""
+    popen_options: dict = {
+        "cwd": workspace,
+        "env": environment,
+        "stdout": events,
+        "stderr": log,
+        "text": True,
+    }
+    if os.name == "nt":
+        popen_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        popen_options["start_new_session"] = True
+    process = subprocess.Popen(command, **popen_options)
+    started_at = time.monotonic()
+    completed_at: float | None = None
+    stopped_after_completion = False
+    timed_out = False
+    try:
+        while process.poll() is None:
+            now = time.monotonic()
+            if structured_turn_is_complete(events_path, result_path):
+                if completed_at is None:
+                    completed_at = now
+                elif (
+                    completion_grace_seconds is not None
+                    and now - completed_at >= completion_grace_seconds
+                ):
+                    log.write(
+                        "\nDriver: structured turn completed but Codex did "
+                        "not exit within the grace period; stopping its "
+                        "process group.\n"
+                    )
+                    log.flush()
+                    stopped_after_completion = True
+                    _stop_codex_process(process)
+                    break
+            if (
+                timeout_seconds is not None
+                and completed_at is None
+                and now - started_at >= timeout_seconds
+            ):
+                log.write(
+                    f"\nDriver: Codex exceeded the {timeout_seconds:g}-second "
+                    "wall-clock timeout; stopping its process group.\n"
+                )
+                log.flush()
+                timed_out = True
+                _stop_codex_process(process)
+                break
+            time.sleep(CODEX_POLL_INTERVAL_SECONDS)
+    except BaseException:
+        _stop_codex_process(process)
+        raise
+    return (
+        subprocess.CompletedProcess(command, process.returncode),
+        stopped_after_completion,
+        timed_out,
+    )
+
+
 def build_exec_command(
     *,
     codex: str,
@@ -508,6 +642,8 @@ def run_structured_codex(
     options: ModelOptions = ModelOptions(),
     web_search: str = "disabled",
     launch_interval: float = CODEX_LAUNCH_INTERVAL_SECONDS,
+    timeout_seconds: float | None = None,
+    completion_grace_seconds: float | None = None,
 ) -> Path:
     """Run one structured Codex turn and return its final-response path."""
     workspace = workspace.resolve()
@@ -529,6 +665,8 @@ def run_structured_codex(
     environment = codex_subprocess_environment()
 
     completed: subprocess.CompletedProcess | None = None
+    stopped_after_completion = False
+    timed_out = False
     for attempt in range(1, MAX_CODEX_START_ATTEMPTS + 1):
         wait_for_codex_launch_slot(launch_interval)
         try:
@@ -542,15 +680,35 @@ def run_structured_codex(
                         f"{MAX_CODEX_START_ATTEMPTS} ---\n"
                     )
                     log.flush()
-                completed = subprocess.run(
-                    command,
-                    cwd=workspace,
-                    env=environment,
-                    stdout=events,
-                    stderr=log,
-                    text=True,
-                    check=False,
-                )
+                if (
+                    timeout_seconds is None
+                    and completion_grace_seconds is None
+                ):
+                    completed = subprocess.run(
+                        command,
+                        cwd=workspace,
+                        env=environment,
+                        stdout=events,
+                        stderr=log,
+                        text=True,
+                        check=False,
+                    )
+                else:
+                    (
+                        completed,
+                        stopped_after_completion,
+                        timed_out,
+                    ) = _run_codex_process(
+                        command,
+                        workspace=workspace,
+                        environment=environment,
+                        events=events,
+                        log=log,
+                        events_path=events_path,
+                        result_path=result_path,
+                        timeout_seconds=timeout_seconds,
+                        completion_grace_seconds=completion_grace_seconds,
+                    )
         except OSError as exc:
             if (
                 attempt < MAX_CODEX_START_ATTEMPTS
@@ -564,7 +722,7 @@ def run_structured_codex(
                 f"{workspace}: {exc}"
             ) from exc
 
-        if completed.returncode == 0:
+        if completed.returncode == 0 or stopped_after_completion or timed_out:
             break
         if (
             attempt == MAX_CODEX_START_ATTEMPTS
@@ -577,7 +735,15 @@ def run_structured_codex(
             break
 
     normalize_workspace_access(workspace, codex)
-    if completed is None or completed.returncode != 0:
+    if timed_out:
+        raise CodexError(
+            f"Codex exceeded the {timeout_seconds:g}-second wall-clock "
+            f"timeout; workspace preserved at {workspace}"
+        )
+    if (
+        completed is None
+        or (completed.returncode != 0 and not stopped_after_completion)
+    ):
         returncode = completed.returncode if completed is not None else "unknown"
         raise CodexError(
             f"Codex exited with status {returncode}; "

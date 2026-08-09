@@ -284,6 +284,21 @@ class WritePaperTests(unittest.TestCase):
         self.assertIn("<revision_instruction>", rendered)
         self.assertIn("Add figures explaining the construction.", rendered)
 
+    def test_prompts_keep_internal_review_language_out_of_manuscript(self):
+        writer_prompt = write_paper.DEFAULT_PROMPT_PATH.read_text(encoding="utf-8")
+        reviewer_prompt = write_paper.DEFAULT_REVIEW_PROMPT_PATH.read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(
+            "Keep the internal research and review workflow completely out of `main.tex`",
+            writer_prompt,
+        )
+        self.assertIn(
+            "Treat leaked workflow language as an exposition finding",
+            reviewer_prompt,
+        )
+
     def test_readiness_gate_can_only_be_overridden_explicitly(self):
         with TemporaryDirectory() as temporary:
             paper = make_paper(Path(temporary))

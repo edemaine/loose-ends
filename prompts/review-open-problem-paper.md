@@ -46,6 +46,14 @@ should identify remaining relevant open problems; and the complete paper
 should be understandable without reading another paper. Treat this outline as
 a guideline when a justified alternative organization is clearer.
 
+Check that `main.tex` never exposes the internal pipeline: solver attempts,
+independent reviews or critics, review classifications or verdicts, readiness
+checks, staged inputs, prompts, draft rounds, and IDs such as `R-###`, `C-###`,
+or `P-###` belong only in internal audit material. Any substantive concern must
+instead be stated in the manuscript's own mathematical or bibliographic terms.
+Treat leaked workflow language as an exposition finding and do not return
+`ready_for_expert_review` until it is removed or rewritten.
+
 Write `paper-critique.md` in the current working directory. Include a concise
 assessment, result-by-result and theorem-by-theorem verification, citation and
 novelty checks, self-containment and presentation checks, and concrete repairs.

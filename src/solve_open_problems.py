@@ -745,6 +745,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="maximum concurrent critics (default: --jobs)",
     )
     parser.add_argument(
+        "--review-timeout-minutes",
+        type=codex_cli.positive_number,
+        default=review_solutions.DEFAULT_TIMEOUT_MINUTES,
+        metavar="MINUTES",
+        help=(
+            "maximum wall-clock time for each critic "
+            f"(default: {review_solutions.DEFAULT_TIMEOUT_MINUTES:g})"
+        ),
+    )
+    parser.add_argument(
         "--include-literature-resolved",
         action="store_true",
         help=(
@@ -994,6 +1004,39 @@ def main(argv: list[str] | None = None) -> int:
                 f"to {min(args.review_jobs or args.jobs, len(selected_attempts))} "
                 f"Codex critic(s) at once."
             )
+            review_finished_count = 0
+
+            def report_review_finished(
+                attempt: review_solutions.AttemptRef,
+                outcome: review_solutions.ReviewOutcome | None,
+                error: str | None,
+            ) -> None:
+                nonlocal review_finished_count
+                review_finished_count += 1
+                prefix = (
+                    f"[{review_finished_count}/{len(selected_attempts)}]"
+                )
+                target = (
+                    f"{attempt.problem.paper_directory} "
+                    f"{attempt.problem.id}/{attempt.name}"
+                )
+                if outcome is not None:
+                    verb = (
+                        "Recovered"
+                        if outcome.status == "recovered"
+                        else "Reviewed"
+                    )
+                    print(
+                        f"{prefix} {verb}: {target} ({outcome.message})",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"{prefix} Review failed: {target}: {error}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+
             review_outcomes, review_failures = review_solutions.review_many(
                 selected_attempts,
                 codex=codex,
@@ -1004,19 +1047,9 @@ def main(argv: list[str] | None = None) -> int:
                 options=review_options,
                 jobs=args.review_jobs or args.jobs,
                 web_search=args.review_web_search or args.web_search,
+                timeout_seconds=args.review_timeout_minutes * 60,
+                on_finished=report_review_finished,
             )
-            for outcome in review_outcomes:
-                print(
-                    f"Reviewed: {outcome.attempt.problem.paper_directory} "
-                    f"{outcome.attempt.problem.id}/{outcome.attempt.name} "
-                    f"({outcome.message})"
-                )
-            for attempt, message in review_failures:
-                print(
-                    f"Review failed: {attempt.problem.paper_directory} "
-                    f"{attempt.problem.id}/{attempt.name}: {message}",
-                    file=sys.stderr,
-                )
 
     priority_items = [
         outcome

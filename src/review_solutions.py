@@ -12,7 +12,7 @@ from pathlib import Path
 import shutil
 import sys
 import tempfile
-from typing import Iterable, Sequence
+from typing import Callable, Iterable, Sequence
 
 import codex_cli
 import open_problem_common as common
@@ -46,6 +46,9 @@ IMPORTANCE_LEVELS = ("none", "minor", "moderate", "major", "resolution")
 VERIFICATION_CONFIDENCE_LEVELS = ("low", "medium", "high")
 HUMAN_PRIORITY_LEVELS = ("none", "low", "medium", "high")
 REVIEW_MODES = ("promising", "all")
+WORK_RECORD_FILE = "review-work-record.json"
+DEFAULT_TIMEOUT_MINUTES = 120.0
+COMPLETION_GRACE_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -68,6 +71,12 @@ class ReviewOutcome:
     importance: str
     priority: str
     message: str
+
+
+ReviewFinishedCallback = Callable[
+    [AttemptRef, ReviewOutcome | None, str | None],
+    None,
+]
 
 
 def derive_human_priority(result: dict) -> str:
@@ -295,6 +304,7 @@ def _install_review(
     codex_version: str,
     options: codex_cli.ModelOptions,
     web_search: str,
+    recovered_from: Path | None = None,
 ) -> None:
     staging = Path(
         tempfile.mkdtemp(prefix=".review-install-", dir=attempt.directory)
@@ -305,9 +315,7 @@ def _install_review(
             staging / "critique.md",
         )
         common.write_json(staging / "review-result.json", result)
-        common.write_json(
-            staging / "review-manifest.json",
-            {
+        manifest = {
                 "schema_version": 2,
                 "generated_at": common.utc_now(),
                 "attempt_digest": attempt_digest,
@@ -324,8 +332,15 @@ def _install_review(
                     "verification_confidence"
                 ],
                 "human_priority": result["human_priority"],
-            },
-        )
+            }
+        if recovered_from is not None:
+            manifest.update(
+                {
+                    "recovered_from_workspace": recovered_from.name,
+                    "original_workspace_preserved": True,
+                }
+            )
+        common.write_json(staging / "review-manifest.json", manifest)
         shutil.copyfile(
             workspace / "events.jsonl",
             staging / "review-events.jsonl",
@@ -349,6 +364,102 @@ def _install_review(
     shutil.rmtree(staging)
 
 
+def _write_work_record(
+    workspace: Path,
+    attempt: AttemptRef,
+    *,
+    attempt_digest: str,
+    config_digest: str,
+    codex_version: str,
+    options: codex_cli.ModelOptions,
+    web_search: str,
+) -> None:
+    common.write_json(
+        workspace / WORK_RECORD_FILE,
+        {
+            "schema_version": 1,
+            "problem_id": attempt.problem.id,
+            "attempt_name": attempt.name,
+            "attempt_digest": attempt_digest,
+            "config_digest": config_digest,
+            "codex_version": codex_version,
+            "requested_model": options.model,
+            "requested_reasoning_effort": options.reasoning_effort,
+            "requested_fast_mode": options.fast,
+            "requested_web_search": web_search,
+        },
+    )
+
+
+def recover_review(
+    attempt: AttemptRef,
+    *,
+    codex: str,
+    codex_version: str,
+    config_digest: str,
+    options: codex_cli.ModelOptions,
+    web_search: str,
+) -> ReviewOutcome | None:
+    """Install a matching completed review workspace without another turn."""
+    attempt_digest = common.solver_attempt_digest(attempt.directory)
+    candidates = sorted(
+        attempt.problem.directory.glob(".review-run-*"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for workspace in candidates:
+        record = common.load_json(workspace / WORK_RECORD_FILE)
+        if record is None or record.get("schema_version") != 1:
+            continue
+        if not (
+            record.get("problem_id") == attempt.problem.id
+            and record.get("attempt_name") == attempt.name
+            and record.get("attempt_digest") == attempt_digest
+            and record.get("config_digest") == config_digest
+        ):
+            continue
+        codex_cli.normalize_workspace_access(workspace, codex)
+        if not all(
+            (workspace / name).is_file()
+            for name in (
+                "agent-result.json",
+                "critique.md",
+                "events.jsonl",
+                "run.log",
+            )
+        ):
+            continue
+        result = validate_review_result(
+            workspace / "agent-result.json",
+            workspace,
+            attempt,
+        )
+        _install_review(
+            attempt,
+            workspace=workspace,
+            result=result,
+            attempt_digest=attempt_digest,
+            config_digest=config_digest,
+            codex_version=record.get("codex_version", codex_version),
+            options=options,
+            web_search=record.get("requested_web_search", web_search),
+            recovered_from=workspace,
+        )
+        return ReviewOutcome(
+            attempt,
+            "recovered",
+            result["correctness"],
+            result["reviewed_coverage"],
+            result["importance"],
+            result["human_priority"],
+            f"recovered {result['correctness']}; coverage "
+            f"{result['reviewed_coverage']}; importance "
+            f"{result['importance']}; priority "
+            f"{result['human_priority']}; preserved {workspace.name}",
+        )
+    return None
+
+
 def review_attempt(
     attempt: AttemptRef,
     *,
@@ -360,13 +471,35 @@ def review_attempt(
     options: codex_cli.ModelOptions,
     web_search: str = "live",
     launch_interval: float = codex_cli.CODEX_LAUNCH_INTERVAL_SECONDS,
+    timeout_seconds: float = DEFAULT_TIMEOUT_MINUTES * 60,
+    allow_recovery: bool = True,
 ) -> ReviewOutcome:
     """Run and install one independent review."""
+    if allow_recovery:
+        recovered = recover_review(
+            attempt,
+            codex=codex,
+            codex_version=codex_version,
+            config_digest=config_digest,
+            options=options,
+            web_search=web_search,
+        )
+        if recovered is not None:
+            return recovered
     workspace = Path(
         tempfile.mkdtemp(prefix=".review-run-", dir=attempt.problem.directory)
     ).resolve()
     attempt_digest = common.solver_attempt_digest(attempt.directory)
     try:
+        _write_work_record(
+            workspace,
+            attempt,
+            attempt_digest=attempt_digest,
+            config_digest=config_digest,
+            codex_version=codex_version,
+            options=options,
+            web_search=web_search,
+        )
         context = common.stage_context(
             workspace,
             [attempt.problem],
@@ -389,6 +522,8 @@ def review_attempt(
             options=options,
             web_search=web_search,
             launch_interval=launch_interval,
+            timeout_seconds=timeout_seconds,
+            completion_grace_seconds=COMPLETION_GRACE_SECONDS,
         )
         result = validate_review_result(result_path, workspace, attempt)
         _install_review(
@@ -438,6 +573,9 @@ def review_many(
     options: codex_cli.ModelOptions,
     jobs: int,
     web_search: str = "live",
+    timeout_seconds: float = DEFAULT_TIMEOUT_MINUTES * 60,
+    allow_recovery: bool = True,
+    on_finished: ReviewFinishedCallback | None = None,
 ) -> tuple[list[ReviewOutcome], list[tuple[AttemptRef, str]]]:
     outcomes: list[ReviewOutcome] = []
     failures: list[tuple[AttemptRef, str]] = []
@@ -455,15 +593,24 @@ def review_many(
                 config_digest=config_digest,
                 options=options,
                 web_search=web_search,
+                timeout_seconds=timeout_seconds,
+                allow_recovery=allow_recovery,
             ): attempt
             for attempt in attempts
         }
         for future in as_completed(future_to_attempt):
             attempt = future_to_attempt[future]
             try:
-                outcomes.append(future.result())
+                outcome = future.result()
             except (common.CodexError, OSError) as exc:
-                failures.append((attempt, str(exc)))
+                message = str(exc)
+                failures.append((attempt, message))
+                if on_finished is not None:
+                    on_finished(attempt, None, message)
+            else:
+                outcomes.append(outcome)
+                if on_finished is not None:
+                    on_finished(attempt, outcome, None)
     return outcomes, failures
 
 
@@ -522,6 +669,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help="replace a current review",
+    )
+    parser.add_argument(
+        "--timeout-minutes",
+        type=codex_cli.positive_number,
+        default=DEFAULT_TIMEOUT_MINUTES,
+        metavar="MINUTES",
+        help=(
+            "maximum wall-clock time for each critic "
+            f"(default: {DEFAULT_TIMEOUT_MINUTES:g})"
+        ),
     )
     parser.add_argument(
         "--dry-run",
@@ -638,6 +795,33 @@ def main(argv: list[str] | None = None) -> int:
             f"Reviewing {len(pending)} attempt(s), with up to "
             f"{min(args.jobs, len(pending))} Codex critic(s) at once."
         )
+        finished_count = 0
+
+        def report_finished(
+            attempt: AttemptRef,
+            outcome: ReviewOutcome | None,
+            error: str | None,
+        ) -> None:
+            nonlocal finished_count
+            finished_count += 1
+            prefix = f"[{finished_count}/{len(pending)}]"
+            target = (
+                f"{attempt.problem.paper_directory} "
+                f"{attempt.problem.id}/{attempt.name}"
+            )
+            if error is not None:
+                print(f"{prefix} Failed: {target}: {error}", file=sys.stderr)
+            else:
+                assert outcome is not None
+                verb = (
+                    "Recovered"
+                    if outcome.status == "recovered"
+                    else "Reviewed"
+                )
+                print(f"{prefix} {verb}: {target} ({outcome.message})")
+            sys.stdout.flush()
+            sys.stderr.flush()
+
         outcomes, failures = review_many(
             pending,
             codex=codex,
@@ -648,16 +832,13 @@ def main(argv: list[str] | None = None) -> int:
             options=options,
             jobs=args.jobs,
             web_search=args.web_search,
+            timeout_seconds=args.timeout_minutes * 60,
+            allow_recovery=not args.force,
+            on_finished=report_finished,
         )
     else:
         outcomes, failures = [], []
 
-    for outcome in outcomes:
-        print(
-            f"Reviewed: {outcome.attempt.problem.paper_directory} "
-            f"{outcome.attempt.problem.id}/{outcome.attempt.name} "
-            f"({outcome.message})"
-        )
     for outcome in current:
         print(
             f"Current: {outcome.attempt.problem.paper_directory} "
@@ -665,12 +846,6 @@ def main(argv: list[str] | None = None) -> int:
             f"({outcome.correctness}; coverage {outcome.coverage}; "
             f"importance {outcome.importance}; priority "
             f"{outcome.priority})"
-        )
-    for attempt, message in failures:
-        print(
-            f"Failed: {attempt.problem.paper_directory} "
-            f"{attempt.problem.id}/{attempt.name}: {message}",
-            file=sys.stderr,
         )
     combined = outcomes + current
     priority_items = [

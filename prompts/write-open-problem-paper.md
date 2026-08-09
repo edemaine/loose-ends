@@ -37,6 +37,19 @@ If the central result needs a new unverified mathematical claim, changed
 hypothesis, or unresolved novelty assertion, report the draft as `blocked`
 instead of concealing the gap.
 
+Keep the internal research and review workflow completely out of `main.tex`.
+Do not mention or quote solver attempts, independent reviews, critics, review
+classifications or verdicts, readiness checks, staged inputs, prompts, draft
+rounds, or internal IDs such as `R-###`, `C-###`, and `P-###`. Translate every
+substantive concern from those materials into the paper's own mathematical
+language: state the precise limitation, hypothesis, unproved step, uncertainty,
+or scope qualification and explain its effect directly. For example, never say
+that a review classified a construction as plausible progress; say exactly
+which property has or has not been proved. If a workflow observation has no
+substantive mathematical or bibliographic content, omit it from `main.tex`.
+Internal provenance and dispositions belong in `readiness.md` and the structured
+response, not in the standalone manuscript.
+
 Use this preferred paper structure, deviating only when the mathematics calls
 for a clearer organization:
 
