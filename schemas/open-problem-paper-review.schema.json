@@ -1,0 +1,105 @@
+{
+  "type": "object",
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "invalid",
+        "needs_research",
+        "needs_major_revision",
+        "needs_minor_revision",
+        "ready_for_expert_review"
+      ]
+    },
+    "summary": {"type": "string"},
+    "result_reviews": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "result_id": {"type": "string"},
+          "assessment": {
+            "type": "string",
+            "enum": [
+              "supported",
+              "partially_supported",
+              "unsupported",
+              "incorrect"
+            ]
+          },
+          "explanation": {"type": "string"}
+        },
+        "required": ["result_id", "assessment", "explanation"],
+        "additionalProperties": false
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "severity": {
+            "type": "string",
+            "enum": ["blocking", "major", "minor"]
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "proof",
+              "theorem_statement",
+              "citation",
+              "novelty",
+              "self_containment",
+              "exposition",
+              "latex",
+              "scope",
+              "other"
+            ]
+          },
+          "location": {"type": "string"},
+          "result_ids": {
+            "type": "array",
+            "items": {"type": "string"}
+          },
+          "source_claim_ids": {
+            "type": "array",
+            "items": {"type": "string"}
+          },
+          "explanation": {"type": "string"},
+          "suggested_repair": {"type": "string"},
+          "requires_new_research": {"type": "boolean"}
+        },
+        "required": [
+          "id",
+          "severity",
+          "category",
+          "location",
+          "result_ids",
+          "source_claim_ids",
+          "explanation",
+          "suggested_repair",
+          "requires_new_research"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "recommended_action": {
+      "type": "string",
+      "enum": ["revise", "new_research", "human_review"]
+    },
+    "warnings": {
+      "type": "array",
+      "items": {"type": "string"}
+    }
+  },
+  "required": [
+    "verdict",
+    "summary",
+    "result_reviews",
+    "findings",
+    "recommended_action",
+    "warnings"
+  ],
+  "additionalProperties": false
+}

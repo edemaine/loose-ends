@@ -137,6 +137,32 @@ class CodexPathTests(unittest.TestCase):
         self.assertRegex(converted, r"^[A-Za-z]:\\")
         self.assertNotIn("/cygdrive/", converted)
 
+    def test_codex_environment_omits_windows_store_command_aliases(self):
+        separator = codex_cli.os.pathsep
+        if separator == ";":
+            keep = (r"C:\Tools", r"C:\Windows\System32")
+            windows_apps = (
+                r"C:\Users\tester\AppData\Local\Microsoft\WindowsApps"
+            )
+        else:
+            keep = ("/usr/bin", "/cygdrive/c/Windows/System32")
+            windows_apps = (
+                "/cygdrive/c/Users/tester/AppData/Local/"
+                "Microsoft/WindowsApps"
+            )
+        original = separator.join((keep[0], windows_apps, keep[1]))
+        with (
+            patch.object(codex_cli, "is_windows_host", return_value=True),
+            patch.dict(codex_cli.os.environ, {"PATH": original}),
+        ):
+            environment = codex_cli.codex_subprocess_environment()
+            self.assertEqual(codex_cli.os.environ["PATH"], original)
+
+        self.assertEqual(
+            environment["PATH"],
+            separator.join(keep),
+        )
+
     def test_acl_repair_removes_explicit_deny_before_granting_access(self):
         with (
             TemporaryDirectory() as temporary,

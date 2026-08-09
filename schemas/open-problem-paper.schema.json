@@ -1,0 +1,116 @@
+{
+  "type": "object",
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["draft_complete", "blocked"]
+    },
+    "title": {"type": "string"},
+    "summary": {"type": "string"},
+    "results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "result_id": {"type": "string"},
+          "disposition": {
+            "type": "string",
+            "enum": ["included_main", "included_supporting", "excluded"]
+          },
+          "source_claim_ids": {
+            "type": "array",
+            "items": {"type": "string"}
+          },
+          "manuscript_labels": {
+            "type": "array",
+            "items": {"type": "string"}
+          },
+          "explanation": {"type": "string"}
+        },
+        "required": [
+          "result_id",
+          "disposition",
+          "source_claim_ids",
+          "manuscript_labels",
+          "explanation"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "citations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "bib_key": {"type": "string"},
+          "title": {"type": "string"},
+          "url": {"type": "string"},
+          "verification": {"type": "string"},
+          "role": {
+            "type": "string",
+            "enum": [
+              "original_problem",
+              "related_work",
+              "technique",
+              "other"
+            ]
+          },
+          "result_ids": {
+            "type": "array",
+            "items": {"type": "string"}
+          }
+        },
+        "required": [
+          "bib_key",
+          "title",
+          "url",
+          "verification",
+          "role",
+          "result_ids"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "addressed_findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "finding_id": {"type": "string"},
+          "disposition": {
+            "type": "string",
+            "enum": ["resolved", "not_resolved", "rejected"]
+          },
+          "explanation": {"type": "string"}
+        },
+        "required": ["finding_id", "disposition", "explanation"],
+        "additionalProperties": false
+      }
+    },
+    "unresolved_issues": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "generated_files": {
+      "type": "array",
+      "description": "Generated root outputs and optional files beneath figures/.",
+      "items": {"type": "string"}
+    },
+    "warnings": {
+      "type": "array",
+      "items": {"type": "string"}
+    }
+  },
+  "required": [
+    "status",
+    "title",
+    "summary",
+    "results",
+    "citations",
+    "addressed_findings",
+    "unresolved_issues",
+    "generated_files",
+    "warnings"
+  ],
+  "additionalProperties": false
+}

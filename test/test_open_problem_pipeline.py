@@ -1012,6 +1012,10 @@ class OpenProblemPipelineTests(unittest.TestCase):
             )
             self.assertIn("critique.md", report)
             self.assertIn("open-problems.md", report)
+            self.assertIn(
+                f"**Attempt path:** `{items[0].attempt.directory}`",
+                report,
+            )
 
             compact = human_review.render_human_review_report(
                 items,
@@ -1020,6 +1024,15 @@ class OpenProblemPipelineTests(unittest.TestCase):
             self.assertNotIn("HIGH BODY", compact)
 
             dashboard = human_review.render_human_review_html(items)
+            dashboard_data = human_review._html_data(
+                items,
+                include_contents=True,
+            )
+            self.assertEqual(
+                dashboard_data[0]["attemptDirectory"],
+                str(items[0].attempt.directory),
+            )
+            self.assertIn("item.attemptDirectory", dashboard)
             self.assertEqual(
                 human_review._extract_open_problem_markdown(
                     paper / "analysis" / "open-problems.md",

@@ -268,6 +268,7 @@ def _html_data(
                 ),
                 "explicitness": problem.explicitness,
                 "attemptName": attempt.name,
+                "attemptDirectory": str(attempt.directory),
                 "attemptNumber": _attempt_number(attempt),
                 "attention": item.attention,
                 "current": item.current,
@@ -802,6 +803,13 @@ def render_human_review_html(
       font: 11px/1.35 ui-monospace, Consolas, monospace;
       overflow-wrap: anywhere;
     }
+    .attempt-path {
+      display: block;
+      margin-top: 8px;
+      color: var(--muted);
+      font: 12px/1.4 ui-monospace, Consolas, monospace;
+      overflow-wrap: anywhere;
+    }
     .stale { color: var(--high); font-weight: 750; }
     [hidden] { display: none !important; }
     @media (prefers-color-scheme: dark) {
@@ -1210,6 +1218,9 @@ def render_human_review_html(
         node("div", "metadata",
           `${authors}${authors ? " · " : ""}${item.explicitness}`)
       );
+      review.append(
+        node("code", "attempt-path", item.attemptDirectory)
+      );
 
       const problemStatement = node("section", "problem-statement");
       problemStatement.append(
@@ -1442,6 +1453,8 @@ def render_human_review_report(
                 "",
                 f"## {index}. {item.attention.upper()} — "
                 f"{problem.id}/{attempt.name}{current_label}",
+                "",
+                f"**Attempt path:** `{attempt.directory}`",
                 "",
                 f"**Paper:** {problem.paper_title}",
                 "",

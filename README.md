@@ -451,6 +451,101 @@ receives the full paper context and current literature report, can verify
 external sources with live web search, and does not modify the solver's
 `attempt.md`.
 
+## Write a paper
+
+`src/write_paper.py` composes one deliberate research-paper manuscript from
+one or more explicitly selected solver attempts. Each selected attempt must by
+default be a candidate solution or counterexample with a current
+`strong_candidate` review, no blocking gaps, new-result provenance, supported
+claims, and a current literature report that does not mark the problem
+resolved. Currentness is content-based; there is no age or freshness cutoff.
+
+The attempt directories are positional inputs to the same paper:
+
+```sh
+python src/write_paper.py \
+  papers/edemaine/arXiv-.../attempts/OP-001/attempt-003 \
+  --author "A. Author"
+
+python src/write_paper.py \
+  papers/edemaine/arXiv-.../attempts/OP-001/attempt-003 \
+  papers/edemaine/arXiv-.../attempts/OP-004/attempt-002 \
+  --name combined-result \
+  --author "A. Author" --author "B. Author"
+```
+
+Without `--name`, a single-source manuscript is named from the paper directory
+and sorted problem IDs, such as
+`manuscripts/arXiv-1406.6576v2_OP-001_OP-004/`. Cross-paper names join those
+components with `__`; unusually long names are truncated with a stable digest.
+The script never infers authors from an originating paper and uses `Anonymous`
+when no `--author` is supplied. Use `--dry-run` to inspect the selection and
+destination without starting Codex. `--allow-not-ready` is an explicit escape
+hatch that asks the writer to attempt a full, critic-reviewed paper despite
+upstream readiness warnings. The warnings remain visible to the writer and
+critic; the override does not guarantee that the critic will accept the result
+or that the workflow will reach human review.
+
+The writer receives every originating PDF and source tree, analysis, selected
+attempt and artifacts, solution critique, and literature report. It writes a
+self-contained LaTeX article with a short result-oriented title and abstract,
+an introduction with `Related Work` and `Our Results`, detailed technical
+sections and proofs, and a conclusion recording remaining open problems. This
+outline is a guideline when the mathematics needs a different organization.
+Every originating problem and borrowed result must be cited to a verified
+source. Install `latexmk` as well as Codex: the agent is asked to compile its
+draft, and the driver independently rebuilds it and rejects missing citations,
+undefined references, unsafe output paths, or broken traceability.
+On Windows, the driver can use the Cygwin `latexmk` installation through
+`C:\cygwin64\bin\bash.exe` when no native executable is on `PATH`.
+
+Every completed draft is independently reviewed. Ordinary major or minor
+writing findings are passed into another complete writing round; mathematical
+or novelty gaps stop with `needs_research`, an unsupported central result stops
+with `invalid`, and `ready_for_expert_review` stops early for manual inspection.
+`--max-rounds` caps the number of new author-review rounds in one invocation
+and defaults to three:
+
+```sh
+python src/write_paper.py \
+  papers/edemaine/arXiv-.../attempts/OP-001/attempt-003 \
+  --max-rounds 2
+```
+
+Drafts are append-only:
+
+```text
+manuscripts/arXiv-..._OP-001/
+├── draft-001/
+│   ├── main.tex
+│   ├── references.bib
+│   ├── main.pdf
+│   ├── readiness.md
+│   ├── paper-result.json
+│   ├── manifest.json
+│   ├── paper-critique.md
+│   ├── paper-review.json
+│   └── ... logs and optional figures ...
+└── draft-002/
+```
+
+`readiness.md` maps manuscript theorems back to `R-###` manuscript inputs and
+`C-###` solver claims. The critic's `paper-critique.md` and structured
+`P-###` findings remain beside every draft. Each revision must account for all
+findings and writes a new draft directory instead of overwriting its parent.
+Continue a reviewed draft explicitly with:
+
+```sh
+python src/write_paper.py \
+  --revise manuscripts/arXiv-..._OP-001/draft-001 \
+  --max-rounds 2
+```
+
+An interrupted review can be resumed through the same `--revise` command: the
+script reviews the installed unreviewed draft before deciding whether another
+writing round is appropriate. A successful final verdict is only readiness for
+human expert review, never an assertion that the paper is publication-ready.
+
 ## Human review
 
 `src/human_review.py` turns the critic's high- and medium-attention
@@ -491,17 +586,18 @@ launching the browser. `--terminal` retains the paged Markdown presentation.
 The command only writes its HTML output and never starts a Codex agent.
 
 All Codex-backed commands share the analyzer's `--model`,
-`--reasoning-effort`, `--fast`, `--codex`, concurrency, Cygwin path
-conversion, Windows ACL repair, and transient startup retry behavior.
+`--reasoning-effort`, `--fast`, `--codex`, Cygwin path conversion, Windows ACL
+repair, and transient startup retry behavior. Batch commands also expose
+concurrency controls.
 Automated Codex runs ignore the invoking user's Codex configuration and
 explicitly disable MCP/plugin app tools, shell network access, automatic MCP
 dependency installation, and nested agent spawning. Paper analysis and triage
-also disable web search; literature, solver, and critic runs default to live
-first-party web search, independently of shell network access. Saved Codex
-authentication is still used, as documented for `--ignore-user-config`. On
-Windows, the launcher explicitly restores the elevated sandbox implementation
-so `workspace-write` remains effective even though user configuration is
-ignored.
+also disable web search; literature, solver, paper writer, and critic runs
+default to live first-party web search, independently of shell network access.
+Saved Codex authentication is still used, as documented for
+`--ignore-user-config`. On Windows, the launcher explicitly restores the
+elevated sandbox implementation so `workspace-write` remains effective even
+though user configuration is ignored.
 
 ## Development
 
