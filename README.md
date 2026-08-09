@@ -457,11 +457,13 @@ python src/human_review.py papers/edemaine
 ```
 
 The command writes `human-review.html` and opens it in a browser. Search and
-attention filters narrow the queue. A separate claim-focus filter selects
-claimed solutions, claimed counterexamples, either kind of resolution, or only
-resolution claims that the critic rated `strong_candidate`; these attempts are
-also labeled in the queue. Known literature resolutions have a separate filter
-and badge rather than appearing as new solution claims. An always-visible
+attention filters narrow the queue. Independent claim-type and literature-status
+filters can, for example, show candidate solutions or counterexamples while
+excluding problems already resolved in the literature. Claim filters also
+select only resolutions rated `strong_candidate`, known-result reconstructions,
+or attempts with no resolution claim. Literature filters distinguish full and
+partial resolutions, no resolution found, uncertainty, and missing literature
+review. These states are also labeled in the queue. An always-visible
 problem list is grouped under
 paper titles, with the selected problem's attempts listed below. Each view
 starts with the paper title and full extracted open-problem statement, followed

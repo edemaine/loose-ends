@@ -854,16 +854,30 @@ def render_human_review_html(
           <input id="search" type="search"
             placeholder="Paper, problem, attempt…" autocomplete="off">
         </label>
-        <label class="control">Claim focus
+        <label class="control">Claim type
           <select id="claim-filter">
             <option value="all">All reviewed attempts</option>
-            <option value="resolution">Any claimed resolution</option>
+            <option value="resolution">Any candidate resolution</option>
             <option value="strong-resolution">
-              Strong claimed resolution
+              Strong candidate resolution
             </option>
-            <option value="solution">Claimed solutions</option>
-            <option value="counterexample">Claimed counterexamples</option>
-            <option value="known">Known literature resolutions</option>
+            <option value="solution">Candidate solutions</option>
+            <option value="counterexample">Candidate counterexamples</option>
+            <option value="known">Known-result reconstructions</option>
+            <option value="none">No resolution claim</option>
+          </select>
+        </label>
+        <label class="control">Literature status
+          <select id="literature-filter">
+            <option value="all">Any literature status</option>
+            <option value="exclude-resolved">
+              Exclude known full resolutions
+            </option>
+            <option value="resolved">Known full resolution</option>
+            <option value="partially_resolved">Partially resolved</option>
+            <option value="no_resolution_found">No resolution found</option>
+            <option value="uncertain">Uncertain</option>
+            <option value="missing">No literature review</option>
           </select>
         </label>
         <div class="filters" aria-label="Attention filters">
@@ -886,7 +900,7 @@ def render_human_review_html(
     <main class="main">
       <div class="empty" id="empty" hidden>
         <h1>No matching reviews</h1>
-        <p>Change the search, claim focus, or attention filters.</p>
+        <p>Change the search, claim type, literature, or attention filters.</p>
       </div>
       <article class="review" id="review"></article>
     </main>
@@ -899,6 +913,7 @@ def render_human_review_html(
     const state = { selectedProblem: "", selectedItem: "", tab: "attempt" };
     const search = document.getElementById("search");
     const claimFilter = document.getElementById("claim-filter");
+    const literatureFilter = document.getElementById("literature-filter");
     const high = document.getElementById("filter-high");
     const medium = document.getElementById("filter-medium");
     const low = document.getElementById("filter-low");
@@ -953,7 +968,7 @@ def render_human_review_html(
       return "";
     }
 
-    function matchesClaimFocus(item) {
+    function matchesClaimType(item) {
       const kind = resolutionKind(item);
       switch (claimFilter.value) {
         case "resolution":
@@ -966,7 +981,25 @@ def render_human_review_html(
         case "counterexample":
           return kind === "counterexample";
         case "known":
-          return kind === "known" || item.literatureStatus === "resolved";
+          return kind === "known";
+        case "none":
+          return kind === "";
+        default:
+          return true;
+      }
+    }
+
+    function matchesLiteratureStatus(item) {
+      switch (literatureFilter.value) {
+        case "exclude-resolved":
+          return item.literatureStatus !== "resolved";
+        case "missing":
+          return !item.literatureStatus;
+        case "resolved":
+        case "partially_resolved":
+        case "no_resolution_found":
+        case "uncertain":
+          return item.literatureStatus === literatureFilter.value;
         default:
           return true;
       }
@@ -977,7 +1010,8 @@ def render_human_review_html(
       return allItems.filter(item => {
         if (attentionFilters[item.attention] &&
             !attentionFilters[item.attention].checked) return false;
-        if (!matchesClaimFocus(item)) return false;
+        if (!matchesClaimType(item)) return false;
+        if (!matchesLiteratureStatus(item)) return false;
         if (!query) return true;
         const haystack = [
           item.paperTitle, item.problemId, item.problemTitle,
@@ -1103,7 +1137,7 @@ def render_human_review_html(
             "",
             `${item.attention.toUpperCase()} · ${item.verdict}${
               resolution === "known"
-                ? " · KNOWN LITERATURE"
+                ? " · KNOWN-RESULT RECONSTRUCTION"
                 : resolution
                   ? ` · ${resolution.toUpperCase()} CLAIM`
                   : ""
@@ -1133,11 +1167,13 @@ def render_human_review_html(
           node(
             "span",
             `badge ${resolution}`,
-            resolution === "known" ? "known literature" : `${resolution} claim`
+            resolution === "known"
+              ? "known-result reconstruction"
+              : `${resolution} claim`
           )
         );
       }
-      if (item.literatureStatus && resolution !== "known") {
+      if (item.literatureStatus) {
         top.append(
           node(
             "span",
@@ -1289,16 +1325,28 @@ def render_human_review_html(
         .map(([level, count]) => `${count} ${level}`)
         .join(" · ");
       const focusLabels = {
-        resolution: "claimed resolutions",
-        "strong-resolution": "strong claimed resolutions",
-        solution: "claimed solutions",
-        counterexample: "claimed counterexamples",
-        known: "known literature resolutions"
+        resolution: "candidate resolutions",
+        "strong-resolution": "strong candidate resolutions",
+        solution: "candidate solutions",
+        counterexample: "candidate counterexamples",
+        known: "known-result reconstructions",
+        none: "no resolution claim"
+      };
+      const literatureLabels = {
+        "exclude-resolved": "excluding known full resolutions",
+        resolved: "known full resolutions",
+        partially_resolved: "partially resolved in literature",
+        no_resolution_found: "no literature resolution found",
+        uncertain: "uncertain literature status",
+        missing: "no literature review"
       };
       const countParts = [`${items.length} shown`];
       if (countText) countParts.push(countText);
       if (focusLabels[claimFilter.value]) {
         countParts.push(focusLabels[claimFilter.value]);
+      }
+      if (literatureLabels[literatureFilter.value]) {
+        countParts.push(literatureLabels[literatureFilter.value]);
       }
       queueCount.textContent = countParts.join(" · ");
       renderProblemControls(items);
@@ -1315,6 +1363,7 @@ def render_human_review_html(
     }
     search.addEventListener("input", updateFilters);
     claimFilter.addEventListener("change", updateFilters);
+    literatureFilter.addEventListener("change", updateFilters);
     high.addEventListener("change", updateFilters);
     medium.addEventListener("change", updateFilters);
     low.addEventListener("change", updateFilters);
