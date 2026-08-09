@@ -330,6 +330,11 @@ class WritePaperTests(unittest.TestCase):
             (workspace / "main.pdf").write_bytes(b"%PDF-agent")
             figures = workspace / "figures"
             figures.mkdir()
+            svg = figures / "overview.svg"
+            svg.write_text(
+                "<svg xmlns='http://www.w3.org/2000/svg'/>",
+                encoding="utf-8",
+            )
             figure = figures / "overview.pdf"
             figure.write_bytes(b"%PDF-figure")
             response = paper_result(["R-001"])
@@ -338,6 +343,7 @@ class WritePaperTests(unittest.TestCase):
                 "references.bib",
                 "readiness.md",
                 "main.pdf",
+                "figures/overview.svg",
                 "figures/overview.pdf",
             ]
             common.write_json(
@@ -353,11 +359,23 @@ class WritePaperTests(unittest.TestCase):
             )
 
             self.assertEqual(result["status"], "draft_complete")
-            self.assertEqual(files, [figure])
+            self.assertEqual(files, [svg, figure])
             self.assertEqual(
                 result["generated_files"],
-                ["figures/overview.pdf"],
+                ["figures/overview.svg", "figures/overview.pdf"],
             )
+            unpaired_response = paper_result(["R-001"])
+            unpaired_response["generated_files"] = ["figures/overview.svg"]
+            common.write_json(
+                workspace / "agent-result.json",
+                unpaired_response,
+            )
+            with self.assertRaisesRegex(common.CodexError, "matching PDF"):
+                write_paper.validate_paper_result(
+                    workspace / "agent-result.json",
+                    workspace,
+                    inputs,
+                )
             unsafe_response = paper_result(["R-001"])
             unsafe_response["generated_files"] = ["notes.txt"]
             (workspace / "notes.txt").write_text("unsafe", encoding="utf-8")

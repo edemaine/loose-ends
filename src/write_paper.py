@@ -567,6 +567,16 @@ def _generated_files(workspace: Path, values: object) -> list[Path]:
             )
         if normalized not in standard_outputs:
             paths.append(path)
+    for normalized in seen:
+        relative = PurePosixPath(normalized)
+        if relative.suffix.casefold() != ".svg":
+            continue
+        pdf = relative.with_suffix(".pdf").as_posix()
+        if pdf not in seen:
+            raise common.CodexError(
+                "generated SVG must include a matching PDF: "
+                f"{normalized} -> {pdf}"
+            )
     return paths
 
 

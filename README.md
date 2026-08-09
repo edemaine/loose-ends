@@ -504,6 +504,11 @@ Every originating problem and borrowed result must be cited to a verified
 source. Install `latexmk` as well as Codex: the agent is asked to compile its
 draft, and the driver independently rebuilds it and rejects missing citations,
 undefined references, unsafe output paths, or broken traceability.
+The writer may create supporting files beneath `figures/`. SVG sources are
+allowed when a same-stem PDF is also generated and listed (for example,
+`figures/construction.svg` and `figures/construction.pdf`); the manuscript
+includes the PDF. The writer can run command-line converters such as Inkscape
+when they are installed, and the driver rejects an unpaired SVG.
 On Windows, the driver can use the Cygwin `latexmk` installation through
 `C:\cygwin64\bin\bash.exe` when no native executable is on `PATH`.
 

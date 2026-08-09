@@ -96,7 +96,11 @@ Write these files in the current working directory:
   and their review assessments; explain novelty and source verification;
   record every unresolved issue; and, during revision, address every previous
   `P-###` critic finding individually;
-- optional generated figures beneath `figures/` only.
+- optional generated figures beneath `figures/` only. SVG source files are
+  welcome, but for every `figures/name.svg` you must also generate and list
+  `figures/name.pdf`, and `main.tex` must include the PDF version. Convert SVG
+  with an available command-line tool such as Inkscape, or omit the SVG source
+  if no reliable conversion is available.
 
 Use the requested authors exactly. If the author list is empty, write
 `\author{}` with no placeholder name. Do not copy authors from an originating
@@ -111,4 +115,5 @@ schema. In `generated_files`, list any optional files beneath `figures/`. You
 may also list the required root outputs `main.tex`, `references.bib`,
 `readiness.md`, and the compiled `main.pdf`; the driver independently rebuilds
 and installs `main.pdf`, so it records only optional figure files as extra
-generated artifacts.
+generated artifacts. List both the SVG and matching same-stem PDF whenever you
+generate an SVG.
