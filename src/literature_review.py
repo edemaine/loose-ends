@@ -27,6 +27,7 @@ DEFAULT_SCHEMA_PATH = (
 )
 DEFAULT_TRIAGE_CLASSES = "attempt,maybe"
 WORK_RECORD_FILE = "literature-work-record.json"
+STATUS_CORRECTION_PREFIX = "Driver downgraded `resolved` to `uncertain`: "
 RESOLUTION_STATUSES = (
     "resolved",
     "partially_resolved",
@@ -214,6 +215,7 @@ def validate_literature_result(
     requested = {problem.id for problem in problems}
     by_id: dict[str, dict] = {}
     synthesized: list[str] = []
+    status_repairs: list[str] = []
     for entry in entries:
         if not isinstance(entry, dict):
             raise common.CodexError("a literature entry is not an object")
@@ -265,24 +267,36 @@ def validate_literature_result(
         validated_sources = [
             _validate_source(source, problem_id) for source in sources
         ]
-        if resolution == "resolved":
-            verified_resolution = any(
-                source["role"] == "resolution"
-                and source["source_type"] == "primary_source"
-                for source in validated_sources
-            )
-            if confidence != "high" or not verified_resolution:
-                raise common.CodexError(
-                    f"resolved status for {problem_id} requires high "
-                    "confidence and an inspected primary resolution source"
-                )
         _validate_string_list(
             entry.get("search_queries"),
             f"search_queries for {problem_id}",
         )
-        _validate_string_list(
+        entry_warnings = _validate_string_list(
             entry.get("warnings"), f"warnings for {problem_id}"
         )
+        if resolution == "resolved":
+            verified_resolution = any(
+                source["role"] in {"resolution", "counterexample"}
+                and source["source_type"] == "primary_source"
+                for source in validated_sources
+            )
+            reasons = []
+            if confidence != "high":
+                reasons.append(f"confidence was {confidence}, not high")
+            if not verified_resolution:
+                reasons.append(
+                    "no inspected primary resolution or counterexample "
+                    "source was identified"
+                )
+            if reasons:
+                correction = STATUS_CORRECTION_PREFIX + "; ".join(reasons)
+                entry["resolution_status"] = "uncertain"
+                entry["status_summary"] = (
+                    "Conservatively installed as uncertain. Original agent "
+                    f"assessment: {entry['status_summary']}"
+                )
+                entry["warnings"] = [*entry_warnings, correction]
+                status_repairs.append(f"{problem_id}: {correction}")
         report = workspace / f"literature-{problem_id}.md"
         if not report.exists():
             try:
@@ -310,15 +324,19 @@ def validate_literature_result(
         raise common.CodexError(
             "literature response omitted: " + ", ".join(sorted(missing))
         )
+    driver_warnings = []
     if synthesized:
+        driver_warnings.append(
+            "Driver synthesized missing Markdown literature report(s) "
+            "from the validated structured response: "
+            + ", ".join(synthesized)
+        )
+    if status_repairs:
+        driver_warnings.extend(status_repairs)
+    if driver_warnings:
         result = {
             **result,
-            "warnings": [
-                *root_warnings,
-                "Driver synthesized missing Markdown literature report(s) "
-                "from the validated structured response: "
-                + ", ".join(synthesized),
-            ],
+            "warnings": [*root_warnings, *driver_warnings],
         }
     return result, by_id
 
@@ -341,10 +359,29 @@ def _install_literature(
         tempfile.mkdtemp(prefix=".literature-install-", dir=problem.directory)
     )
     try:
-        shutil.copyfile(
-            workspace / f"literature-{problem.id}.md",
-            staging / common.LITERATURE_MARKDOWN,
+        source_report = workspace / f"literature-{problem.id}.md"
+        correction = next(
+            (
+                warning
+                for warning in entry["warnings"]
+                if warning.startswith(STATUS_CORRECTION_PREFIX)
+            ),
+            None,
         )
+        if correction is None:
+            shutil.copyfile(
+                source_report,
+                staging / common.LITERATURE_MARKDOWN,
+            )
+        else:
+            original_report = source_report.read_text(encoding="utf-8")
+            (staging / common.LITERATURE_MARKDOWN).write_text(
+                "> **Driver status correction:** "
+                + correction
+                + "\n\n"
+                + original_report,
+                encoding="utf-8",
+            )
         common.write_json(
             staging / common.LITERATURE_RESULT,
             {

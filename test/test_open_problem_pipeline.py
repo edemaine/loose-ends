@@ -797,6 +797,96 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 "S0",
             )
 
+    def test_literature_repairs_unsupported_resolved_status(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = make_analyzed_paper(root)
+            problems = common.discover_problem_refs([paper])
+            workspace = root / "literature-workspace"
+            workspace.mkdir()
+
+            def entry(problem_id, confidence, role):
+                return {
+                    "problem_id": problem_id,
+                    "resolution_status": "resolved",
+                    "confidence": confidence,
+                    "status_summary": "A later source resolves the problem.",
+                    "exact_match_analysis": "The formulations match.",
+                    "residual_problem": "",
+                    "solver_briefing": "Audit the published argument.",
+                    "sources": [
+                        {
+                            "id": "S0",
+                            "role": role,
+                            "priority": "high",
+                            "title": "Later Result",
+                            "authors": ["Grace Hopper"],
+                            "publication_year": "2025",
+                            "url": "https://example.org/result",
+                            "source_type": "primary_source",
+                            "result_statement": "The exact claim is settled.",
+                            "relevance": "It matches the open problem.",
+                            "limitations": "The mapping should be checked.",
+                        }
+                    ],
+                    "search_queries": ["later exact result"],
+                    "warnings": [],
+                }
+
+            common.write_json(
+                workspace / "agent-result.json",
+                {
+                    "status": "complete",
+                    "literature": [
+                        entry("OP-001", "medium", "resolution"),
+                        entry("OP-002", "high", "counterexample"),
+                    ],
+                    "warnings": [],
+                },
+            )
+            for problem in problems:
+                (workspace / f"literature-{problem.id}.md").write_text(
+                    f"# Literature {problem.id}\n\nAgent says resolved.\n",
+                    encoding="utf-8",
+                )
+            write_run_files(workspace)
+
+            result, by_id = literature_review.validate_literature_result(
+                workspace / "agent-result.json",
+                workspace,
+                problems,
+            )
+
+            repaired = by_id["OP-001"]
+            self.assertEqual(repaired["resolution_status"], "uncertain")
+            self.assertTrue(
+                repaired["warnings"][-1].startswith(
+                    literature_review.STATUS_CORRECTION_PREFIX
+                )
+            )
+            self.assertEqual(
+                by_id["OP-002"]["resolution_status"], "resolved"
+            )
+            self.assertIn("OP-001: Driver downgraded", result["warnings"][0])
+
+            literature_review._install_literature(
+                problems[0],
+                workspace=workspace,
+                root_result=result,
+                entry=repaired,
+                input_digest=common.literature_input_digest(problems[0]),
+                config_digest="test-config",
+                codex_version="test",
+                options=codex_cli.ModelOptions("test-model", "xhigh"),
+                web_search="live",
+            )
+            installed = (
+                problems[0].directory / common.LITERATURE_MARKDOWN
+            ).read_text(encoding="utf-8")
+            self.assertTrue(
+                installed.startswith("> **Driver status correction:**")
+            )
+
     def test_literature_attempted_selector_bypasses_triage(self):
         with TemporaryDirectory() as temporary:
             paper = make_analyzed_paper(Path(temporary))
@@ -924,12 +1014,21 @@ class OpenProblemPipelineTests(unittest.TestCase):
             self.assertNotIn('id="problem-select"', dashboard)
             self.assertIn('id="attempt-list"', dashboard)
             self.assertIn('id="claim-filter"', dashboard)
+            self.assertIn('id="literature-filter"', dashboard)
             self.assertIn(
-                '<option value="resolution">Any claimed resolution</option>',
+                '<option value="resolution">Any candidate resolution</option>',
                 dashboard,
             )
             self.assertIn(
-                '<option value="known">Known literature resolutions</option>',
+                '<option value="known">Known-result reconstructions</option>',
+                dashboard,
+            )
+            self.assertIn(
+                "Exclude known full resolutions",
+                dashboard,
+            )
+            self.assertIn(
+                'return item.literatureStatus !== "resolved";',
                 dashboard,
             )
             self.assertIn('case "strong-resolution":', dashboard)
