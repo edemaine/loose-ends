@@ -158,6 +158,10 @@ path-startup failures are retried up to twice.
 The runner also supports Cygwin Python. It keeps local filesystem operations in
 Cygwin path form while converting `-C`, output, schema, and prompt paths to
 Windows form before invoking the Windows-native Codex CLI. On Windows, it also
+omits the per-user Microsoft Store command-alias directory from the Codex
+child's `PATH`; dedicated sandbox users cannot execute aliases such as that
+directory's `pwsh.exe`, while ordinary PowerShell installations elsewhere on
+`PATH` remain available. It also
 adds an inheritable ACL entry for the invoking account so that Cygwin Python can
 validate files created by the restricted Codex sandbox account. After Codex
 finishes, it removes any explicit deny entry for that account and reapplies

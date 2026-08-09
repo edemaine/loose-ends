@@ -201,6 +201,25 @@ def is_windows_host() -> bool:
     return os.name == "nt" or sys.platform == "cygwin"
 
 
+def codex_subprocess_environment() -> dict[str, str]:
+    """Avoid Windows Store command aliases inaccessible to sandbox users."""
+    environment = os.environ.copy()
+    if not is_windows_host():
+        return environment
+    path = environment.get("PATH")
+    if path is None:
+        return environment
+    entries = path.split(os.pathsep)
+    environment["PATH"] = os.pathsep.join(
+        entry
+        for entry in entries
+        if not entry.rstrip("\\/").replace("\\", "/").casefold().endswith(
+            "/microsoft/windowsapps"
+        )
+    )
+    return environment
+
+
 def _run_local_command(command: list[str], description: str) -> str:
     try:
         process = subprocess.Popen(
@@ -507,6 +526,7 @@ def run_structured_codex(
         options=options,
         web_search=web_search,
     )
+    environment = codex_subprocess_environment()
 
     completed: subprocess.CompletedProcess | None = None
     for attempt in range(1, MAX_CODEX_START_ATTEMPTS + 1):
@@ -525,6 +545,7 @@ def run_structured_codex(
                 completed = subprocess.run(
                     command,
                     cwd=workspace,
+                    env=environment,
                     stdout=events,
                     stderr=log,
                     text=True,
