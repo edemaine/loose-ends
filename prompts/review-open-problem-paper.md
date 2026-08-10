@@ -15,14 +15,13 @@ paper as written. The earlier solver and paper writer are evidence, not truth.
 Try to falsify each main theorem and check it against the exact original
 problem before accepting it.
 
-The selection may have used an explicit readiness override. Treat any staged
-`readiness_issues` as important upstream warnings, but do not reject the paper
-solely because those warnings exist. Re-evaluate them against the manuscript
-and complete evidence, then express any issue that remains through concrete
-findings and the appropriate verdict. Likewise, a writer may conservatively
-label an override draft `blocked`; still review the actual paper. Do not return
-`ready_for_expert_review` while a substantive block or the manuscript's own
-blocked-status language remains, but use a revision verdict when another
+Treat any staged `readiness_issues` as important upstream warnings, but do not
+reject the paper solely because those warnings exist. Re-evaluate them against
+the manuscript and complete evidence, then express any issue that remains
+through concrete findings and the appropriate verdict. A writer may
+conservatively label a draft `blocked`; still review the actual paper. Do not
+return `ready_for_expert_review` while a substantive block or the manuscript's
+own blocked-status language remains, but use a revision verdict when another
 writing round can repair it without new research.
 
 Check especially for changed quantifiers or hypotheses, circular arguments,

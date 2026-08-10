@@ -13,11 +13,10 @@ Read `inputs/index.json` first. It assigns stable manuscript result IDs
 context for every result, including the original paper and its source. The
 selected attempts are evidence, not truth. Normally use only claims supported
 by the independent solution reviews, and check that the manuscript preserves
-the original problems' hypotheses and quantifiers. Under an explicit readiness
-override, you may narrow or repair a flagged source claim when the complete
-staged evidence supports the corrected statement and proof. Document that
-relationship precisely in `readiness.md`; do not merely relabel an unsupported
-claim or conceal its gap.
+the original problems' hypotheses and quantifiers. You may narrow or repair a
+flagged source claim when the complete staged evidence supports the corrected
+statement and proof. Document that relationship precisely in `readiness.md`;
+do not merely relabel an unsupported claim or conceal its gap.
 
 The requested author and optional title metadata is:
 
@@ -87,9 +86,10 @@ must include every selected result, though several open problems may be
 resolved by one master theorem. If the selected results cannot form one
 coherent paper, use `blocked`, explain why, and recommend a split in
 `readiness.md`; do not silently omit a selected result.
-If `inputs/index.json` records any nonempty `readiness_issues`, the input was
-included through an explicit command-line override. Treat those entries as
-upstream warnings to investigate, not as a mandatory `blocked` disposition.
+If `inputs/index.json` records any nonempty `readiness_issues`, treat those
+entries as upstream warnings to investigate, not as a mandatory `blocked`
+disposition. Explicit selection means the user wants a paper attempted even
+when an upstream review regards the work as partial or incomplete.
 Preserve them visibly in `readiness.md`, determine from the complete staged
 evidence whether each warning remains substantive, and keep any surviving
 caveat visible in the manuscript. When you can produce a coherent full paper

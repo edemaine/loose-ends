@@ -299,7 +299,7 @@ class WritePaperTests(unittest.TestCase):
             reviewer_prompt,
         )
 
-    def test_readiness_gate_can_only_be_overridden_explicitly(self):
+    def test_readiness_issues_warn_but_do_not_block_explicit_inputs(self):
         with TemporaryDirectory() as temporary:
             paper = make_paper(Path(temporary))
             attempt = make_ready_attempt(paper, "OP-001")
@@ -311,12 +311,7 @@ class WritePaperTests(unittest.TestCase):
             manifest["attempt_digest"] = common.solver_attempt_digest(attempt)
             common.write_json(attempt / "review-manifest.json", manifest)
 
-            with self.assertRaisesRegex(common.CodexError, "not paper-ready"):
-                write_paper.load_paper_inputs([attempt])
-            inputs = write_paper.load_paper_inputs(
-                [attempt],
-                allow_not_ready=True,
-            )
+            inputs = write_paper.load_paper_inputs([attempt])
             self.assertTrue(inputs[0].readiness_issues)
             workspace = Path(temporary) / "override-workspace"
             workspace.mkdir()
@@ -326,20 +321,10 @@ class WritePaperTests(unittest.TestCase):
                 paper_result(["R-001"]),
             )
 
-            with self.assertRaisesRegex(
-                common.CodexError,
-                "claim not supported",
-            ):
-                write_paper.validate_paper_result(
-                    workspace / "agent-result.json",
-                    workspace,
-                    inputs,
-                )
             result, _ = write_paper.validate_paper_result(
                 workspace / "agent-result.json",
                 workspace,
                 inputs,
-                allow_not_ready=True,
             )
 
             self.assertEqual(result["status"], "draft_complete")
@@ -664,7 +649,7 @@ class WritePaperTests(unittest.TestCase):
         self.assertEqual(outcome.reason, "maximum rounds reached")
         self.assertFalse(outcome.ready)
 
-    def test_readiness_override_sends_blocked_draft_to_critic(self):
+    def test_blocked_draft_is_sent_to_critic(self):
         draft = write_paper.DraftRef(
             Path("draft-001"),
             1,
@@ -680,7 +665,7 @@ class WritePaperTests(unittest.TestCase):
                 write_paper,
                 "run_author_round",
                 return_value=draft,
-            ) as author,
+            ),
             patch.object(
                 write_paper,
                 "run_paper_review",
@@ -705,10 +690,8 @@ class WritePaperTests(unittest.TestCase):
                 review_schema_path=Path("review-schema.json"),
                 review_config_digest="reviewer",
                 review_options=options,
-                allow_not_ready=True,
             )
 
-        self.assertTrue(author.call_args.kwargs["allow_not_ready"])
         self.assertEqual(critic.call_count, 1)
         self.assertEqual(outcome.reason, "needs_research")
 

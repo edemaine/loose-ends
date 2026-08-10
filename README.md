@@ -461,12 +461,13 @@ changes therefore do not invalidate mathematical reviews.
 ## Write a paper
 
 `src/write_paper.py` composes one deliberate research-paper manuscript from
-one or more explicitly selected solver attempts. Each selected attempt must by
-default claim a solution or counterexample, have a current `well_supported`
-review with complete coverage and major or resolution-level importance, have
-no blocking gaps and supported claims, and have a current literature report
-that does not mark the problem resolved. Currentness is content-based; there is
-no age or freshness cutoff.
+one or more explicitly selected solver attempts. Explicit selection is enough
+to request a manuscript: partial results, incomplete coverage, review gaps, and
+literature concerns are reported as warnings rather than selection failures.
+The writer and independent paper critic receive those warnings and must reflect
+every substantive surviving limitation in the manuscript. Structural input
+errors, unsafe generated paths, invalid traceability, citation failures, and
+LaTeX build failures remain hard errors.
 
 The attempt directories are positional inputs to the same paper:
 
@@ -487,12 +488,11 @@ and sorted problem IDs, such as
 `manuscripts/arXiv-1406.6576v2_OP-001_OP-004/`. Cross-paper names join those
 components with `__`; unusually long names are truncated with a stable digest.
 The script never infers authors from an originating paper and emits
-`\author{}` when no `--author` is supplied. Use `--dry-run` to inspect the selection and
-destination without starting Codex. `--allow-not-ready` is an explicit escape
-hatch that asks the writer to attempt a full, critic-reviewed paper despite
-upstream readiness warnings. The warnings remain visible to the writer and
-critic; the override does not guarantee that the critic will accept the result
-or that the workflow will reach human review.
+`\author{}` when no `--author` is supplied. Use `--dry-run` to inspect the
+selection, destination, and upstream warnings without starting Codex. The
+legacy `--allow-not-ready` option is accepted as a no-op; this is now the
+default behavior. Warnings do not guarantee that the critic will accept the
+result or that the workflow will reach human review.
 
 The writer receives every originating PDF and source tree, analysis, selected
 attempt and artifacts, solution critique, and literature report. It writes a

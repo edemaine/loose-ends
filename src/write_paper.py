@@ -141,9 +141,7 @@ def _readiness_issues(attempt: review_solutions.AttemptRef) -> list[str]:
     issues: list[str] = []
     claimed = common.claimed_result_type(attempt.solver_result)
     if claimed not in {"solution", "counterexample"}:
-        issues.append(
-            "solver does not claim a solution or counterexample"
-        )
+        issues.append(f"solver classifies the work as {claimed}")
     if not review_solutions.review_is_current(attempt):
         issues.append("the independent solution review is missing or stale")
         review = common.load_json(attempt.directory / "review-result.json") or {}
@@ -152,18 +150,27 @@ def _readiness_issues(attempt: review_solutions.AttemptRef) -> list[str]:
             attempt.directory / "review-result.json",
             description=f"solution review for {attempt.directory}",
         )
-    if review.get("correctness") != "well_supported":
-        issues.append("solution review is not well_supported")
-    if review.get("reviewed_coverage") not in {
+    correctness = review.get("correctness")
+    if correctness != "well_supported":
+        issues.append(f"solution review correctness is {correctness}")
+    coverage = review.get("reviewed_coverage")
+    if coverage not in {
         "complete",
         "complete_under_stated_interpretation",
     }:
-        issues.append("solution review does not find complete coverage")
-    if review.get("importance") not in {"major", "resolution"}:
-        issues.append("solution review does not find major importance")
+        issues.append(f"solution review coverage is {coverage}")
+    importance = review.get("importance")
+    if importance not in {"major", "resolution"}:
+        issues.append(f"solution review importance is {importance}")
     gaps = review.get("blocking_gaps")
-    if not isinstance(gaps, list) or gaps:
-        issues.append("solution review has blocking gaps")
+    if not isinstance(gaps, list):
+        issues.append("solution review has invalid gap metadata")
+    else:
+        issues.extend(
+            f"solution review records a remaining issue: {gap}"
+            for gap in gaps
+            if isinstance(gap, str) and gap.strip()
+        )
     claim_reviews = review.get("claim_reviews")
     if not isinstance(claim_reviews, list) or not any(
         isinstance(item, dict) and item.get("assessment") == "supported"
@@ -179,11 +186,7 @@ def _readiness_issues(attempt: review_solutions.AttemptRef) -> list[str]:
     return issues
 
 
-def load_paper_inputs(
-    attempt_paths: Sequence[Path],
-    *,
-    allow_not_ready: bool = False,
-) -> list[PaperInput]:
+def load_paper_inputs(attempt_paths: Sequence[Path]) -> list[PaperInput]:
     if not attempt_paths:
         raise common.CodexError("select at least one solver attempt")
     attempts = [_attempt_from_path(path) for path in attempt_paths]
@@ -198,14 +201,8 @@ def load_paper_inputs(
         )
     )
     inputs: list[PaperInput] = []
-    all_issues: list[str] = []
     for index, attempt in enumerate(attempts, 1):
         issues = _readiness_issues(attempt)
-        label = (
-            f"{attempt.problem.paper_directory.name}/"
-            f"{attempt.problem.id}/{attempt.name}"
-        )
-        all_issues.extend(f"{label}: {issue}" for issue in issues)
         review = common.load_json(attempt.directory / "review-result.json") or {}
         literature = common.literature_result(attempt.problem) or {}
         inputs.append(
@@ -216,13 +213,6 @@ def load_paper_inputs(
                 literature,
                 tuple(issues),
             )
-        )
-    if all_issues and not allow_not_ready:
-        raise common.CodexError(
-            "selected attempts are not paper-ready:\n  "
-            + "\n  ".join(all_issues)
-            + "\nUse --allow-not-ready to attempt a critic-reviewed draft "
-            "despite these upstream warnings."
         )
     return inputs
 
@@ -610,7 +600,6 @@ def validate_paper_result(
     *,
     previous: DraftRef | None = None,
     authors: Sequence[str] | None = None,
-    allow_not_ready: bool = False,
 ) -> tuple[dict, list[Path]]:
     result = common.read_json(result_path, description="paper response")
     status = result.get("status")
@@ -663,19 +652,6 @@ def validate_paper_result(
         ):
             raise common.CodexError(
                 f"paper result {result_id} references an unknown solver claim"
-            )
-        reviewed_claims = {
-            review.get("claim_id"): review.get("assessment")
-            for review in expected_results[result_id].review_result.get(
-                "claim_reviews", []
-            )
-            if isinstance(review, dict)
-        }
-        if status == "draft_complete" and not allow_not_ready and any(
-            reviewed_claims.get(claim) != "supported" for claim in claims
-        ):
-            raise common.CodexError(
-                f"paper result {result_id} uses a claim not supported by its critic"
             )
         labels = row.get("manuscript_labels")
         if not isinstance(labels, list) or not all(
@@ -1063,7 +1039,6 @@ def run_author_round(
     schema_path: Path,
     config_digest: str,
     options: codex_cli.ModelOptions,
-    allow_not_ready: bool = False,
     web_search: str = "live",
     launch_interval: float = codex_cli.CODEX_LAUNCH_INTERVAL_SECONDS,
 ) -> DraftRef:
@@ -1097,7 +1072,6 @@ def run_author_round(
             inputs,
             previous=previous,
             authors=authors,
-            allow_not_ready=allow_not_ready,
         )
         compile_latex(workspace, latexmk)
         draft = _install_draft(
@@ -1361,7 +1335,6 @@ def run_pipeline(
     review_schema_path: Path,
     review_config_digest: str,
     review_options: codex_cli.ModelOptions,
-    allow_not_ready: bool = False,
     web_search: str = "live",
     review_web_search: str = "live",
 ) -> PipelineOutcome:
@@ -1421,12 +1394,9 @@ def run_pipeline(
             schema_path=schema_path,
             config_digest=config_digest,
             options=options,
-            allow_not_ready=allow_not_ready,
             web_search=web_search,
         )
         drafts.append(draft)
-        if draft.result.get("status") == "blocked" and not allow_not_ready:
-            return PipelineOutcome(tuple(drafts), None, "writer reported blocked")
         final_review = run_paper_review(
             manuscript_directory,
             draft,
@@ -1471,11 +1441,7 @@ def _load_draft(path: Path) -> DraftRef:
     return DraftRef(directory, int(match.group(1)), result)
 
 
-def _revision_inputs(
-    draft: DraftRef,
-    *,
-    allow_not_ready: bool,
-) -> tuple[list[PaperInput], dict]:
+def _revision_inputs(draft: DraftRef) -> tuple[list[PaperInput], dict]:
     manifest = common.read_json(
         draft.directory / "manifest.json",
         description=f"draft manifest for {draft.directory}",
@@ -1488,7 +1454,6 @@ def _revision_inputs(
         raise common.CodexError("draft manifest has invalid input_attempts")
     inputs = load_paper_inputs(
         [Path(record["attempt_path"]) for record in records],
-        allow_not_ready=allow_not_ready,
     )
     return inputs, manifest
 
@@ -1567,10 +1532,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--allow-not-ready",
         action="store_true",
-        help=(
-            "attempt a critic-reviewed paper despite upstream readiness "
-            "warnings"
-        ),
+        help="deprecated no-op; readiness findings are always warnings",
     )
     parser.add_argument(
         "--dry-run",
@@ -1627,10 +1589,7 @@ def main(argv: list[str] | None = None) -> int:
                 raise common.CodexError("--prompt requires --revise")
         if args.revise:
             previous = _load_draft(args.revise)
-            inputs, prior_manifest = _revision_inputs(
-                previous,
-                allow_not_ready=args.allow_not_ready,
-            )
+            inputs, prior_manifest = _revision_inputs(previous)
             manuscript_directory = previous.directory.parent
             if args.name:
                 raise common.CodexError("--name cannot be used with --revise")
@@ -1642,10 +1601,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         else:
             previous = None
-            inputs = load_paper_inputs(
-                args.attempts,
-                allow_not_ready=args.allow_not_ready,
-            )
+            inputs = load_paper_inputs(args.attempts)
             name = validate_manuscript_name(
                 args.name or derive_manuscript_name(inputs)
             )
@@ -1711,7 +1667,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"{item.attempt.problem.id}/{item.attempt.name}"
             )
             for issue in item.readiness_issues:
-                print(f"    readiness override: {issue}")
+                print(f"    warning: {issue}")
         print(
             f"Would create and independently review at most "
             f"{args.max_rounds} new draft(s)."
@@ -1726,10 +1682,22 @@ def main(argv: list[str] | None = None) -> int:
         latexmk = resolve_latexmk(args.latexmk)
         manuscript_directory.mkdir(parents=True, exist_ok=True)
         print(
-            f"Writing one manuscript from {len(inputs)} reviewed result(s), "
+            f"Writing one manuscript from {len(inputs)} selected result(s), "
             f"with at most {args.max_rounds} author-review round(s).",
             flush=True,
         )
+        warning_rows = [
+            (
+                f"{item.attempt.problem.paper_directory.name}/"
+                f"{item.attempt.problem.id}/{item.attempt.name}: {issue}"
+            )
+            for item in inputs
+            for issue in item.readiness_issues
+        ]
+        if warning_rows:
+            print("Upstream readiness warnings (continuing):", file=sys.stderr)
+            for warning in warning_rows:
+                print(f"  {warning}", file=sys.stderr)
         outcome = run_pipeline(
             manuscript_directory,
             inputs,
@@ -1749,7 +1717,6 @@ def main(argv: list[str] | None = None) -> int:
             review_schema_path=review_schema_path,
             review_config_digest=review_config_digest,
             review_options=review_options,
-            allow_not_ready=args.allow_not_ready,
             web_search=args.web_search,
             review_web_search=review_web_search,
         )
