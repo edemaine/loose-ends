@@ -154,7 +154,7 @@ def _relevant_paths(item: HumanReviewItem) -> list[Path]:
                 key=lambda path: path.as_posix(),
             )
         )
-    return [path.resolve() for path in paths if path.is_file()]
+    return [path for path in paths if path.is_file()]
 
 
 def _append_file_contents(
@@ -179,7 +179,7 @@ def _native_project_root() -> str:
 
 
 def _browser_file_uri(path: Path) -> str:
-    resolved = path.resolve()
+    resolved = path if path.is_absolute() else path.resolve()
     try:
         relative = resolved.relative_to(PROJECT_ROOT)
     except ValueError:
@@ -197,7 +197,7 @@ def _browser_file_uri(path: Path) -> str:
 
 def _project_display_path(path: Path) -> str:
     """Format a path relative to this project, with portable separators."""
-    resolved = path.resolve()
+    resolved = path if path.is_absolute() else path.resolve()
     try:
         return resolved.relative_to(PROJECT_ROOT).as_posix()
     except ValueError:

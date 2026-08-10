@@ -1344,11 +1344,18 @@ class OpenProblemPipelineTests(unittest.TestCase):
             codex_cli,
             "path_for_codex",
             return_value=r"C:\Project\loose-ends",
-        ) as convert:
+        ) as convert, patch.object(
+            Path,
+            "resolve",
+            side_effect=AssertionError("absolute links must not be resolved"),
+        ):
             first = human_review._browser_file_uri(
                 human_review.PROJECT_ROOT / "papers" / "first paper.pdf"
             )
             second = human_review._browser_file_uri(
+                human_review.PROJECT_ROOT / "papers" / "second.pdf"
+            )
+            display = human_review._project_display_path(
                 human_review.PROJECT_ROOT / "papers" / "second.pdf"
             )
 
@@ -1361,6 +1368,7 @@ class OpenProblemPipelineTests(unittest.TestCase):
             second,
             "file:///C:/Project/loose-ends/papers/second.pdf",
         )
+        self.assertEqual(display, "papers/second.pdf")
 
     def test_solver_recovers_core_artifact_mislisting_without_new_turn(self):
         with TemporaryDirectory() as temporary:
