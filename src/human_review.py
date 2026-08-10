@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 from dataclasses import dataclass
+from functools import lru_cache
 import json
 import os
 from pathlib import Path, PureWindowsPath
@@ -171,11 +172,27 @@ def _append_file_contents(
     lines.extend((contents or "_File is empty._", ""))
 
 
+@lru_cache(maxsize=1)
+def _native_project_root() -> str:
+    """Convert the project root once instead of spawning cygpath per link."""
+    return codex_cli.path_for_codex(PROJECT_ROOT)
+
+
 def _browser_file_uri(path: Path) -> str:
-    native = codex_cli.path_for_codex(path)
+    resolved = path.resolve()
+    try:
+        relative = resolved.relative_to(PROJECT_ROOT)
+    except ValueError:
+        native = codex_cli.path_for_codex(resolved)
+    else:
+        native_root = _native_project_root()
+        if len(native_root) >= 3 and native_root[1:3] in {":\\", ":/"}:
+            native = str(PureWindowsPath(native_root).joinpath(*relative.parts))
+        else:
+            return resolved.as_uri()
     if len(native) >= 3 and native[1:3] in {":\\", ":/"}:
         return PureWindowsPath(native).as_uri()
-    return path.resolve().as_uri()
+    return resolved.as_uri()
 
 
 def _project_display_path(path: Path) -> str:

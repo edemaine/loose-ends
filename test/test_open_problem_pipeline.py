@@ -1337,6 +1337,31 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 dashboard.index('["critique", "Critique"]'),
             )
 
+    def test_human_review_converts_project_root_only_once(self):
+        human_review._native_project_root.cache_clear()
+        self.addCleanup(human_review._native_project_root.cache_clear)
+        with patch.object(
+            codex_cli,
+            "path_for_codex",
+            return_value=r"C:\Project\loose-ends",
+        ) as convert:
+            first = human_review._browser_file_uri(
+                human_review.PROJECT_ROOT / "papers" / "first paper.pdf"
+            )
+            second = human_review._browser_file_uri(
+                human_review.PROJECT_ROOT / "papers" / "second.pdf"
+            )
+
+        convert.assert_called_once_with(human_review.PROJECT_ROOT)
+        self.assertEqual(
+            first,
+            "file:///C:/Project/loose-ends/papers/first%20paper.pdf",
+        )
+        self.assertEqual(
+            second,
+            "file:///C:/Project/loose-ends/papers/second.pdf",
+        )
+
     def test_solver_recovers_core_artifact_mislisting_without_new_turn(self):
         with TemporaryDirectory() as temporary:
             paper = make_analyzed_paper(Path(temporary))
