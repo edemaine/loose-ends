@@ -892,7 +892,8 @@ def render_human_review_html(
       <div class="controls">
         <label class="control">Search
           <input id="search" type="search"
-            placeholder="Paper, problem, attempt…" autocomplete="off">
+            placeholder="Paper title/id, problem, attempt…"
+            autocomplete="off">
         </label>
         <label class="control">Claim type
           <select id="claim-filter">
@@ -1152,7 +1153,8 @@ def render_human_review_html(
         if (!matchesLiteratureStatus(item)) return false;
         if (!query) return true;
         const haystack = [
-          item.paperTitle, item.problemId, item.problemTitle,
+          item.paperTitle, item.paperDirectory, item.paperAuthors,
+          item.problemId, item.problemTitle,
           item.problemStatement,
           item.attemptName, item.criticSummary, item.solverSummary,
           item.claimedResultType, item.correctness, item.reviewedCoverage,

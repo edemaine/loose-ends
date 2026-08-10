@@ -1249,6 +1249,11 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 "Prove it.",
             )
             self.assertIn('id="problem-list"', dashboard)
+            self.assertIn(
+                "item.paperTitle, item.paperDirectory, item.paperAuthors",
+                dashboard,
+            )
+            self.assertIn("Paper title/id, problem, attempt…", dashboard)
             self.assertNotIn('id="problem-select"', dashboard)
             self.assertIn('id="attempt-list"', dashboard)
             self.assertIn('id="claim-filter"', dashboard)
