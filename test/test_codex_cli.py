@@ -90,6 +90,37 @@ class CodexCliTests(unittest.TestCase):
         self.assertFalse(stopped)
         self.assertTrue(timed_out)
 
+    def test_accepts_completed_result_after_nonzero_launcher_exit(self):
+        process = Mock()
+        process.poll.side_effect = [None, 126]
+        process.returncode = 126
+        with (
+            patch.object(subprocess, "Popen", return_value=process),
+            patch.object(
+                codex_cli,
+                "structured_turn_is_complete",
+                return_value=True,
+            ),
+            patch.object(codex_cli.time, "monotonic", side_effect=[0, 0]),
+            patch.object(codex_cli.time, "sleep"),
+        ):
+            completed, structured, timed_out = (
+                codex_cli._run_codex_process(
+                    ["codex"],
+                    workspace=Path("."),
+                    environment={},
+                    events=StringIO(),
+                    log=StringIO(),
+                    events_path=Path("events.jsonl"),
+                    result_path=Path("agent-result.json"),
+                    timeout_seconds=10,
+                    completion_grace_seconds=1,
+                )
+            )
+        self.assertEqual(completed.returncode, 126)
+        self.assertTrue(structured)
+        self.assertFalse(timed_out)
+
 
 if __name__ == "__main__":
     unittest.main()

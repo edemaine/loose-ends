@@ -517,7 +517,7 @@ def _run_codex_process(
     process = subprocess.Popen(command, **popen_options)
     started_at = time.monotonic()
     completed_at: float | None = None
-    stopped_after_completion = False
+    structured_result_complete = False
     timed_out = False
     try:
         while process.poll() is None:
@@ -535,7 +535,7 @@ def _run_codex_process(
                         "process group.\n"
                     )
                     log.flush()
-                    stopped_after_completion = True
+                    structured_result_complete = True
                     _stop_codex_process(process)
                     break
             if (
@@ -555,9 +555,15 @@ def _run_codex_process(
     except BaseException:
         _stop_codex_process(process)
         raise
+    if structured_turn_is_complete(events_path, result_path):
+        # Some launchers, notably the Cygwin `codex` shell wrapper, can return
+        # a nonzero status after the CLI has already fulfilled the structured
+        # output contract.  The validated result and final event are the
+        # authoritative success signal in that case.
+        structured_result_complete = True
     return (
         subprocess.CompletedProcess(command, process.returncode),
-        stopped_after_completion,
+        structured_result_complete,
         timed_out,
     )
 
@@ -665,7 +671,7 @@ def run_structured_codex(
     environment = codex_subprocess_environment()
 
     completed: subprocess.CompletedProcess | None = None
-    stopped_after_completion = False
+    structured_result_complete = False
     timed_out = False
     for attempt in range(1, MAX_CODEX_START_ATTEMPTS + 1):
         wait_for_codex_launch_slot(launch_interval)
@@ -696,7 +702,7 @@ def run_structured_codex(
                 else:
                     (
                         completed,
-                        stopped_after_completion,
+                        structured_result_complete,
                         timed_out,
                     ) = _run_codex_process(
                         command,
@@ -722,7 +728,7 @@ def run_structured_codex(
                 f"{workspace}: {exc}"
             ) from exc
 
-        if completed.returncode == 0 or stopped_after_completion or timed_out:
+        if completed.returncode == 0 or structured_result_complete or timed_out:
             break
         if (
             attempt == MAX_CODEX_START_ATTEMPTS
@@ -742,7 +748,7 @@ def run_structured_codex(
         )
     if (
         completed is None
-        or (completed.returncode != 0 and not stopped_after_completion)
+        or (completed.returncode != 0 and not structured_result_complete)
     ):
         returncode = completed.returncode if completed is not None else "unknown"
         raise CodexError(
