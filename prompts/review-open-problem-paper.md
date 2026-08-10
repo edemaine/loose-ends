@@ -15,6 +15,11 @@ paper as written. The earlier solver and paper writer are evidence, not truth.
 Try to falsify each main theorem and check it against the exact original
 problem before accepting it.
 
+When a result entry lists `prior_attempts`, inspect those earlier attempts,
+artifacts, and reviews too. Verify every historical construction or lemma on
+which the selected attempt or manuscript relies; do not assume that selection
+of the latest attempt makes its dependencies self-contained.
+
 Treat any staged `readiness_issues` as important upstream warnings, but do not
 reject the paper solely because those warnings exist. Re-evaluate them against
 the manuscript and complete evidence, then express any issue that remains

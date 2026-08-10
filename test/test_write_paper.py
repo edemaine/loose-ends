@@ -249,6 +249,36 @@ class WritePaperTests(unittest.TestCase):
                 "arXiv-1234.56789v1_OP-001_OP-002",
             )
 
+    def test_paper_input_selects_latest_attempt_and_stages_history(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = make_paper(root)
+            first = make_ready_attempt(paper, "OP-001", 1)
+            latest = make_ready_attempt(paper, "OP-001", 2)
+
+            attempts, warnings = write_paper.expand_attempt_inputs([paper])
+
+            self.assertEqual(attempts, [latest])
+            self.assertEqual(len(warnings), 1)
+            self.assertIn("OP-002", warnings[0])
+            inputs = write_paper.load_paper_inputs(attempts)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            context = write_paper.stage_paper_context(workspace, inputs)
+            prior = context / "results" / "R-001" / "history" / "attempt-001"
+            self.assertTrue((prior / "attempt.md").is_file())
+            self.assertTrue((prior / "review-result.json").is_file())
+            index = common.read_json(context / "index.json")
+            self.assertEqual(
+                index["results"][0]["prior_attempts"],
+                [
+                    {
+                        "attempt_name": first.name,
+                        "path": "results/R-001/history/attempt-001",
+                    }
+                ],
+            )
+
     def test_cli_defaults_to_three_live_frontier_rounds(self):
         parsed = write_paper.build_parser().parse_args(["attempt-001"])
         self.assertEqual(parsed.model, "gpt-5.6-sol")

@@ -134,6 +134,82 @@ def _attempt_from_path(path: Path) -> review_solutions.AttemptRef:
     return review_solutions.AttemptRef(exact[0], directory, solver_result)
 
 
+def expand_attempt_inputs(paths: Sequence[Path]) -> tuple[list[Path], list[str]]:
+    """Expand paper/problem inputs to their latest available attempts."""
+    attempts: list[Path] = []
+    warnings: list[str] = []
+    for raw_path in paths:
+        path = raw_path.expanduser().resolve()
+        if ATTEMPT_RE.fullmatch(path.name):
+            attempts.append(path)
+            continue
+        if (
+            analyze_papers.OPEN_PROBLEM_ID_RE.fullmatch(path.name)
+            and (path.parent / "analysis" / "manifest.json").is_file()
+        ):
+            problems = common.discover_problem_refs(
+                [path.parent],
+                problem_ids={path.name},
+            )
+        elif (path / "analysis" / "manifest.json").is_file():
+            problems = common.discover_problem_refs([path])
+        else:
+            raise common.CodexError(
+                "paper input must name an analyzed paper, an OP-NNN "
+                f"directory, or an attempt-NNN directory: {raw_path}"
+            )
+        if not problems:
+            raise common.CodexError(f"paper input has no open problems: {raw_path}")
+        for problem in problems:
+            available = common.attempt_directories(problem)
+            if available:
+                attempts.append(available[-1])
+            else:
+                warnings.append(
+                    f"{problem.paper_directory.name}/{problem.id}: "
+                    "no solver attempts; retained only as an open problem, "
+                    "not a result input"
+                )
+    return attempts, warnings
+
+
+def _prior_attempt_directories(
+    attempt: review_solutions.AttemptRef,
+) -> list[Path]:
+    available = common.attempt_directories(attempt.problem)
+    try:
+        index = available.index(attempt.directory)
+    except ValueError as exc:
+        raise common.CodexError(
+            f"selected attempt is not in its problem history: {attempt.directory}"
+        ) from exc
+    return available[:index]
+
+
+def _prior_attempt_history_digest(
+    attempt: review_solutions.AttemptRef,
+) -> str:
+    records = []
+    for directory in _prior_attempt_directories(attempt):
+        records.append(
+            {
+                "attempt_name": directory.name,
+                "attempt_digest": common.solver_attempt_digest(directory),
+                "review_digest": common.files_digest(
+                    [
+                        (name, directory / name)
+                        for name in (
+                            "critique.md",
+                            "review-result.json",
+                            "review-manifest.json",
+                        )
+                    ]
+                ),
+            }
+        )
+    return common.stable_value_digest(records)
+
+
 def _readiness_issues(attempt: review_solutions.AttemptRef) -> list[str]:
     issues: list[str] = []
     claimed = common.claimed_result_type(attempt.solver_result)
@@ -261,6 +337,9 @@ def _input_digest(inputs: Sequence[PaperInput]) -> str:
                         )
                     ]
                 ),
+                "prior_attempt_history_digest": _prior_attempt_history_digest(
+                    attempt
+                ),
                 "literature_digest": common.literature_snapshot_digest(
                     attempt.problem
                 ),
@@ -276,6 +355,13 @@ def _copy_path(source: Path, destination: Path) -> None:
     elif source.is_file():
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, destination)
+
+
+def _copy_attempt_history(source: Path, destination: Path) -> None:
+    destination.mkdir(parents=True)
+    for name in common.ATTEMPT_HISTORY_FILES:
+        _copy_path(source / name, destination / name)
+    _copy_path(source / "artifacts", destination / "artifacts")
 
 
 def _copy_draft(
@@ -353,6 +439,16 @@ def stage_paper_context(
     for item in inputs:
         attempt = item.attempt
         destination = root / "results" / item.result_id
+        prior_attempt_entries = []
+        for prior in _prior_attempt_directories(attempt):
+            prior_path = destination / "history" / prior.name
+            _copy_attempt_history(prior, prior_path)
+            prior_attempt_entries.append(
+                {
+                    "attempt_name": prior.name,
+                    "path": f"results/{item.result_id}/history/{prior.name}",
+                }
+            )
         attempt_input = destination / "attempt"
         attempt_input.mkdir(parents=True)
         for name in ("attempt.md", "solver-result.json", "manifest.json"):
@@ -377,6 +473,7 @@ def stage_paper_context(
             "paper_id": paper_ids[attempt.problem.paper_directory],
             "problem": attempt.problem.problem,
             "attempt_name": attempt.name,
+            "prior_attempts": prior_attempt_entries,
             "claimed_result_type": common.claimed_result_type(
                 attempt.solver_result
             ),
@@ -1458,14 +1555,17 @@ def _revision_inputs(draft: DraftRef) -> tuple[list[PaperInput], dict]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "write one paper from one or more explicitly selected reviewed "
-            "open-problem attempts"
+            "write one paper from explicitly selected papers, open problems, "
+            "or attempts"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""examples:
   Write and independently review one paper, revising up to three rounds:
     python src/write_paper.py \\
       papers/edemaine/arXiv-.../OP-001/attempt-003
+
+  Use the latest attempt for every attempted problem in one paper:
+    python src/write_paper.py papers/edemaine/arXiv-...
 
   Combine two solved problems in one manuscript:
     python src/write_paper.py \\
@@ -1482,7 +1582,10 @@ def build_parser() -> argparse.ArgumentParser:
         "attempts",
         nargs="*",
         type=Path,
-        help="attempt-NNN directories to compose into this one paper",
+        help=(
+            "analyzed paper, OP-NNN, or attempt-NNN directories; papers and "
+            "problems select their latest attempts"
+        ),
     )
     parser.add_argument(
         "--revise",
@@ -1577,7 +1680,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if bool(args.attempts) == bool(args.revise):
             raise common.CodexError(
-                "provide one or more attempt directories, or --revise, but not both"
+                "provide one or more paper/problem/attempt directories, or "
+                "--revise, but not both"
             )
         if args.revision_instruction is not None:
             if not args.revision_instruction.strip():
@@ -1585,6 +1689,7 @@ def main(argv: list[str] | None = None) -> int:
             if not args.revise:
                 raise common.CodexError("--prompt requires --revise")
         if args.revise:
+            selection_warnings: list[str] = []
             previous = _load_draft(args.revise)
             inputs, prior_manifest = _revision_inputs(previous)
             manuscript_directory = previous.directory.parent
@@ -1598,7 +1703,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         else:
             previous = None
-            inputs = load_paper_inputs(args.attempts)
+            attempt_paths, selection_warnings = expand_attempt_inputs(args.attempts)
+            inputs = load_paper_inputs(attempt_paths)
             name = validate_manuscript_name(
                 args.name or derive_manuscript_name(inputs)
             )
@@ -1658,6 +1764,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.dry_run:
         print(f"Would write one manuscript: {manuscript_directory}")
+        for warning in selection_warnings:
+            print(f"  warning: {warning}")
         for item in inputs:
             print(
                 f"  {item.result_id}: {item.attempt.problem.paper_directory.name} "
@@ -1683,14 +1791,13 @@ def main(argv: list[str] | None = None) -> int:
             f"with at most {args.max_rounds} author-review round(s).",
             flush=True,
         )
-        warning_rows = [
-            (
-                f"{item.attempt.problem.paper_directory.name}/"
-                f"{item.attempt.problem.id}/{item.attempt.name}: {issue}"
-            )
+        warning_rows = [*selection_warnings]
+        warning_rows.extend(
+            f"{item.attempt.problem.paper_directory.name}/"
+            f"{item.attempt.problem.id}/{item.attempt.name}: {issue}"
             for item in inputs
             for issue in item.readiness_issues
-        ]
+        )
         if warning_rows:
             print("Upstream readiness warnings (continuing):", file=sys.stderr)
             for warning in warning_rows:

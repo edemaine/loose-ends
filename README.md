@@ -474,15 +474,16 @@ changes therefore do not invalidate mathematical reviews.
 ## Write a paper
 
 `src/write_paper.py` composes one deliberate research-paper manuscript from
-one or more explicitly selected solver attempts. Explicit selection is enough
-to request a manuscript: partial results, incomplete coverage, review gaps, and
-literature concerns are reported as warnings rather than selection failures.
+explicitly selected papers, open problems, or solver attempts. Explicit
+selection is enough to request a manuscript: partial results, incomplete
+coverage, review gaps, and literature concerns are reported as warnings rather
+than selection failures.
 The writer and independent paper critic receive those warnings and must reflect
 every substantive surviving limitation in the manuscript. Structural input
 errors, unsafe generated paths, invalid traceability, citation failures, and
 LaTeX build failures remain hard errors.
 
-The attempt directories are positional inputs to the same paper:
+The input directories are positional inputs to the same paper:
 
 ```sh
 python src/write_paper.py \
@@ -495,6 +496,21 @@ python src/write_paper.py \
   --name combined-result \
   --author "A. Author" --author "B. Author"
 ```
+
+An analyzed paper directory selects the latest attempt for every open problem
+that has at least one attempt:
+
+```sh
+python src/write_paper.py papers/edemaine/arXiv-2207.07229v1
+```
+
+An `OP-NNN` directory similarly selects that problem's latest attempt. Earlier
+attempts are not separate manuscript results: they and their independent
+reviews are staged as history beneath the latest result, so the writer can use
+still-valid earlier constructions on which a later synthesis depends. Open
+problems with no solver attempt produce a warning and remain open-problem
+context rather than result inputs. Supplying an exact `attempt-NNN` path
+continues to pin that attempt while staging only its earlier history.
 
 Without `--name`, a single-source manuscript is named from the paper directory
 and sorted problem IDs, such as
