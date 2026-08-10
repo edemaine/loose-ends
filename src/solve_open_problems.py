@@ -672,6 +672,9 @@ def build_parser() -> argparse.ArgumentParser:
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""examples:
+  Solve two exact problems selected by their stored directories:
+    python src/solve_open_problems.py paper/OP-00{1,4}
+
   Solve every current triage item classified attempt, then review progress:
     python src/solve_open_problems.py papers/edemaine \\
       --from-triage attempt --jobs 4
@@ -690,9 +693,12 @@ def build_parser() -> argparse.ArgumentParser:
         "paths",
         nargs="+",
         type=Path,
-        help="paper directories or parent directories containing papers",
+        help=(
+            "paper/parent directories, or PAPER/OP-ID paths to "
+            "select exact problems without another selection flag"
+        ),
     )
-    selection = parser.add_mutually_exclusive_group(required=True)
+    selection = parser.add_mutually_exclusive_group()
     selection.add_argument(
         "--from-triage",
         metavar="CLASSES",
@@ -812,6 +818,25 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        input_paths, direct_exact = common.direct_problem_inputs(args.paths)
+        if direct_exact and (
+            args.from_triage is not None
+            or args.problem_ids
+            or args.all_problems
+        ):
+            raise common.CodexError(
+                "direct problem paths cannot be combined with "
+                "--from-triage, --problem, or --all-problems"
+            )
+        if not direct_exact and not (
+            args.from_triage is not None
+            or args.problem_ids
+            or args.all_problems
+        ):
+            raise common.CodexError(
+                "select work with PAPER/OP-ID paths, "
+                "--from-triage, --problem, or --all-problems"
+            )
         triage_classes = (
             common.parse_csv_values(
                 args.from_triage,
@@ -822,11 +847,11 @@ def main(argv: list[str] | None = None) -> int:
             else None
         )
         problems = common.discover_problem_refs(
-            args.paths,
+            input_paths,
             problem_ids=set(args.problem_ids) if args.problem_ids else None,
         )
+        exact = set(direct_exact)
         if args.exact_problems:
-            exact: set[tuple[str, str]] = set()
             for value in args.exact_problems:
                 try:
                     paper_value, problem_id = value.rsplit("::", 1)
@@ -842,19 +867,7 @@ def main(argv: list[str] | None = None) -> int:
                         problem_id,
                     )
                 )
-            problems = [
-                problem
-                for problem in problems
-                if (
-                    os.path.normcase(str(problem.paper_directory)),
-                    problem.id,
-                )
-                in exact
-            ]
-            if not problems:
-                raise common.CodexError(
-                    "no open problems matched the exact selectors"
-                )
+        problems = common.filter_exact_problems(problems, exact)
         prompt_path = args.prompt.expanduser().resolve()
         schema_path = args.schema.expanduser().resolve()
         prompt_template = prompt_path.read_text(encoding="utf-8")

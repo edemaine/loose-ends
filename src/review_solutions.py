@@ -626,13 +626,22 @@ def build_parser() -> argparse.ArgumentParser:
     python src/review_solutions.py papers/edemaine/arXiv-... \\
       --problem OP-001 --mode all \\
       --model gpt-5.6-sol --reasoning-effort xhigh
+
+  Review attempts for exact problems selected by their directories:
+    python src/review_solutions.py paper/OP-00{1,4}
+
+  Review one exact stored attempt:
+    python src/review_solutions.py paper/OP-001/attempt-003
 """,
     )
     parser.add_argument(
         "paths",
         nargs="+",
         type=Path,
-        help="paper directories or parent directories containing papers",
+        help=(
+            "paper/parent directories, PAPER/OP-ID paths selecting exact "
+            "problems, or PAPER/OP-ID/attempt-NNN paths selecting attempts"
+        ),
     )
     parser.add_argument(
         "--problem",
@@ -712,9 +721,28 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        input_paths, whole_problems, exact_attempts = (
+            common.direct_review_inputs(args.paths)
+        )
+        direct_problem_selectors = set(whole_problems)
+        direct_problem_selectors.update(
+            (paper, problem_id)
+            for paper, problem_id, _attempt_name in exact_attempts
+        )
+        if direct_problem_selectors and args.problem_ids:
+            raise common.CodexError(
+                "direct problem paths cannot be combined with --problem"
+            )
+        if exact_attempts and args.attempt_names:
+            raise common.CodexError(
+                "direct attempt paths cannot be combined with --attempt"
+            )
         problems = common.discover_problem_refs(
-            args.paths,
+            input_paths,
             problem_ids=set(args.problem_ids) if args.problem_ids else None,
+        )
+        problems = common.filter_exact_problems(
+            problems, direct_problem_selectors
         )
         attempts = discover_attempt_refs(
             problems,
@@ -722,6 +750,32 @@ def main(argv: list[str] | None = None) -> int:
                 set(args.attempt_names) if args.attempt_names else None
             ),
         )
+        if whole_problems or exact_attempts:
+            attempts = [
+                attempt
+                for attempt in attempts
+                if (
+                    (
+                        os.path.normcase(
+                            str(attempt.problem.paper_directory)
+                        ),
+                        attempt.problem.id,
+                    )
+                    in whole_problems
+                    or (
+                        os.path.normcase(
+                            str(attempt.problem.paper_directory)
+                        ),
+                        attempt.problem.id,
+                        attempt.name,
+                    )
+                    in exact_attempts
+                )
+            ]
+            if not attempts:
+                raise common.CodexError(
+                    "no solver attempts matched the direct paths"
+                )
         prompt_path = args.prompt.expanduser().resolve()
         schema_path = args.schema.expanduser().resolve()
         prompt_template = prompt_path.read_text(encoding="utf-8")

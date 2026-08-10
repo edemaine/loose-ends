@@ -480,9 +480,9 @@ def recover_paper_literature(
     web_search: str,
 ) -> list[LiteratureOutcome] | None:
     """Install a matching completed workspace without another model turn."""
-    attempts_root = problems[0].paper_directory / common.ATTEMPTS_DIRECTORY
+    runs_root = common.paper_runs_directory(problems[0].paper_directory)
     candidates = sorted(
-        attempts_root.glob(".literature-run-*"),
+        runs_root.glob(".literature-run-*"),
         key=lambda path: path.stat().st_mtime,
         reverse=True,
     )
@@ -561,8 +561,8 @@ def search_paper_literature(
     if not problems:
         return []
     paper = problems[0].paper_directory
-    attempts_root = paper / common.ATTEMPTS_DIRECTORY
-    attempts_root.mkdir(parents=True, exist_ok=True)
+    runs_root = common.paper_runs_directory(paper)
+    runs_root.mkdir(parents=True, exist_ok=True)
     input_digests = {
         problem.id: common.literature_input_digest(problem)
         for problem in problems
@@ -580,7 +580,7 @@ def search_paper_literature(
         if recovered is not None:
             return recovered
     workspace = Path(
-        tempfile.mkdtemp(prefix=".literature-run-", dir=attempts_root)
+        tempfile.mkdtemp(prefix=".literature-run-", dir=runs_root)
     ).resolve()
     try:
         _write_work_record(
@@ -677,6 +677,9 @@ def build_parser() -> argparse.ArgumentParser:
     python src/literature_review.py papers/edemaine/arXiv-... \\
       --problem OP-002 --web-search live
 
+  Search exact problems selected by their stored directories:
+    python src/literature_review.py paper/OP-00{1,4}
+
   Search every extracted problem under one paper:
     python src/literature_review.py papers/edemaine/arXiv-... \\
       --all-problems
@@ -689,7 +692,10 @@ def build_parser() -> argparse.ArgumentParser:
         "paths",
         nargs="+",
         type=Path,
-        help="paper directories or parent directories containing papers",
+        help=(
+            "paper/parent directories, or PAPER/OP-ID paths selecting exact "
+            "problems"
+        ),
     )
     selection = parser.add_mutually_exclusive_group()
     selection.add_argument(
@@ -768,9 +774,21 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        input_paths, direct_exact = common.direct_problem_inputs(args.paths)
+        if direct_exact and (
+            args.from_triage is not None
+            or args.problem_ids
+            or args.all_problems
+            or args.attempted
+        ):
+            raise common.CodexError(
+                "direct problem paths cannot be combined with "
+                "--from-triage, --problem, --all-problems, or --attempted"
+            )
         triage_classes = None
         if (
-            not args.problem_ids
+            not direct_exact
+            and not args.problem_ids
             and not args.all_problems
             and not args.attempted
         ):
@@ -780,9 +798,10 @@ def main(argv: list[str] | None = None) -> int:
                 label="--from-triage",
             )
         problems = common.discover_problem_refs(
-            args.paths,
+            input_paths,
             problem_ids=set(args.problem_ids) if args.problem_ids else None,
         )
+        problems = common.filter_exact_problems(problems, direct_exact)
         excluded: list[common.ProblemRef] = []
         exclusion_label = "without matching current triage"
         if args.attempted:

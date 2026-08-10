@@ -330,10 +330,10 @@ def triage_paper(
     if not problems:
         return []
     paper = problems[0].paper_directory
-    attempts_root = paper / common.ATTEMPTS_DIRECTORY
-    attempts_root.mkdir(parents=True, exist_ok=True)
+    runs_root = common.paper_runs_directory(paper)
+    runs_root.mkdir(parents=True, exist_ok=True)
     workspace = Path(
-        tempfile.mkdtemp(prefix=".triage-run-", dir=attempts_root)
+        tempfile.mkdtemp(prefix=".triage-run-", dir=runs_root)
     ).resolve()
     input_digests = {
         problem.id: common.triage_input_digest(problem)
@@ -424,13 +424,19 @@ def build_parser() -> argparse.ArgumentParser:
     python src/triage_open_problems.py papers/edemaine/arXiv-... \\
       --problem OP-001 --problem OP-004 \\
       --model gpt-5.6-sol --reasoning-effort xhigh --fast
+
+  Triage two exact problems selected by their stored directories:
+    python src/triage_open_problems.py paper/OP-00{1,4}
 """,
     )
     parser.add_argument(
         "paths",
         nargs="+",
         type=Path,
-        help="paper directories or parent directories containing papers",
+        help=(
+            "paper/parent directories, or PAPER/OP-ID paths selecting exact "
+            "problems"
+        ),
     )
     parser.add_argument(
         "--problem",
@@ -509,13 +515,18 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        input_paths, direct_exact = common.direct_problem_inputs(args.paths)
+        if direct_exact and args.problem_ids:
+            raise common.CodexError(
+                "direct problem paths cannot be combined with --problem"
+            )
         explicitness = common.parse_csv_values(
             args.explicitness,
             allowed=common.EXPLICITNESS_VALUES,
             label="--explicitness",
         )
         paper_directories = analyze_papers.discover_paper_directories(
-            args.paths
+            input_paths
         )
         repaired_codex, repaired_directory_count = (
             common.repair_problem_data_access(
@@ -528,6 +539,7 @@ def main(argv: list[str] | None = None) -> int:
             problem_ids=set(args.problem_ids) if args.problem_ids else None,
             explicitness=explicitness,
         )
+        problems = common.filter_exact_problems(problems, direct_exact)
         prompt_path = args.prompt.expanduser().resolve()
         schema_path = args.schema.expanduser().resolve()
         prompt_template = prompt_path.read_text(encoding="utf-8")

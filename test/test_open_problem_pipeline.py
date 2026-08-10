@@ -2,6 +2,7 @@ from pathlib import Path
 from contextlib import redirect_stdout
 from io import StringIO
 import json
+import os
 import sys
 from tempfile import TemporaryDirectory
 import unittest
@@ -15,6 +16,7 @@ import human_review
 import open_problem_common as common
 import review_solutions
 import literature_review
+import migrate_problem_directories
 import migrate_solver_claims
 import solve_open_problems
 import triage_open_problems
@@ -385,8 +387,6 @@ class OpenProblemPipelineTests(unittest.TestCase):
     def test_repairs_inaccessible_generated_data_before_triage(self):
         with TemporaryDirectory() as temporary:
             paper = make_analyzed_paper(Path(temporary))
-            attempts = paper / common.ATTEMPTS_DIRECTORY
-            attempts.mkdir()
             with (
                 patch.object(
                     codex_cli,
@@ -904,9 +904,9 @@ class OpenProblemPipelineTests(unittest.TestCase):
             problem = common.discover_problem_refs(
                 [paper], problem_ids={"OP-001"}
             )[0]
-            attempts = paper / common.ATTEMPTS_DIRECTORY
-            attempts.mkdir()
-            workspace = attempts / ".literature-run-preserved"
+            runs = common.paper_runs_directory(paper)
+            runs.mkdir()
+            workspace = runs / ".literature-run-preserved"
             workspace.mkdir()
             prompt = literature_review.DEFAULT_PROMPT_PATH.read_text(
                 encoding="utf-8"
@@ -1624,6 +1624,100 @@ class OpenProblemPipelineTests(unittest.TestCase):
             self.assertIs(finished[0][0], work_items[0])
             self.assertIs(finished[0][1], outcomes[0])
             self.assertIsNone(finished[0][2])
+
+    def test_solver_accepts_problem_directories_as_exact_selection(self):
+        with TemporaryDirectory() as temporary:
+            paper = make_analyzed_paper(Path(temporary))
+            paths = [
+                paper / "OP-001",
+                paper / "OP-002",
+            ]
+            output = StringIO()
+            with redirect_stdout(output):
+                returncode = solve_open_problems.main(
+                    [*(str(path) for path in paths), "--dry-run"]
+                )
+
+            self.assertEqual(returncode, 0)
+            text = output.getvalue()
+            self.assertIn("OP-001/attempt-001", text)
+            self.assertIn("OP-002/attempt-001", text)
+            self.assertIn("Selected 2 problem(s)", text)
+
+    def test_other_problem_commands_accept_exact_problem_directories(self):
+        with TemporaryDirectory() as temporary:
+            paper = make_analyzed_paper(Path(temporary))
+            problem = common.discover_problem_refs(
+                [paper], problem_ids={"OP-001"}
+            )[0]
+            attempt = problem.directory / "attempt-001"
+            attempt.mkdir(parents=True)
+            common.write_json(
+                attempt / "solver-result.json",
+                {
+                    "claimed_result_type": "none",
+                    "checkable_claims": [],
+                },
+            )
+
+            commands = (
+                (triage_open_problems.main, [paper / "OP-001"], "1 problem(s)"),
+                (literature_review.main, [paper / "OP-002"], "1 problem(s)"),
+                (
+                    review_solutions.main,
+                    [attempt, "--mode", "all"],
+                    "1 attempt(s)",
+                ),
+            )
+            for command, arguments, expected in commands:
+                output = StringIO()
+                with redirect_stdout(output):
+                    returncode = command(
+                        [*(str(argument) for argument in arguments), "--dry-run"]
+                    )
+                self.assertEqual(returncode, 0)
+                self.assertIn(expected, output.getvalue())
+
+    def test_problem_directory_migration_flattens_layout(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = make_analyzed_paper(root / "papers")
+            legacy = paper / "attempts"
+            attempt = legacy / "OP-001" / "attempt-001"
+            attempt.mkdir(parents=True)
+            run = legacy / ".triage-run-preserved"
+            run.mkdir()
+            manuscripts = root / "manuscripts"
+            manuscript = manuscripts / "draft-001" / "manifest.json"
+            manuscript.parent.mkdir(parents=True)
+            common.write_json(
+                manuscript,
+                {
+                    "input_attempts": [
+                        {"attempt_path": str(attempt.resolve())}
+                    ]
+                },
+            )
+
+            returncode = migrate_problem_directories.main(
+                [
+                    str(root / "papers"),
+                    "--manuscripts",
+                    str(manuscripts),
+                    "--apply",
+                ]
+            )
+
+            self.assertEqual(returncode, 0)
+            self.assertFalse(legacy.exists())
+            self.assertTrue((paper / "OP-001" / "attempt-001").is_dir())
+            self.assertTrue(
+                (paper / ".runs" / ".triage-run-preserved").is_dir()
+            )
+            saved_path = common.read_json(manuscript)["input_attempts"][0][
+                "attempt_path"
+            ]
+            self.assertNotIn(f"{os.sep}attempts{os.sep}", saved_path)
 
     def test_step_based_triage_manifest_is_deliberately_stale(self):
         with TemporaryDirectory() as temporary:

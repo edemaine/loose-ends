@@ -17,7 +17,7 @@ import analyze_papers
 import codex_cli
 
 
-ATTEMPTS_DIRECTORY = "attempts"
+RUNS_DIRECTORY = ".runs"
 TRIAGE_MARKDOWN = "triage.md"
 TRIAGE_RESULT = "triage.json"
 TRIAGE_MANIFEST = "triage-manifest.json"
@@ -75,11 +75,96 @@ class ProblemRef:
 
     @property
     def directory(self) -> Path:
-        return (
-            self.paper_directory
-            / ATTEMPTS_DIRECTORY
-            / self.id
+        return self.paper_directory / self.id
+
+
+def direct_problem_inputs(
+    paths: Sequence[Path],
+) -> tuple[list[Path], set[tuple[str, str]]]:
+    """Translate PAPER/OP-NNN inputs into paper roots and exact selectors."""
+    discovery_paths: list[Path] = []
+    selectors: set[tuple[str, str]] = set()
+    for raw_path in paths:
+        path = raw_path.expanduser().resolve()
+        if (
+            analyze_papers.OPEN_PROBLEM_ID_RE.fullmatch(path.name)
+            and (path.parent / "analysis" / "manifest.json").is_file()
+        ):
+            paper = path.parent
+            discovery_paths.append(paper)
+            selectors.add((os.path.normcase(str(paper)), path.name))
+        else:
+            discovery_paths.append(path)
+    return list(dict.fromkeys(discovery_paths)), selectors
+
+
+def direct_review_inputs(
+    paths: Sequence[Path],
+) -> tuple[
+    list[Path],
+    set[tuple[str, str]],
+    set[tuple[str, str, str]],
+]:
+    """Resolve direct problem and attempt paths for the review command."""
+    discovery_paths: list[Path] = []
+    whole_problems: set[tuple[str, str]] = set()
+    exact_attempts: set[tuple[str, str, str]] = set()
+    for raw_path in paths:
+        path = raw_path.expanduser().resolve()
+        if (
+            ATTEMPT_DIRECTORY_RE.fullmatch(path.name)
+            and analyze_papers.OPEN_PROBLEM_ID_RE.fullmatch(path.parent.name)
+            and (path.parent.parent / "analysis" / "manifest.json").is_file()
+        ):
+            paper = path.parent.parent
+            paper_key = os.path.normcase(str(paper))
+            discovery_paths.append(paper)
+            exact_attempts.add((paper_key, path.parent.name, path.name))
+            continue
+        normalized, selectors = direct_problem_inputs([path])
+        discovery_paths.extend(normalized)
+        whole_problems.update(selectors)
+    return (
+        list(dict.fromkeys(discovery_paths)),
+        whole_problems,
+        exact_attempts,
+    )
+
+
+def filter_exact_problems(
+    problems: Iterable[ProblemRef],
+    selectors: set[tuple[str, str]],
+) -> list[ProblemRef]:
+    """Restrict discovered problems to exact paper/problem selectors."""
+    if not selectors:
+        return list(problems)
+    selected = [
+        problem
+        for problem in problems
+        if (
+            os.path.normcase(str(problem.paper_directory)),
+            problem.id,
+        ) in selectors
+    ]
+    if len(selected) != len(selectors):
+        found = {
+            (os.path.normcase(str(problem.paper_directory)), problem.id)
+            for problem in selected
+        }
+        missing = sorted(
+            f"{paper}/{problem_id}"
+            for paper, problem_id in selectors - found
         )
+        raise CodexError(
+            "direct problem path does not match an extracted problem: "
+            + ", ".join(missing)
+        )
+    return selected
+
+
+def paper_runs_directory(paper_directory: Path) -> Path:
+    """Return the home for preserved paper-level batch workspaces."""
+    return paper_directory / RUNS_DIRECTORY
 
 
 def utc_now() -> str:
@@ -235,8 +320,17 @@ def repair_problem_data_access(
         return None, 0
     inaccessible: list[Path] = []
     for paper in paper_directories:
-        for name in ("analysis", ATTEMPTS_DIRECTORY):
-            directory = paper / name
+        directories = [paper / "analysis", paper_runs_directory(paper)]
+        try:
+            directories.extend(
+                child
+                for child in paper.iterdir()
+                if child.is_dir()
+                and analyze_papers.OPEN_PROBLEM_ID_RE.fullmatch(child.name)
+            )
+        except OSError:
+            directories.append(paper)
+        for directory in directories:
             if (
                 directory.is_dir()
                 and not codex_cli.workspace_is_user_accessible(directory)

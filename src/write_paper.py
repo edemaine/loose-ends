@@ -108,14 +108,11 @@ def _attempt_from_path(path: Path) -> review_solutions.AttemptRef:
             f"attempt path must name an attempt-NNN directory: {path}"
         )
     problem_directory = directory.parent
-    if (
-        not analyze_papers.OPEN_PROBLEM_ID_RE.fullmatch(problem_directory.name)
-        or problem_directory.parent.name != common.ATTEMPTS_DIRECTORY
-    ):
+    if not analyze_papers.OPEN_PROBLEM_ID_RE.fullmatch(problem_directory.name):
         raise common.CodexError(
-            f"attempt path is not under attempts/OP-NNN: {directory}"
+            f"attempt path is not under PAPER/OP-NNN: {directory}"
         )
-    paper_directory = problem_directory.parent.parent
+    paper_directory = problem_directory.parent
     problems = common.discover_problem_refs(
         [paper_directory],
         problem_ids={problem_directory.name},
@@ -1468,12 +1465,12 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="""examples:
   Write and independently review one paper, revising up to three rounds:
     python src/write_paper.py \\
-      papers/edemaine/arXiv-.../attempts/OP-001/attempt-003
+      papers/edemaine/arXiv-.../OP-001/attempt-003
 
   Combine two solved problems in one manuscript:
     python src/write_paper.py \\
-      papers/edemaine/arXiv-.../attempts/OP-001/attempt-003 \\
-      papers/edemaine/arXiv-.../attempts/OP-004/attempt-002 \\
+      papers/edemaine/arXiv-.../OP-001/attempt-003 \\
+      papers/edemaine/arXiv-.../OP-004/attempt-002 \\
       --name combined-result --author "A. Author"
 
   Continue from an independently reviewed draft:

@@ -167,8 +167,9 @@ validate files created by the restricted Codex sandbox account. After Codex
 finishes, it removes any explicit deny entry for that account and reapplies
 recursive access before validating and cleaning the workspace. If older
 installed outputs still carry those sandbox deny entries, triage
-automatically repairs the selected papers' `analysis/` and `attempts/` trees
-before reading them; this is a local ACL operation and starts no model turn.
+automatically repairs the selected papers' `analysis/`, `OP-*`, and `.runs/`
+trees before reading them; this is a local ACL operation and starts no model
+turn.
 If only temporary-workspace cleanup fails after installation, the run remains
 successful and the path is recorded as a warning in `run.log`.
 For example, the current frontier model with extra-high reasoning is:
@@ -236,6 +237,8 @@ Narrow by problem ID or by explicitness:
 ```sh
 python src/triage_open_problems.py papers/edemaine/arXiv-... \
   --problem OP-001 --problem OP-004
+python src/triage_open_problems.py \
+  papers/edemaine/arXiv-.../OP-00{1,4}
 python src/triage_open_problems.py papers/edemaine \
   --explicitness explicit
 ```
@@ -247,14 +250,17 @@ compact structured record are stored at the paper root:
 ```text
 arXiv-.../
 ├── analysis/
-└── attempts/
-    └── OP-001/
-        ├── triage.md
-        ├── triage.json
-        ├── triage-manifest.json
-        ├── triage-events.jsonl
-        └── triage-run.log
+└── OP-001/
+    ├── triage.md
+    ├── triage.json
+    ├── triage-manifest.json
+    ├── triage-events.jsonl
+    └── triage-run.log
 ```
+
+Failed or interrupted paper-level triage and literature batch workspaces are
+kept under the paper's hidden `.runs/` directory. Per-problem solver and critic
+workspaces remain inside the corresponding `OP-*` directory.
 
 A triage is current only while the paper analysis, problem record, prompt,
 model settings, and complete attempt/review history still match. Installing a
@@ -294,6 +300,8 @@ an explicit selection:
 ```sh
 python src/literature_review.py papers/edemaine/arXiv-... \
   --problem OP-002
+python src/literature_review.py \
+  papers/edemaine/arXiv-.../OP-002
 python src/literature_review.py papers/edemaine/arXiv-... \
   --all-problems
 python src/literature_review.py papers/edemaine --attempted
@@ -302,7 +310,7 @@ python src/literature_review.py papers/edemaine --attempted
 The per-paper run produces independent records under each problem:
 
 ```text
-attempts/OP-001/
+OP-001/
 ├── literature.md
 ├── literature.json
 ├── literature-manifest.json
@@ -356,6 +364,8 @@ an explicit selector:
 ```sh
 python src/solve_open_problems.py papers/edemaine/arXiv-... \
   --problem OP-003
+python src/solve_open_problems.py \
+  papers/edemaine/arXiv-.../OP-00{1,4}
 python src/solve_open_problems.py papers/edemaine/arXiv-... \
   --all-problems
 ```
@@ -377,16 +387,15 @@ invalidates triage and a new triage pass recommends more work.
 Attempts are append-only:
 
 ```text
-attempts/
-└── OP-001/
-    ├── triage.md
-    └── attempt-001/
-        ├── attempt.md
-        ├── solver-result.json
-        ├── manifest.json
-        ├── events.jsonl
-        ├── run.log
-        └── artifacts/
+OP-001/
+├── triage.md
+└── attempt-001/
+    ├── attempt.md
+    ├── solver-result.json
+    ├── manifest.json
+    ├── events.jsonl
+    ├── run.log
+    └── artifacts/
 ```
 
 `attempt.md` is the human-readable research record. The structured result
@@ -431,6 +440,10 @@ Critics can also be run or rerun independently:
 python src/review_solutions.py papers/edemaine --jobs 4
 python src/review_solutions.py papers/edemaine/arXiv-... \
   --problem OP-001 --mode all
+python src/review_solutions.py \
+  papers/edemaine/arXiv-.../OP-001 --mode all
+python src/review_solutions.py \
+  papers/edemaine/arXiv-.../OP-001/attempt-003
 ```
 
 The default `promising` mode scans pending attempts but selects only those with
@@ -473,12 +486,12 @@ The attempt directories are positional inputs to the same paper:
 
 ```sh
 python src/write_paper.py \
-  papers/edemaine/arXiv-.../attempts/OP-001/attempt-003 \
+  papers/edemaine/arXiv-.../OP-001/attempt-003 \
   --author "A. Author"
 
 python src/write_paper.py \
-  papers/edemaine/arXiv-.../attempts/OP-001/attempt-003 \
-  papers/edemaine/arXiv-.../attempts/OP-004/attempt-002 \
+  papers/edemaine/arXiv-.../OP-001/attempt-003 \
+  papers/edemaine/arXiv-.../OP-004/attempt-002 \
   --name combined-result \
   --author "A. Author" --author "B. Author"
 ```
@@ -521,7 +534,7 @@ and defaults to three:
 
 ```sh
 python src/write_paper.py \
-  papers/edemaine/arXiv-.../attempts/OP-001/attempt-003 \
+  papers/edemaine/arXiv-.../OP-001/attempt-003 \
   --max-rounds 2
 ```
 
