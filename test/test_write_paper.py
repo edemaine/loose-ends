@@ -305,6 +305,7 @@ class WritePaperTests(unittest.TestCase):
             attempt = make_ready_attempt(paper, "OP-001")
             review = common.read_json(attempt / "review-result.json")
             review["correctness"] = "minor_gaps"
+            review["claim_reviews"][0]["assessment"] = "partially_supported"
             common.write_json(attempt / "review-result.json", review)
             manifest = common.read_json(attempt / "review-manifest.json")
             manifest["attempt_digest"] = common.solver_attempt_digest(attempt)
@@ -325,10 +326,20 @@ class WritePaperTests(unittest.TestCase):
                 paper_result(["R-001"]),
             )
 
+            with self.assertRaisesRegex(
+                common.CodexError,
+                "claim not supported",
+            ):
+                write_paper.validate_paper_result(
+                    workspace / "agent-result.json",
+                    workspace,
+                    inputs,
+                )
             result, _ = write_paper.validate_paper_result(
                 workspace / "agent-result.json",
                 workspace,
                 inputs,
+                allow_not_ready=True,
             )
 
             self.assertEqual(result["status"], "draft_complete")
@@ -665,7 +676,11 @@ class WritePaperTests(unittest.TestCase):
         )
         options = codex_cli.ModelOptions()
         with (
-            patch.object(write_paper, "run_author_round", return_value=draft),
+            patch.object(
+                write_paper,
+                "run_author_round",
+                return_value=draft,
+            ) as author,
             patch.object(
                 write_paper,
                 "run_paper_review",
@@ -693,6 +708,7 @@ class WritePaperTests(unittest.TestCase):
                 allow_not_ready=True,
             )
 
+        self.assertTrue(author.call_args.kwargs["allow_not_ready"])
         self.assertEqual(critic.call_count, 1)
         self.assertEqual(outcome.reason, "needs_research")
 

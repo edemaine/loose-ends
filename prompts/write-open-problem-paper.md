@@ -11,9 +11,13 @@ solution critiques are staged read-only under:
 Read `inputs/index.json` first. It assigns stable manuscript result IDs
 `R-001`, `R-002`, ... and points to every other input. Read the complete
 context for every result, including the original paper and its source. The
-selected attempts are evidence, not truth. Use only claims supported by the
-independent solution reviews, and check that the manuscript preserves the
-original problems' hypotheses and quantifiers.
+selected attempts are evidence, not truth. Normally use only claims supported
+by the independent solution reviews, and check that the manuscript preserves
+the original problems' hypotheses and quantifiers. Under an explicit readiness
+override, you may narrow or repair a flagged source claim when the complete
+staged evidence supports the corrected statement and proof. Document that
+relationship precisely in `readiness.md`; do not merely relabel an unsupported
+claim or conceal its gap.
 
 The requested author and optional title metadata is:
 
@@ -90,13 +94,14 @@ Preserve them visibly in `readiness.md`, determine from the complete staged
 evidence whether each warning remains substantive, and keep any surviving
 caveat visible in the manuscript. When you can produce a coherent full paper
 whose central theorem uses only review-supported claims, use `draft_complete`
-so the independent paper critic can assess it, even if the upstream solution
-review was not paper-ready. Use `blocked` only when the evidence cannot support
-a complete critic-reviewable manuscript (for example, a central mathematical
-claim is unsupported or the selected results cannot coherently fit together),
-not merely because `readiness_issues` is nonempty. Put concerns that the paper
-critic should adjudicate in `warnings`; reserve `unresolved_issues` for issues
-that actually prevent a complete draft.
+so the independent paper critic can assess it. The same applies when the paper
+rigorously narrows or repairs a flagged source claim using the staged evidence,
+even if the upstream solution review was not paper-ready. Use `blocked` only
+when the evidence cannot support a complete critic-reviewable manuscript (for
+example, a central mathematical claim remains unsupported or the selected
+results cannot coherently fit together), not merely because `readiness_issues`
+is nonempty. Put concerns that the paper critic should adjudicate in `warnings`;
+reserve `unresolved_issues` for issues that actually prevent a complete draft.
 
 Write these files in the current working directory:
 

@@ -610,6 +610,7 @@ def validate_paper_result(
     *,
     previous: DraftRef | None = None,
     authors: Sequence[str] | None = None,
+    allow_not_ready: bool = False,
 ) -> tuple[dict, list[Path]]:
     result = common.read_json(result_path, description="paper response")
     status = result.get("status")
@@ -670,7 +671,7 @@ def validate_paper_result(
             )
             if isinstance(review, dict)
         }
-        if status == "draft_complete" and any(
+        if status == "draft_complete" and not allow_not_ready and any(
             reviewed_claims.get(claim) != "supported" for claim in claims
         ):
             raise common.CodexError(
@@ -1062,6 +1063,7 @@ def run_author_round(
     schema_path: Path,
     config_digest: str,
     options: codex_cli.ModelOptions,
+    allow_not_ready: bool = False,
     web_search: str = "live",
     launch_interval: float = codex_cli.CODEX_LAUNCH_INTERVAL_SECONDS,
 ) -> DraftRef:
@@ -1095,6 +1097,7 @@ def run_author_round(
             inputs,
             previous=previous,
             authors=authors,
+            allow_not_ready=allow_not_ready,
         )
         compile_latex(workspace, latexmk)
         draft = _install_draft(
@@ -1418,6 +1421,7 @@ def run_pipeline(
             schema_path=schema_path,
             config_digest=config_digest,
             options=options,
+            allow_not_ready=allow_not_ready,
             web_search=web_search,
         )
         drafts.append(draft)
