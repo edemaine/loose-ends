@@ -21,6 +21,7 @@ import open_problem_common as common
 import review_solutions
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PRIORITY = "high,medium"
 PRIORITY_RANK = {
     "high": 0,
@@ -177,6 +178,15 @@ def _browser_file_uri(path: Path) -> str:
     return path.resolve().as_uri()
 
 
+def _project_display_path(path: Path) -> str:
+    """Format a path relative to this project, with portable separators."""
+    resolved = path.resolve()
+    try:
+        return resolved.relative_to(PROJECT_ROOT).as_posix()
+    except ValueError:
+        return resolved.as_posix()
+
+
 def _read_optional_text(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8")
@@ -272,6 +282,9 @@ def _html_data(
                 "explicitness": problem.explicitness,
                 "attemptName": attempt.name,
                 "attemptDirectory": str(attempt.directory),
+                "attemptDisplayPath": _project_display_path(
+                    attempt.directory
+                ),
                 "attemptNumber": _attempt_number(attempt),
                 "priority": item.priority,
                 "current": item.current,
@@ -1341,7 +1354,7 @@ def render_human_review_html(
           `${authors}${authors ? " · " : ""}${item.explicitness}`)
       );
       review.append(
-        node("code", "attempt-path", item.attemptDirectory)
+        node("code", "attempt-path", item.attemptDisplayPath)
       );
 
       const problemStatement = node("section", "problem-statement");

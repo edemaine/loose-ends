@@ -1240,7 +1240,19 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 dashboard_data[0]["attemptDirectory"],
                 str(items[0].attempt.directory),
             )
-            self.assertIn("item.attemptDirectory", dashboard)
+            self.assertEqual(
+                dashboard_data[0]["attemptDisplayPath"],
+                human_review._project_display_path(
+                    items[0].attempt.directory
+                ),
+            )
+            self.assertEqual(
+                human_review._project_display_path(
+                    human_review.PROJECT_ROOT / "papers" / "example"
+                ),
+                "papers/example",
+            )
+            self.assertIn("item.attemptDisplayPath", dashboard)
             self.assertEqual(
                 human_review._extract_open_problem_markdown(
                     paper / "analysis" / "open-problems.md",
