@@ -398,6 +398,7 @@ class WritePaperTests(unittest.TestCase):
 
         self.assertIn("<revision_instruction>", rendered)
         self.assertIn("Add figures explaining the construction.", rendered)
+        self.assertIn("`addressed_findings` must be empty", rendered)
 
     def test_prompts_keep_internal_review_language_out_of_manuscript(self):
         writer_prompt = write_paper.DEFAULT_PROMPT_PATH.read_text(encoding="utf-8")
@@ -528,6 +529,66 @@ class WritePaperTests(unittest.TestCase):
                     workspace / "agent-result.json",
                     workspace,
                     inputs,
+                )
+
+    def test_omits_repeated_historical_addressed_findings(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = make_paper(root)
+            attempt = make_ready_attempt(paper, "OP-001")
+            inputs = write_paper.load_paper_inputs([attempt])
+            previous_directory = root / "manuscript" / "draft-001"
+            previous_directory.mkdir(parents=True)
+            historical = {
+                "finding_id": "P-001",
+                "disposition": "resolved",
+                "explanation": "The earlier revision expanded the proof.",
+            }
+            common.write_json(
+                previous_directory / "paper-result.json",
+                paper_result(["R-001"], addressed=[historical]),
+            )
+            previous = write_paper.DraftRef(
+                previous_directory,
+                1,
+                {"status": "draft_complete"},
+            )
+            workspace = root / "workspace"
+            workspace.mkdir()
+            write_manuscript_files(workspace, ["R-001"])
+            repeated = {
+                **historical,
+                "explanation": "The expanded proof remains in place.",
+            }
+            common.write_json(
+                workspace / "agent-result.json",
+                paper_result(["R-001"], addressed=[repeated]),
+            )
+
+            result, _ = write_paper.validate_paper_result(
+                workspace / "agent-result.json",
+                workspace,
+                inputs,
+                previous=previous,
+            )
+
+            self.assertEqual(result["addressed_findings"], [])
+            self.assertIn("P-001", result["warnings"][-1])
+
+            unknown = paper_result(
+                ["R-001"],
+                addressed=[{**repeated, "finding_id": "P-999"}],
+            )
+            common.write_json(workspace / "agent-result.json", unknown)
+            with self.assertRaisesRegex(
+                common.CodexError,
+                "invalid addressed finding 'P-999'",
+            ):
+                write_paper.validate_paper_result(
+                    workspace / "agent-result.json",
+                    workspace,
+                    inputs,
+                    previous=previous,
                 )
 
     def test_compile_latex_builds_nonempty_paper_pdf(self):

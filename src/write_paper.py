@@ -639,14 +639,28 @@ def render_writer_prompt(
             "findings, so `addressed_findings` must be empty."
         )
     else:
+        if (previous.directory / "paper-review.json").is_file():
+            finding_instruction = (
+                "Read `inputs/manuscript/paper-critique.md` and "
+                "`inputs/manuscript/paper-review.json`. Include exactly the "
+                "findings in that `paper-review.json` in "
+                "`addressed_findings`, and address each explicitly in "
+                "`readiness.md`. Do not repeat findings already recorded in "
+                "the previous `paper-result.json`; those are historical."
+            )
+        else:
+            finding_instruction = (
+                "There is no current paper review for the previous draft, so "
+                "`addressed_findings` must be empty. Any P-### entries in its "
+                "`readiness.md` or `paper-result.json` are historical findings "
+                "that were already addressed; preserve their substantive "
+                "repairs without repeating their IDs."
+            )
         mode = (
-            "Revise the manuscript in `inputs/manuscript/`. Read its "
-            "`paper-critique.md` and `paper-review.json` when present, "
-            "preserve correct material, and address every P-### finding "
-            "explicitly in "
-            "`readiness.md` and `addressed_findings`. Write a complete "
-            "replacement manuscript in the current directory; do not edit "
-            "the staged prior draft."
+            "Revise the manuscript in `inputs/manuscript/`. Preserve correct "
+            f"material. {finding_instruction} Write a complete replacement "
+            "manuscript in the current directory; do not edit the staged "
+            "prior draft."
         )
     if revision_instruction is not None:
         mode += (
@@ -788,6 +802,34 @@ def _previous_finding_ids(previous: DraftRef | None) -> set[str]:
     return ids
 
 
+def _previous_addressed_finding_ids(previous: DraftRef | None) -> set[str]:
+    """Return critic findings already addressed by the previous draft."""
+    if previous is None:
+        return set()
+    result_path = previous.directory / "paper-result.json"
+    if not result_path.is_file():
+        return set()
+    result = common.read_json(
+        result_path,
+        description=f"paper result for {previous.directory}",
+    )
+    addressed = result.get("addressed_findings")
+    if not isinstance(addressed, list):
+        raise common.CodexError(
+            "previous paper result has invalid addressed_findings"
+        )
+    ids = {
+        item.get("finding_id")
+        for item in addressed
+        if isinstance(item, dict) and isinstance(item.get("finding_id"), str)
+    }
+    if len(ids) != len(addressed):
+        raise common.CodexError(
+            "previous paper result has invalid addressed finding IDs"
+        )
+    return ids
+
+
 def validate_paper_result(
     result_path: Path,
     workspace: Path,
@@ -878,19 +920,23 @@ def validate_paper_result(
     if status == "blocked" and not unresolved:
         raise common.CodexError("blocked paper has no unresolved issues")
     previous_ids = _previous_finding_ids(previous)
+    historical_ids = _previous_addressed_finding_ids(previous)
     addressed = result.get("addressed_findings")
     if not isinstance(addressed, list):
         raise common.CodexError("paper response has invalid addressed_findings")
     addressed_ids: set[str] = set()
+    reported_ids: set[str] = set()
+    current_addressed: list[dict] = []
+    repeated_historical_ids: set[str] = set()
     for item in addressed:
         if not isinstance(item, dict):
             raise common.CodexError("addressed finding is not an object")
         finding_id = item.get("finding_id")
-        if finding_id not in previous_ids or finding_id in addressed_ids:
+        if finding_id in reported_ids:
             raise common.CodexError(
                 f"paper response has invalid addressed finding {finding_id!r}"
             )
-        addressed_ids.add(finding_id)
+        reported_ids.add(finding_id)
         if item.get("disposition") not in {
             "resolved",
             "not_resolved",
@@ -899,10 +945,27 @@ def validate_paper_result(
             raise common.CodexError(
                 f"paper response has invalid disposition for {finding_id}"
             )
+        if finding_id in previous_ids:
+            addressed_ids.add(finding_id)
+            current_addressed.append(item)
+        elif finding_id in historical_ids:
+            repeated_historical_ids.add(finding_id)
+        else:
+            raise common.CodexError(
+                f"paper response has invalid addressed finding {finding_id!r}"
+            )
     if addressed_ids != previous_ids:
         raise common.CodexError(
             "paper response did not address every previous critic finding"
         )
+    if repeated_historical_ids:
+        repeated = ", ".join(sorted(repeated_historical_ids))
+        result["addressed_findings"] = current_addressed
+        result["warnings"] = [
+            *result["warnings"],
+            "Driver omitted already-addressed historical critic finding(s) "
+            f"repeated by the writer: {repeated}.",
+        ]
 
     tex = _read_text(workspace / "main.tex", "generated main.tex")
     bib = _read_text(workspace / "references.bib", "generated references.bib")

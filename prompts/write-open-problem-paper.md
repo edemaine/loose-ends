@@ -130,8 +130,11 @@ Write these files in the current working directory:
 - `readiness.md`: an internal audit beginning with a Markdown heading. Map
   every `R-###` and manuscript theorem to the supporting `C-###` solver claims
   and their review assessments; explain novelty and source verification;
-  record every unresolved issue; and, during revision, address every previous
-  `P-###` critic finding individually;
+  record every unresolved issue; and, during revision, address every `P-###`
+  critic finding in the staged `inputs/manuscript/paper-review.json`
+  individually. If that file is absent, there are no current critic findings;
+  do not copy historical finding IDs from `readiness.md` or
+  `paper-result.json` into `addressed_findings`;
 - optional generated figures beneath `figures/` only. SVG source files are
   welcome, but for every `figures/name.svg` you must also generate and list
   `figures/name.pdf`, and `main.tex` must include the PDF version. Convert SVG
