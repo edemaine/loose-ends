@@ -650,7 +650,9 @@ the complete literature report when available, and links to the paper analysis,
 structured records, and artifacts. The browser loads
 Markdown-it and its KaTeX plugin to render Markdown and math in one parsing
 pass, supporting `\(...\)`, `\[...\]`, `$...$`, and `$$...$$` delimiters.
-High-priority items come first.
+Papers are alphabetical by title, problems are numeric by ID, and attempts are
+newest first. Each problem card shows the newest visible attempt's claim type,
+correctness, coverage, and importance, plus the total number of attempts.
 
 Use `--latest-per-problem` to suppress older selected attempts,
 `--summary-only` for a compact index, `--priority high` to narrow the queue,

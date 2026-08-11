@@ -1187,6 +1187,19 @@ class OpenProblemPipelineTests(unittest.TestCase):
                     },
                 )
 
+            unreviewed = problems[0].directory / "attempt-002"
+            unreviewed.mkdir()
+            common.write_json(
+                unreviewed / "solver-result.json",
+                {
+                    "claimed_result_type": "none",
+                    "summary": "A later attempt without a review.",
+                    "checkable_claims": [],
+                    "artifacts": [],
+                    "warnings": [],
+                },
+            )
+
             items = human_review.discover_human_reviews(
                 problems,
                 priority={"high", "medium"},
@@ -1212,11 +1225,11 @@ class OpenProblemPipelineTests(unittest.TestCase):
 
             self.assertEqual(
                 [item.priority for item in items],
-                ["high", "medium"],
+                ["medium", "high"],
             )
             self.assertLess(
-                report.index("HIGH BODY"),
                 report.index("MEDIUM BODY"),
+                report.index("HIGH BODY"),
             )
             self.assertIn("critique.md", report)
             self.assertIn("open-problems.md", report)
@@ -1246,6 +1259,7 @@ class OpenProblemPipelineTests(unittest.TestCase):
                     items[0].attempt.directory
                 ),
             )
+            self.assertEqual(dashboard_data[0]["totalAttemptCount"], 2)
             self.assertEqual(
                 human_review._project_display_path(
                     human_review.PROJECT_ROOT / "papers" / "example"
@@ -1268,6 +1282,12 @@ class OpenProblemPipelineTests(unittest.TestCase):
             self.assertIn("Paper title/id, problem, attempt…", dashboard)
             self.assertNotIn('id="problem-select"', dashboard)
             self.assertIn('id="attempt-list"', dashboard)
+            self.assertIn("function latestProblems(items)", dashboard)
+            self.assertIn("function attemptsForProblem(items, problemKey)", dashboard)
+            self.assertIn("right.attemptNumber - left.attemptNumber", dashboard)
+            self.assertIn("item.totalAttemptCount", dashboard)
+            self.assertIn("appendAttemptTags(button, item)", dashboard)
+            self.assertNotIn("showing ${item.attemptName}", dashboard)
             self.assertIn('id="claim-filter"', dashboard)
             self.assertIn('id="correctness-filter"', dashboard)
             self.assertIn('id="coverage-filter"', dashboard)

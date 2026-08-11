@@ -100,7 +100,7 @@ def discover_human_reviews(
 
     items.sort(
         key=lambda item: (
-            PRIORITY_RANK[item.priority],
+            item.attempt.problem.paper_title.casefold(),
             os.path.normcase(
                 str(item.attempt.problem.paper_directory)
             ),
@@ -248,6 +248,7 @@ def _html_data(
 ) -> list[dict]:
     data: list[dict] = []
     problem_statements: dict[tuple[Path, str], str] = {}
+    problem_attempt_counts: dict[tuple[Path, str], int] = {}
     for index, item in enumerate(items):
         attempt = item.attempt
         problem = attempt.problem
@@ -264,6 +265,10 @@ def _html_data(
                     paper / "analysis" / "open-problems.md",
                     problem.id,
                 )
+            )
+        if problem_key not in problem_attempt_counts:
+            problem_attempt_counts[problem_key] = len(
+                common.attempt_directories(problem)
             )
         paths = _relevant_paths(item)
         files = []
@@ -303,6 +308,7 @@ def _html_data(
                     attempt.directory
                 ),
                 "attemptNumber": _attempt_number(attempt),
+                "totalAttemptCount": problem_attempt_counts[problem_key],
                 "priority": item.priority,
                 "current": item.current,
                 "legacyVerdict": item.review_result.get("verdict", ""),
@@ -597,9 +603,9 @@ def render_human_review_html(
       font-size: 13px;
       line-height: 1.4;
     }
-    .problem-card span {
+    .problem-meta {
       display: block;
-      margin-top: 3px;
+      margin-top: 6px;
       color: var(--muted);
       font-size: 11px;
     }
@@ -620,7 +626,25 @@ def render_human_review_html(
       box-shadow: 0 0 0 2px rgba(40, 120, 111, 0.13);
     }
     .attempt-card strong { display: block; color: var(--navy); }
-    .attempt-card span { color: var(--muted); font-size: 12px; }
+    .attempt-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      margin-top: 6px;
+    }
+    .attempt-tag {
+      display: inline-flex;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--paper);
+      color: var(--muted);
+      padding: 2px 6px;
+      font-size: 9px;
+      font-weight: 800;
+      line-height: 1.35;
+      text-transform: uppercase;
+    }
+    .attempt-tag.claim { color: var(--teal); }
     .main {
       min-width: 0;
       padding: 40px clamp(18px, 4vw, 78px) 80px;
@@ -1195,13 +1219,56 @@ def render_human_review_html(
       });
     }
 
-    function uniqueProblems(items) {
-      const seen = new Set();
-      return items.filter(item => {
-        if (seen.has(item.problemKey)) return false;
-        seen.add(item.problemKey);
-        return true;
+    function compareProblems(left, right) {
+      return left.paperTitle.localeCompare(
+        right.paperTitle, undefined, { sensitivity: "base", numeric: true }
+      ) || left.paperDirectory.localeCompare(right.paperDirectory) ||
+        left.problemId.localeCompare(
+          right.problemId, undefined, { numeric: true }
+        );
+    }
+
+    function latestProblems(items) {
+      const latest = new Map();
+      items.forEach(item => {
+        const previous = latest.get(item.problemKey);
+        if (!previous || item.attemptNumber > previous.attemptNumber) {
+          latest.set(item.problemKey, item);
+        }
       });
+      return [...latest.values()].sort(compareProblems);
+    }
+
+    function attemptsForProblem(items, problemKey) {
+      return items
+        .filter(item => item.problemKey === problemKey)
+        .sort((left, right) =>
+          right.attemptNumber - left.attemptNumber ||
+          right.id.localeCompare(left.id)
+        );
+    }
+
+    function humanize(value) {
+      return String(value || "unknown").replaceAll("_", " ");
+    }
+
+    function appendAttemptTags(parent, item) {
+      const tags = node("div", "attempt-tags");
+      [
+        ["claim", item.claimedResultType],
+        ["correctness", item.correctness],
+        ["coverage", item.reviewedCoverage],
+        ["importance", item.importance]
+      ].forEach(([dimension, value]) => {
+        const tag = node(
+          "span",
+          `attempt-tag${dimension === "claim" ? " claim" : ""}`,
+          humanize(value)
+        );
+        tag.title = `${dimension}: ${humanize(value)}`;
+        tags.append(tag);
+      });
+      parent.append(tags);
     }
 
     function addList(parent, title, values) {
@@ -1227,7 +1294,7 @@ def render_human_review_html(
     }
 
     function renderProblemControls(items) {
-      const problems = uniqueProblems(items);
+      const problems = latestProblems(items);
       if (!problems.some(item => item.problemKey === state.selectedProblem)) {
         state.selectedProblem = problems[0]?.problemKey || "";
       }
@@ -1246,19 +1313,9 @@ def render_human_review_html(
         const section = node("section", "paper-group");
         section.append(node("div", "paper-title", group.paperTitle));
         group.problems.forEach(item => {
-          const problemAttempts = items.filter(
-            candidate => candidate.problemKey === item.problemKey
+          const problemAttempts = attemptsForProblem(
+            items, item.problemKey
           );
-          const counts = ["high", "medium", "low", "none"]
-            .map(level => [
-              level,
-              problemAttempts.filter(
-                attempt => attempt.priority === level
-              ).length
-            ])
-            .filter(([, count]) => count)
-            .map(([level, count]) => `${count} ${level}`)
-            .join(" · ");
           const button = node(
             "button",
             `problem-card${
@@ -1272,8 +1329,17 @@ def render_human_review_html(
             item.problemKey === state.selectedProblem ? "true" : "false"
           );
           button.append(
-            node("strong", "", `${item.problemId} — ${item.problemTitle}`),
-            node("span", "", counts)
+            node("strong", "", `${item.problemId} — ${item.problemTitle}`)
+          );
+          appendAttemptTags(button, item);
+          button.append(
+            node(
+              "span",
+              "problem-meta",
+              `${item.totalAttemptCount} total attempt${
+                item.totalAttemptCount === 1 ? "" : "s"
+              }`
+            )
           );
           button.addEventListener("click", () => {
             state.selectedProblem = item.problemKey;
@@ -1287,8 +1353,8 @@ def render_human_review_html(
         problemList.append(section);
       });
 
-      const attempts = items.filter(
-        item => item.problemKey === state.selectedProblem
+      const attempts = attemptsForProblem(
+        items, state.selectedProblem
       );
       if (!attempts.some(item => item.id === state.selectedItem)) {
         state.selectedItem = attempts[0]?.id || "";
@@ -1300,16 +1366,8 @@ def render_human_review_html(
           `attempt-card${item.id === state.selectedItem ? " active" : ""}`
         );
         button.type = "button";
-        button.append(
-          node("strong", "", item.attemptName),
-          node(
-            "span",
-            "",
-            `${item.priority.toUpperCase()} · ` +
-              `${item.claimedResultType.replaceAll("_", " ").toUpperCase()} · ` +
-              `${item.correctness.replaceAll("_", " ")}`
-          )
-        );
+        button.append(node("strong", "", item.attemptName));
+        appendAttemptTags(button, item);
         button.addEventListener("click", () => {
           state.selectedItem = item.id;
           state.tab = "attempt";
@@ -1594,8 +1652,8 @@ def render_human_review_report(
         "",
         f"{len(items)} attempt(s): {count_text}.",
         "",
-        "Items are ordered by human priority, paper, problem, and newest "
-        "attempt first.",
+        "Items are ordered by paper title, problem, and newest attempt "
+        "first.",
         "",
     ]
     for index, item in enumerate(items, 1):
