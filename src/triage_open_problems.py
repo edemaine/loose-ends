@@ -494,11 +494,10 @@ def build_parser() -> argparse.ArgumentParser:
         default="codex",
         help="Codex CLI executable or command name (default: codex)",
     )
-    parser.add_argument(
-        "--prompt",
-        type=Path,
-        default=DEFAULT_PROMPT_PATH,
-        help=f"triage prompt template (default: {DEFAULT_PROMPT_PATH})",
+    codex_cli.add_prompt_arguments(
+        parser,
+        default_template=DEFAULT_PROMPT_PATH,
+        task="triage agent",
     )
     parser.add_argument(
         "--schema",
@@ -540,9 +539,14 @@ def main(argv: list[str] | None = None) -> int:
             explicitness=explicitness,
         )
         problems = common.filter_exact_problems(problems, direct_exact)
-        prompt_path = args.prompt.expanduser().resolve()
+        prompt_path = args.prompt_template.expanduser().resolve()
         schema_path = args.schema.expanduser().resolve()
         prompt_template = prompt_path.read_text(encoding="utf-8")
+        prompt_template = codex_cli.with_user_prompt(
+            prompt_template,
+            args.prompt,
+            task="triage agent",
+        )
         schema_text = schema_path.read_text(encoding="utf-8")
         json.loads(schema_text)
         options = codex_cli.model_options_from_args(args)

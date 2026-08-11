@@ -1901,10 +1901,11 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"writer prompt-template path (default: {DEFAULT_PROMPT_PATH})",
     )
     parser.add_argument("--schema", type=Path, default=DEFAULT_SCHEMA_PATH)
-    parser.add_argument(
-        "--review-prompt",
-        type=Path,
-        default=DEFAULT_REVIEW_PROMPT_PATH,
+    codex_cli.add_prompt_arguments(
+        parser,
+        default_template=DEFAULT_REVIEW_PROMPT_PATH,
+        task="paper critic",
+        prefix="review",
     )
     parser.add_argument(
         "--review-schema",
@@ -1994,9 +1995,15 @@ def main(argv: list[str] | None = None) -> int:
             options,
             web_search=args.web_search,
         )
-        review_prompt_path = args.review_prompt.expanduser().resolve()
+        review_prompt_path = args.review_prompt_template.expanduser().resolve()
         review_schema_path = args.review_schema.expanduser().resolve()
         review_prompt = _read_text(review_prompt_path, "paper-review prompt")
+        review_prompt = codex_cli.with_user_prompt(
+            review_prompt,
+            args.review_prompt,
+            task="paper critic",
+            option_name="--review-prompt",
+        )
         review_schema_text = _read_text(
             review_schema_path,
             "paper-review schema",

@@ -714,6 +714,10 @@ def build_parser() -> argparse.ArgumentParser:
   Try each unresolved problem up to three times, reviewing between rounds:
     python src/solve_open_problems.py papers/edemaine \\
       --from-triage attempt --max-rounds 3
+
+  Give every selected solver an additional research direction:
+    python src/solve_open_problems.py paper/OP-001 \\
+      --prompt "Try a computational search before committing to a proof"
 """,
     )
     parser.add_argument(
@@ -817,11 +821,10 @@ def build_parser() -> argparse.ArgumentParser:
         default="codex",
         help="Codex CLI executable or command name (default: codex)",
     )
-    parser.add_argument(
-        "--prompt",
-        type=Path,
-        default=DEFAULT_PROMPT_PATH,
-        help=f"solver prompt template (default: {DEFAULT_PROMPT_PATH})",
+    codex_cli.add_prompt_arguments(
+        parser,
+        default_template=DEFAULT_PROMPT_PATH,
+        task="open-problem solver",
     )
     parser.add_argument(
         "--schema",
@@ -829,11 +832,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_SCHEMA_PATH,
         help=f"solver final-response schema (default: {DEFAULT_SCHEMA_PATH})",
     )
-    parser.add_argument(
-        "--review-prompt",
-        type=Path,
-        default=DEFAULT_REVIEW_PROMPT_PATH,
-        help=f"critic prompt template (default: {DEFAULT_REVIEW_PROMPT_PATH})",
+    codex_cli.add_prompt_arguments(
+        parser,
+        default_template=DEFAULT_REVIEW_PROMPT_PATH,
+        task="solution critic",
+        prefix="review",
     )
     parser.add_argument(
         "--review-schema",
@@ -907,9 +910,14 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 )
         problems = common.filter_exact_problems(problems, exact)
-        prompt_path = args.prompt.expanduser().resolve()
+        prompt_path = args.prompt_template.expanduser().resolve()
         schema_path = args.schema.expanduser().resolve()
         prompt_template = prompt_path.read_text(encoding="utf-8")
+        prompt_template = codex_cli.with_user_prompt(
+            prompt_template,
+            args.prompt,
+            task="open-problem solver",
+        )
         schema_text = schema_path.read_text(encoding="utf-8")
         json.loads(schema_text)
         options = codex_cli.model_options_from_args(args)
@@ -924,9 +932,15 @@ def main(argv: list[str] | None = None) -> int:
             require_triage_classes=triage_classes,
             include_literature_resolved=args.include_literature_resolved,
         )
-        review_prompt_path = args.review_prompt.expanduser().resolve()
+        review_prompt_path = args.review_prompt_template.expanduser().resolve()
         review_schema_path = args.review_schema.expanduser().resolve()
         review_prompt = review_prompt_path.read_text(encoding="utf-8")
+        review_prompt = codex_cli.with_user_prompt(
+            review_prompt,
+            args.review_prompt,
+            task="solution critic",
+            option_name="--review-prompt",
+        )
         review_schema_text = review_schema_path.read_text(encoding="utf-8")
         json.loads(review_schema_text)
         review_options = _inherit_review_options(
@@ -948,6 +962,10 @@ def main(argv: list[str] | None = None) -> int:
         return codex_cli.report_error(parser, exc)
 
     if args.dry_run:
+        if args.prompt is not None:
+            print(f"Solver direction: {args.prompt.strip()}")
+        if args.review_prompt is not None and args.review != "none":
+            print(f"Critic direction: {args.review_prompt.strip()}")
         for work in work_items:
             suggestions = work.guidance.get("suggested_approaches", [])
             print(

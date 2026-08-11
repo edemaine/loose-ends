@@ -14,6 +14,56 @@ import codex_cli
 
 
 class CodexCliTests(unittest.TestCase):
+    def test_shared_prompt_arguments_separate_direction_from_template(self):
+        parser = argparse.ArgumentParser()
+        default_template = Path("default-prompt.md")
+        codex_cli.add_prompt_arguments(
+            parser,
+            default_template=default_template,
+            task="test agent",
+        )
+
+        defaults = parser.parse_args([])
+        self.assertIsNone(defaults.prompt)
+        self.assertEqual(defaults.prompt_template, default_template)
+        custom = parser.parse_args(
+            [
+                "--prompt",
+                "Try the dual formulation",
+                "--prompt-template",
+                "custom.md",
+            ]
+        )
+        self.assertEqual(custom.prompt, "Try the dual formulation")
+        self.assertEqual(custom.prompt_template, Path("custom.md"))
+
+        rendered = codex_cli.with_user_prompt(
+            "Core instructions.\n",
+            custom.prompt,
+            task="test agent",
+        )
+        self.assertTrue(rendered.startswith("Core instructions.\n"))
+        self.assertIn("<user_instruction>", rendered)
+        self.assertIn("Try the dual formulation", rendered)
+        options = codex_cli.ModelOptions()
+        self.assertNotEqual(
+            codex_cli.semantic_config_digest(
+                "Core instructions.",
+                "{}",
+                options,
+            ),
+            codex_cli.semantic_config_digest(rendered, "{}", options),
+        )
+        with self.assertRaisesRegex(
+            codex_cli.CodexError,
+            "--prompt must be nonempty",
+        ):
+            codex_cli.with_user_prompt(
+                "Core instructions.",
+                "  ",
+                task="test agent",
+            )
+
     def test_reports_post_parse_error_without_usage(self):
         parser = argparse.ArgumentParser(prog="test-tool.py")
         error_output = StringIO()

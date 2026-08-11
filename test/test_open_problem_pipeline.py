@@ -2024,6 +2024,8 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 parsed = parser.parse_args(argv)
                 self.assertEqual(parsed.model, "gpt-5.6-sol")
                 self.assertEqual(parsed.reasoning_effort, "xhigh")
+                self.assertIsNone(parsed.prompt)
+                self.assertIsInstance(parsed.prompt_template, Path)
 
         solver = solve_open_problems.build_parser().parse_args(
             ["paper", "--all-problems"]
@@ -2034,6 +2036,33 @@ class OpenProblemPipelineTests(unittest.TestCase):
         )
         self.assertEqual(solver.web_search, "live")
         self.assertEqual(solver.max_rounds, 1)
+        self.assertIsNone(solver.prompt)
+        self.assertEqual(
+            solver.prompt_template,
+            solve_open_problems.DEFAULT_PROMPT_PATH,
+        )
+        directed_solver = solve_open_problems.build_parser().parse_args(
+            [
+                "paper",
+                "--all-problems",
+                "--prompt",
+                "Prioritize a counterexample search",
+                "--review-prompt",
+                "Check the boundary case independently",
+            ]
+        )
+        self.assertEqual(
+            directed_solver.prompt,
+            "Prioritize a counterexample search",
+        )
+        self.assertEqual(
+            directed_solver.review_prompt,
+            "Check the boundary case independently",
+        )
+        self.assertEqual(
+            directed_solver.review_prompt_template,
+            review_solutions.DEFAULT_PROMPT_PATH,
+        )
         self.assertEqual(
             solve_open_problems.build_parser()
             .parse_args(["paper", "--all-problems", "-r", "3"])

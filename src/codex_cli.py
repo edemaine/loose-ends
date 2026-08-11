@@ -77,6 +77,58 @@ def positive_number(value: str) -> float:
     return number
 
 
+def add_prompt_arguments(
+    parser: argparse.ArgumentParser,
+    *,
+    default_template: Path,
+    task: str,
+    prefix: str = "",
+) -> None:
+    """Add consistent user-direction and low-level prompt-template flags."""
+    option_prefix = f"{prefix}-" if prefix else ""
+    destination_prefix = f"{prefix.replace('-', '_')}_" if prefix else ""
+    parser.add_argument(
+        f"--{option_prefix}prompt",
+        dest=f"{destination_prefix}prompt",
+        metavar="TEXT",
+        help=f"additional instruction for the {task}",
+    )
+    parser.add_argument(
+        f"--{option_prefix}prompt-template",
+        dest=f"{destination_prefix}prompt_template",
+        type=Path,
+        default=default_template,
+        metavar="FILE",
+        help=(
+            f"replace the complete low-level {task} prompt template "
+            f"(default: {default_template})"
+        ),
+    )
+
+
+def with_user_prompt(
+    template: str,
+    instruction: str | None,
+    *,
+    task: str,
+    option_name: str = "--prompt",
+) -> str:
+    """Append an explicit user direction without replacing core safeguards."""
+    if instruction is None:
+        return template
+    instruction = instruction.strip()
+    if not instruction:
+        raise CodexError(f"{option_name} must be nonempty")
+    return (
+        template.rstrip()
+        + "\n\n# Additional user direction\n\n"
+        + f"The user explicitly requested this direction for the {task}:\n\n"
+        + f"<user_instruction>\n{instruction}\n</user_instruction>\n\n"
+        + "Follow it throughout this run while preserving the task's output "
+        + "contract, validation requirements, and mathematical accuracy.\n"
+    )
+
+
 def add_model_arguments(
     parser: argparse.ArgumentParser,
     *,

@@ -380,6 +380,21 @@ class WritePaperTests(unittest.TestCase):
             revision.prompt_template,
             write_paper.DEFAULT_PROMPT_PATH,
         )
+        reviewer_direction = write_paper.build_parser().parse_args(
+            [
+                "attempt-001",
+                "--review-prompt",
+                "Check the exposition of Lemma 2",
+            ]
+        )
+        self.assertEqual(
+            reviewer_direction.review_prompt,
+            "Check the exposition of Lemma 2",
+        )
+        self.assertEqual(
+            reviewer_direction.review_prompt_template,
+            write_paper.DEFAULT_REVIEW_PROMPT_PATH,
+        )
         short_rounds = write_paper.build_parser().parse_args(
             ["attempt-001", "-r", "4"]
         )

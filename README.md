@@ -376,6 +376,27 @@ audit the published resolution deliberately. Partial resolutions are not
 skipped: the solver receives the precise residual problem. Literature search
 is otherwise optional, and problems with no report continue normally.
 
+Add a human research direction with `--prompt TEXT`; it is appended to the
+standard solver instructions and applies to every selected problem and every
+round in that invocation. It does not replace the paper context, output
+contract, or validation rules:
+
+```sh
+python src/solve_open_problems.py \
+  papers/edemaine/arXiv-.../OP-001 \
+  --prompt "Try small computational cases before choosing proof or counterexample"
+```
+
+Use `--review-prompt TEXT` for a direction to the composed critic.
+`--prompt-template FILE` and `--review-prompt-template FILE` are the low-level
+options for replacing the complete prompt templates.
+
+The same `--prompt TEXT` versus `--prompt-template FILE` distinction is used by
+`analyze_papers.py`, `triage_open_problems.py`, `literature_review.py`, and
+`review_solutions.py`. Custom directions are included in currentness and
+recovery digests, so changing a direction cannot silently reuse output from a
+different instruction.
+
 `--dry-run` shows one future adaptive attempt number for each selected problem
 and the number of triage suggestions it will receive, plus the maximum total
 number of attempts requested. All suggestions go into the same solver prompt.
@@ -632,7 +653,8 @@ python src/write_paper.py \
 ```
 
 Use `--prompt-template FILE` to replace the complete low-level writer prompt
-template.
+template. `--review-prompt TEXT` gives the paper critic an additional direction,
+while `--review-prompt-template FILE` replaces its low-level template.
 
 An interrupted review can be resumed through the same `--revise` command: the
 script reviews the installed unreviewed draft before deciding whether another

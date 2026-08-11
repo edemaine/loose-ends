@@ -699,11 +699,10 @@ def build_parser() -> argparse.ArgumentParser:
         default="codex",
         help="Codex CLI executable or command name (default: codex)",
     )
-    parser.add_argument(
-        "--prompt",
-        type=Path,
-        default=DEFAULT_PROMPT_PATH,
-        help=f"review prompt template (default: {DEFAULT_PROMPT_PATH})",
+    codex_cli.add_prompt_arguments(
+        parser,
+        default_template=DEFAULT_PROMPT_PATH,
+        task="solution critic",
     )
     parser.add_argument(
         "--schema",
@@ -776,9 +775,14 @@ def main(argv: list[str] | None = None) -> int:
                 raise common.CodexError(
                     "no solver attempts matched the direct paths"
                 )
-        prompt_path = args.prompt.expanduser().resolve()
+        prompt_path = args.prompt_template.expanduser().resolve()
         schema_path = args.schema.expanduser().resolve()
         prompt_template = prompt_path.read_text(encoding="utf-8")
+        prompt_template = codex_cli.with_user_prompt(
+            prompt_template,
+            args.prompt,
+            task="solution critic",
+        )
         schema_text = schema_path.read_text(encoding="utf-8")
         json.loads(schema_text)
         options = codex_cli.model_options_from_args(args)
