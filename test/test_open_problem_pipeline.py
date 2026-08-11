@@ -1415,6 +1415,14 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 "attempted, awaiting review",
                 coverage_dashboard,
             )
+            self.assertIn(
+                'item.literatureStatus === "resolved"',
+                coverage_dashboard,
+            )
+            self.assertIn(
+                "appendAttemptTags(button, item, { includeKnown: true })",
+                coverage_dashboard,
+            )
             self.assertIn('"attemptStatus": "unattempted"', coverage_dashboard)
             self.assertIn('"initialPriorities": ["high", "medium"]', coverage_dashboard)
 

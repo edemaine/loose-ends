@@ -632,6 +632,8 @@ def render_human_review_html(
       --medium-bg: #fbefcd;
       --low: #4d6671;
       --low-bg: #e8eff1;
+      --known: #285f7a;
+      --known-bg: #dcecf4;
       --shadow: 0 16px 45px rgba(30, 51, 54, 0.11);
     }
     * { box-sizing: border-box; }
@@ -838,7 +840,7 @@ def render_human_review_html(
     }
     .attempt-tag.claim { color: var(--teal); }
     .attempt-tag.status { color: var(--medium); }
-    .attempt-tag.known { color: #285f7a; background: #dcecf4; }
+    .attempt-tag.known { color: var(--known); background: var(--known-bg); }
     .main {
       min-width: 0;
       padding: 40px clamp(18px, 4vw, 78px) 80px;
@@ -880,8 +882,8 @@ def render_human_review_html(
       background: #eee2f5;
     }
     .badge.known {
-      color: #285f7a;
-      background: #dcecf4;
+      color: var(--known);
+      background: var(--known-bg);
     }
     .badge.literature {
       color: var(--teal);
@@ -1114,6 +1116,8 @@ def render_human_review_html(
         --medium-bg: #40341c;
         --low: #abc5cd;
         --low-bg: #25353a;
+        --known: #8ac7e1;
+        --known-bg: #213c48;
         --shadow: 0 18px 50px rgba(0, 0, 0, 0.28);
       }
     }

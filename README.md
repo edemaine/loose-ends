@@ -676,7 +676,8 @@ pass, supporting `\(...\)`, `\[...\]`, `$...$`, and `$$...$$` delimiters.
 Papers are alphabetical by title, problems are numeric by ID, and attempts are
 newest first. Each problem card shows its attempt status and total number of
 attempts. Reviewed cards additionally show claim type, correctness, coverage,
-and importance; unreviewed attempts show their solver claim type.
+and importance; unreviewed attempts show their solver claim type. A `known`
+tag marks problems whose current literature review reports a full resolution.
 
 Use `--latest-per-problem` to suppress older selected attempts,
 `--summary-only` for a compact index, `--priority high` to narrow the queue,
