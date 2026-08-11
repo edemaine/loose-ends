@@ -1572,6 +1572,11 @@ def run_pipeline(
             )
             saved_review = final_review.result
             reviewed_now = True
+            print(
+                f"Completed review: {current_previous.directory} "
+                f"({saved_review.get('verdict', 'unknown')})",
+                flush=True,
+            )
         if reviewed_now and saved_review.get("verdict") == "ready_for_expert_review":
             return PipelineOutcome(
                 tuple(drafts),
@@ -1585,6 +1590,7 @@ def run_pipeline(
                 saved_review["verdict"],
             )
     for _ in range(max_rounds):
+        is_revision = current_previous is not None
         draft = run_author_round(
             manuscript_directory,
             inputs,
@@ -1603,6 +1609,11 @@ def run_pipeline(
             web_search=web_search,
         )
         drafts.append(draft)
+        author_round_name = "revision" if is_revision else "draft"
+        print(
+            f"Completed {author_round_name}: {draft.directory}",
+            flush=True,
+        )
         final_review = run_paper_review(
             manuscript_directory,
             draft,
@@ -1616,6 +1627,10 @@ def run_pipeline(
             web_search=review_web_search,
         )
         verdict = final_review.result["verdict"]
+        print(
+            f"Completed review: {draft.directory} ({verdict})",
+            flush=True,
+        )
         if verdict == "ready_for_expert_review":
             return PipelineOutcome(tuple(drafts), final_review, verdict)
         if verdict not in REVISION_VERDICTS:
@@ -2017,13 +2032,6 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Paper writing failed: {exc}", file=sys.stderr)
         return 1
 
-    for draft in outcome.drafts:
-        review = common.load_json(draft.directory / "paper-review.json")
-        if review is None:
-            detail = draft.result.get("status", "unknown")
-        else:
-            detail = review.get("verdict", "unknown")
-        print(f"Draft: {draft.directory} ({detail})")
     if outcome.ready and outcome.final_review is not None:
         print("Ready for human expert review:")
         print(f"  {outcome.final_review.draft.directory / 'main.pdf'}")

@@ -1,3 +1,5 @@
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 import json
 import sys
@@ -769,6 +771,71 @@ class WritePaperTests(unittest.TestCase):
         self.assertEqual(critic.call_count, 1)
         self.assertEqual(outcome.reason, "maximum rounds reached")
         self.assertFalse(outcome.ready)
+
+    def test_reports_author_and_review_completion_as_each_round_finishes(self):
+        first = write_paper.DraftRef(
+            Path("draft-001"),
+            1,
+            {"status": "draft_complete"},
+        )
+        second = write_paper.DraftRef(
+            Path("draft-002"),
+            2,
+            {"status": "draft_complete"},
+        )
+        first_review = write_paper.PaperReview(
+            first,
+            {"verdict": "needs_minor_revision"},
+        )
+        second_review = write_paper.PaperReview(
+            second,
+            {"verdict": "ready_for_expert_review"},
+        )
+        options = codex_cli.ModelOptions()
+        output = StringIO()
+        with (
+            patch.object(
+                write_paper,
+                "run_author_round",
+                side_effect=[first, second],
+            ),
+            patch.object(
+                write_paper,
+                "run_paper_review",
+                side_effect=[first_review, second_review],
+            ),
+            redirect_stdout(output),
+        ):
+            outcome = write_paper.run_pipeline(
+                Path("manuscript"),
+                [],
+                previous=None,
+                authors=[],
+                title_hint=None,
+                max_rounds=2,
+                codex="codex",
+                codex_version="test",
+                latexmk="latexmk",
+                prompt_template="prompt",
+                schema_path=Path("paper-schema.json"),
+                config_digest="writer",
+                options=options,
+                review_prompt_template="review prompt",
+                review_schema_path=Path("review-schema.json"),
+                review_config_digest="reviewer",
+                review_options=options,
+            )
+
+        self.assertTrue(outcome.ready)
+        self.assertEqual(
+            output.getvalue().splitlines(),
+            [
+                "Completed draft: draft-001",
+                "Completed review: draft-001 (needs_minor_revision)",
+                "Completed revision: draft-002",
+                "Completed review: draft-002 (ready_for_expert_review)",
+            ],
+        )
 
     def test_blocked_draft_is_sent_to_critic(self):
         draft = write_paper.DraftRef(
