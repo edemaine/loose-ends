@@ -695,6 +695,8 @@ the complete literature report when available, and links to the paper analysis,
 structured records, and artifacts. The browser loads
 Markdown-it and its KaTeX plugin to render Markdown and math in one parsing
 pass, supporting `\(...\)`, `\[...\]`, `$...$`, and `$$...$$` delimiters.
+The search box is stored as the `q` URL parameter, so searches survive reloads
+and are restored together with problem selection by browser Back and Forward.
 Papers are alphabetical by title, problems are numeric by ID, and attempts are
 newest first. Each problem card shows its attempt status and total number of
 attempts. Reviewed cards additionally show claim type, correctness, coverage,

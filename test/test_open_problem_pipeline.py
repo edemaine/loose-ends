@@ -1350,6 +1350,12 @@ class OpenProblemPipelineTests(unittest.TestCase):
             self.assertIn("function navigateToItem(item)", dashboard)
             self.assertIn('window.addEventListener("popstate"', dashboard)
             self.assertIn("restorePageScroll(renderedItemId", dashboard)
+            self.assertIn('parameters.set("q", query)', dashboard)
+            self.assertIn(
+                'new URLSearchParams(location.search).get("q")',
+                dashboard,
+            )
+            self.assertIn("search.value = queryFromLocation()", dashboard)
             self.assertIn("katex@0.17.0", dashboard)
             self.assertIn("markdown-it@14.3.0", dashboard)
             self.assertIn("@mdit/plugin-katex@1.0.1", dashboard)

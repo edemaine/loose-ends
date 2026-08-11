@@ -1566,7 +1566,21 @@ def render_human_review_html(
     }
 
     function itemUrl(itemId) {
-      return itemId ? `#${encodeURIComponent(itemId)}` : "#";
+      const parameters = new URLSearchParams(location.search);
+      const query = search.value.trim();
+      if (query) {
+        parameters.set("q", query);
+      } else {
+        parameters.delete("q");
+      }
+      const encodedParameters = parameters.toString();
+      const encodedItem = itemId ? `#${encodeURIComponent(itemId)}` : "";
+      return `${location.pathname}` +
+        `${encodedParameters ? `?${encodedParameters}` : ""}${encodedItem}`;
+    }
+
+    function queryFromLocation() {
+      return new URLSearchParams(location.search).get("q") || "";
     }
 
     function rememberCurrentScroll({ updateHistory = true } = {}) {
@@ -2012,6 +2026,8 @@ def render_human_review_html(
           itemUrl(renderedItemId)
         );
         restorePageScroll(renderedItemId, scrollY);
+      } else {
+        history.replaceState(historyPayload(0), "", itemUrl(""));
       }
     }
     search.addEventListener("input", updateFilters);
@@ -2038,6 +2054,7 @@ def render_human_review_html(
 
     window.addEventListener("popstate", event => {
       rememberCurrentScroll({ updateHistory: false });
+      search.value = queryFromLocation();
       const requested = event.state?.humanReview
         ? event.state.selectedItem
         : decodeURIComponent(location.hash.slice(1));
@@ -2059,6 +2076,7 @@ def render_human_review_html(
       restorePageScroll(renderedItemId, storedScroll);
     });
 
+    search.value = queryFromLocation();
     const requested = decodeURIComponent(location.hash.slice(1));
     const requestedItem = allItems.find(item => item.id === requested);
     if (requestedItem) {
