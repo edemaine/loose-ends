@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import os
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
 import shutil
 import subprocess
@@ -71,6 +71,9 @@ PAPER_VERDICTS = (
 )
 REVISION_VERDICTS = {"needs_major_revision", "needs_minor_revision"}
 MAX_DERIVED_NAME_LENGTH = 160
+CYGWIN_ABSOLUTE_PATH_RE = re.compile(
+    r"^/cygdrive/([A-Za-z])(?:/(.*))?$"
+)
 
 
 @dataclass(frozen=True)
@@ -108,6 +111,38 @@ class PipelineOutcome:
             and self.final_review.result.get("verdict")
             == "ready_for_expert_review"
         )
+
+
+def _stored_manifest_path(path: Path) -> str:
+    """Store project paths portably while preserving external absolute paths."""
+    resolved = path.expanduser().resolve()
+    try:
+        return resolved.relative_to(PROJECT_ROOT).as_posix()
+    except ValueError:
+        return str(resolved)
+
+
+def _resolve_manifest_path(value: str) -> Path:
+    """Resolve project-relative, Windows, or Cygwin paths on either host."""
+    windows_path = PureWindowsPath(value)
+    if windows_path.is_absolute():
+        if sys.platform == "cygwin":
+            drive = windows_path.drive.rstrip(":").casefold()
+            return (
+                Path("/cygdrive") / drive / Path(*windows_path.parts[1:])
+            ).resolve()
+        if os.name == "nt":
+            return Path(windows_path).resolve()
+    cygwin_match = CYGWIN_ABSOLUTE_PATH_RE.fullmatch(value)
+    if cygwin_match and os.name == "nt":
+        tail = cygwin_match.group(2)
+        parts = tail.split("/") if tail else []
+        drive_root = f"{cygwin_match.group(1)}:\\"
+        return Path(PureWindowsPath(drive_root, *parts)).resolve()
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    return path.resolve()
 
 
 def _read_text(path: Path, description: str) -> str:
@@ -174,12 +209,12 @@ def input_selectors(paths: Sequence[Path]) -> list[dict]:
                 "paper input must name an analyzed paper, an OP-NNN "
                 f"directory, or an attempt-NNN directory: {raw_path}"
             )
-        selectors.append({"kind": kind, "path": str(path)})
+        selectors.append({"kind": kind, "path": _stored_manifest_path(path)})
     return selectors
 
 
 def _selector_paper(selector: dict) -> Path:
-    path = Path(selector["path"]).expanduser().resolve()
+    path = _resolve_manifest_path(selector["path"])
     if selector["kind"] == "paper":
         return path
     if selector["kind"] == "problem":
@@ -204,12 +239,17 @@ def resolve_input_selectors(
         normalized.append(
             {
                 "kind": selector["kind"],
-                "path": str(Path(selector["path"]).expanduser().resolve()),
+                "path": _stored_manifest_path(
+                    _resolve_manifest_path(selector["path"])
+                ),
             }
         )
     if refresh_results:
         normalized = [
-            {"kind": "paper", "path": str(_selector_paper(selector))}
+            {
+                "kind": "paper",
+                "path": _stored_manifest_path(_selector_paper(selector)),
+            }
             for selector in normalized
         ]
     effective = []
@@ -223,11 +263,32 @@ def resolve_input_selectors(
     attempts: list[Path] = []
     warnings: list[str] = []
     for selector in effective:
-        path = Path(selector["path"])
-        if selector["kind"] == "attempt":
+        path = _resolve_manifest_path(selector["path"])
+        kind = selector["kind"]
+        if kind == "attempt" and (
+            not path.is_dir() or not ATTEMPT_RE.fullmatch(path.name)
+        ):
+            raise common.CodexError(
+                f"draft attempt selector is missing or invalid: {path}"
+            )
+        if kind == "problem" and (
+            not path.is_dir()
+            or not analyze_papers.OPEN_PROBLEM_ID_RE.fullmatch(path.name)
+            or not (path.parent / "analysis" / "manifest.json").is_file()
+        ):
+            raise common.CodexError(
+                f"draft problem selector is missing or invalid: {path}"
+            )
+        if kind == "paper" and not (
+            path / "analysis" / "manifest.json"
+        ).is_file():
+            raise common.CodexError(
+                f"draft paper selector is missing or invalid: {path}"
+            )
+        if kind == "attempt":
             attempts.append(path)
             continue
-        if selector["kind"] == "problem":
+        if kind == "problem":
             problems = common.discover_problem_refs(
                 [path.parent],
                 problem_ids={path.name},
@@ -1353,8 +1414,10 @@ def _install_draft(
                 "input_attempts": [
                     {
                         "result_id": item.result_id,
-                        "attempt_path": str(item.attempt.directory),
-                        "paper_directory": str(
+                        "attempt_path": _stored_manifest_path(
+                            item.attempt.directory
+                        ),
+                        "paper_directory": _stored_manifest_path(
                             item.attempt.problem.paper_directory
                         ),
                         "problem_id": item.attempt.problem.id,
@@ -1861,7 +1924,9 @@ def _revision_inputs(
     )
     preferred_result_ids = {}
     for record in records:
-        attempt = _attempt_from_path(Path(record["attempt_path"]))
+        attempt = _attempt_from_path(
+            _resolve_manifest_path(record["attempt_path"])
+        )
         preferred_result_ids[
             (
                 os.path.normcase(str(attempt.problem.paper_directory)),
@@ -1873,7 +1938,10 @@ def _revision_inputs(
         preferred_result_ids=preferred_result_ids,
     )
     previous_selection = {
-        (record["result_id"], str(Path(record["attempt_path"]).resolve()))
+        (
+            record["result_id"],
+            str(_resolve_manifest_path(record["attempt_path"])),
+        )
         for record in records
     }
     current_selection = {

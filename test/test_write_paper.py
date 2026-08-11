@@ -363,6 +363,44 @@ class WritePaperTests(unittest.TestCase):
             self.assertEqual(selectors[0]["kind"], "paper")
             self.assertTrue(changed)
 
+    def test_project_input_selectors_use_portable_relative_paths(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = make_paper(root / "papers" / "author")
+            attempt = make_ready_attempt(paper, "OP-001")
+            with patch.object(write_paper, "PROJECT_ROOT", root):
+                selectors = write_paper.input_selectors([attempt])
+                paths, _, effective = write_paper.resolve_input_selectors(
+                    selectors
+                )
+
+            self.assertEqual(
+                selectors,
+                [
+                    {
+                        "kind": "attempt",
+                        "path": attempt.relative_to(root).as_posix(),
+                    }
+                ],
+            )
+            self.assertEqual(paths, [attempt])
+            self.assertEqual(effective, selectors)
+
+    def test_invalid_selector_fails_before_recursive_discovery(self):
+        selector = {
+            "kind": "problem",
+            "path": "missing-paper/OP-001",
+        }
+        with (
+            patch.object(common, "discover_problem_refs") as discover,
+            self.assertRaisesRegex(
+                common.CodexError,
+                "problem selector is missing or invalid",
+            ),
+        ):
+            write_paper.resolve_input_selectors([selector])
+        discover.assert_not_called()
+
     def test_cli_defaults_to_one_live_frontier_round(self):
         parsed = write_paper.build_parser().parse_args(["attempt-001"])
         self.assertEqual(parsed.model, "gpt-5.6-sol")
