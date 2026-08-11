@@ -23,7 +23,11 @@
           },
           "manuscript_labels": {
             "type": "array",
-            "items": {"type": "string"}
+            "description": "Literal keys appearing inside LaTeX \\label{...} commands, not displayed theorem numbers or titles.",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9:._/-]*$"
+            }
           },
           "explanation": {"type": "string"}
         },
@@ -44,7 +48,10 @@
         "properties": {
           "bib_key": {"type": "string"},
           "title": {"type": "string"},
-          "url": {"type": "string"},
+          "url": {
+            "type": "string",
+            "description": "Verified HTTP(S) source URL, or an empty string when a print-only source has no reliable canonical URL."
+          },
           "verification": {"type": "string"},
           "role": {
             "type": "string",

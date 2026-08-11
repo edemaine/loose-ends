@@ -433,6 +433,8 @@ class WritePaperTests(unittest.TestCase):
             "Treat leaked workflow language as an exposition finding",
             reviewer_prompt,
         )
+        self.assertIn("literal keys appearing", writer_prompt)
+        self.assertIn("print-only source", writer_prompt)
 
     def test_readiness_issues_warn_but_do_not_block_explicit_inputs(self):
         with TemporaryDirectory() as temporary:
@@ -510,6 +512,30 @@ class WritePaperTests(unittest.TestCase):
                 result["generated_files"],
                 ["figures/overview.svg", "figures/overview.pdf"],
             )
+            print_only_response = paper_result(["R-001"])
+            print_only_response["citations"][0]["url"] = ""
+            common.write_json(
+                workspace / "agent-result.json",
+                print_only_response,
+            )
+            result, _ = write_paper.validate_paper_result(
+                workspace / "agent-result.json",
+                workspace,
+                inputs,
+            )
+            self.assertEqual(result["citations"][0]["url"], "")
+            invalid_url_response = paper_result(["R-001"])
+            invalid_url_response["citations"][0]["url"] = "isbn:1234"
+            common.write_json(
+                workspace / "agent-result.json",
+                invalid_url_response,
+            )
+            with self.assertRaisesRegex(common.CodexError, "invalid URL"):
+                write_paper.validate_paper_result(
+                    workspace / "agent-result.json",
+                    workspace,
+                    inputs,
+                )
             unpaired_response = paper_result(["R-001"])
             unpaired_response["generated_files"] = ["figures/overview.svg"]
             common.write_json(
@@ -609,6 +635,46 @@ class WritePaperTests(unittest.TestCase):
                     inputs,
                     previous=previous,
                 )
+
+    def test_normalizes_unambiguous_displayed_manuscript_labels(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = make_paper(root)
+            attempt = make_ready_attempt(paper, "OP-001")
+            inputs = write_paper.load_paper_inputs([attempt])
+            workspace = root / "workspace"
+            workspace.mkdir()
+            write_manuscript_files(workspace, ["R-001"])
+            (workspace / "main.aux").write_text(
+                "\\newlabel{thm:r-001}{{1.1}{1}{Result}{theorem.1.1}{}}\n"
+                "\\newlabel{eq:first}{{2}{1}{Result}{equation.2}{}}\n"
+                "\\newlabel{eq:second}{{3}{1}{Result}{equation.3}{}}\n",
+                encoding="utf-8",
+            )
+            with (workspace / "main.tex").open("a", encoding="utf-8") as tex:
+                tex.write("\\label{eq:first}\\label{eq:second}\n")
+            response = paper_result(["R-001"])
+            response["results"][0]["manuscript_labels"] = [
+                "Theorem 1.1 (Result)",
+                "Equations (2)–(3)",
+            ]
+            common.write_json(workspace / "agent-result.json", response)
+
+            result, _ = write_paper.validate_paper_result(
+                workspace / "agent-result.json",
+                workspace,
+                inputs,
+            )
+
+            self.assertEqual(
+                result["results"][0]["manuscript_labels"],
+                ["thm:r-001", "eq:first", "eq:second"],
+            )
+            self.assertIn("Theorem 1.1 (Result) -> thm:r-001", result["warnings"][-1])
+            self.assertIn(
+                "Equations (2)–(3) -> eq:first, eq:second",
+                result["warnings"][-1],
+            )
 
     def test_compile_latex_builds_nonempty_paper_pdf(self):
         with TemporaryDirectory() as temporary:

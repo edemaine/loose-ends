@@ -38,6 +38,27 @@ ATTEMPT_RE = re.compile(r"^attempt-[0-9]{3,}$")
 DRAFT_RE = re.compile(r"^draft-([0-9]{3,})$")
 RESULT_ID_RE = re.compile(r"^R-[0-9]{3,}$")
 CLAIM_ID_RE = re.compile(r"^C-[0-9]{3,}$")
+DISPLAYED_MANUSCRIPT_LABEL_RE = re.compile(
+    r"^\s*(Theorem|Proposition|Lemma|Corollary|Definition)\s+"
+    r"([A-Za-z]?[0-9]+(?:\.[0-9]+)*)\b",
+    re.IGNORECASE,
+)
+DISPLAYED_EQUATION_LABEL_RE = re.compile(
+    r"^\s*Equations?\s+\(([A-Za-z]?[0-9]+(?:\.[0-9]+)*)\)"
+    r"(?:\s*(?:-|--|\N{EN DASH}|\N{EM DASH})\s*"
+    r"\(([A-Za-z]?[0-9]+(?:\.[0-9]+)*)\))?\s*$",
+    re.IGNORECASE,
+)
+AUX_NEWLABEL_RE = re.compile(
+    r"\\newlabel\{([^{}]+)\}\{\{([^{}]+)\}"
+)
+MANUSCRIPT_LABEL_PREFIXES = {
+    "theorem": "thm:",
+    "proposition": "prop:",
+    "lemma": "lem:",
+    "corollary": "cor:",
+    "definition": "def:",
+}
 FINDING_ID_RE = re.compile(r"^P-[0-9]{3,}$")
 SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 PAPER_STATUSES = ("draft_complete", "blocked")
@@ -830,6 +851,67 @@ def _previous_addressed_finding_ids(previous: DraftRef | None) -> set[str]:
     return ids
 
 
+def _normalize_manuscript_labels(
+    labels: Sequence[str],
+    *,
+    tex: str,
+    aux: str,
+) -> tuple[list[str], list[tuple[str, str]]]:
+    """Resolve unambiguous displayed theorem/equation numbers to label keys."""
+    actual_labels = set(re.findall(r"\\label\s*\{([^{}]+)\}", tex))
+    labels_by_number: dict[str, set[str]] = {}
+    for key, number in AUX_NEWLABEL_RE.findall(aux):
+        if key in actual_labels:
+            labels_by_number.setdefault(number, set()).add(key)
+    normalized: list[str] = []
+    repairs: list[tuple[str, str]] = []
+    for label in labels:
+        if label in actual_labels:
+            canonical_labels = [label]
+        else:
+            match = DISPLAYED_MANUSCRIPT_LABEL_RE.match(label)
+            canonical_labels = []
+            if match:
+                prefix = MANUSCRIPT_LABEL_PREFIXES[match.group(1).casefold()]
+                candidates = {
+                    key
+                    for key in labels_by_number.get(match.group(2), set())
+                    if key.casefold().startswith(prefix)
+                }
+                if len(candidates) == 1:
+                    canonical_labels = [next(iter(candidates))]
+            else:
+                equation_match = DISPLAYED_EQUATION_LABEL_RE.match(label)
+                if equation_match:
+                    numbers = [
+                        number
+                        for number in equation_match.groups()
+                        if number is not None
+                    ]
+                    for number in numbers:
+                        candidates = {
+                            key
+                            for key in labels_by_number.get(number, set())
+                            if key.casefold().startswith("eq:")
+                        }
+                        if len(candidates) != 1:
+                            canonical_labels = []
+                            break
+                        canonical_labels.append(next(iter(candidates)))
+            if not canonical_labels:
+                raise common.CodexError(
+                    f"main.tex omits structured manuscript label {label}"
+                )
+            repairs.append((label, ", ".join(canonical_labels)))
+        for canonical in canonical_labels:
+            if canonical in normalized:
+                raise common.CodexError(
+                    f"paper result has duplicate manuscript label {canonical}"
+                )
+            normalized.append(canonical)
+    return normalized, repairs
+
+
 def validate_paper_result(
     result_path: Path,
     workspace: Path,
@@ -973,6 +1055,27 @@ def validate_paper_result(
         workspace / "readiness.md",
         description="paper readiness report",
     )
+    aux_path = workspace / "main.aux"
+    aux = _read_text(aux_path, "generated main.aux") if aux_path.is_file() else ""
+    label_repairs: list[tuple[str, str]] = []
+    for row in rows:
+        normalized_labels, repairs = _normalize_manuscript_labels(
+            row["manuscript_labels"],
+            tex=tex,
+            aux=aux,
+        )
+        row["manuscript_labels"] = normalized_labels
+        label_repairs.extend(repairs)
+    if label_repairs:
+        details = "; ".join(
+            f"{displayed} -> {canonical}"
+            for displayed, canonical in label_repairs
+        )
+        result["warnings"] = [
+            *result["warnings"],
+            "Driver normalized human-readable manuscript label(s) to literal "
+            f"LaTeX keys: {details}.",
+        ]
     for required in (r"\documentclass", r"\begin{document}", r"\end{document}"):
         if required not in tex:
             raise common.CodexError(f"main.tex omits {required}")
@@ -1012,9 +1115,10 @@ def validate_paper_result(
                 f"structured citation is duplicate, unused, or undefined: {key!r}"
             )
         structured_keys.add(key)
-        if not isinstance(citation.get("url"), str) or not citation[
-            "url"
-        ].startswith(("https://", "http://")):
+        url = citation.get("url")
+        if not isinstance(url, str) or (
+            url and not url.startswith(("https://", "http://"))
+        ):
             raise common.CodexError(f"paper citation {key} has invalid URL")
         for field in ("title", "verification"):
             if not isinstance(citation.get(field), str) or not citation[field].strip():
