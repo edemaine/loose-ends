@@ -665,10 +665,33 @@ def _inherit_review_options(
     )
 
 
+def review_confirms_resolution(
+    outcome: review_solutions.ReviewOutcome,
+) -> bool:
+    """Return whether a critic has confirmed a complete problem resolution."""
+    return (
+        outcome.correctness in {"plausible", "well_supported"}
+        and outcome.coverage
+        in {"complete", "complete_under_stated_interpretation"}
+        and outcome.importance == "resolution"
+    )
+
+
+def next_round_work(work: SolveWork) -> SolveWork:
+    """Build another attempt for a problem after its prior round installed."""
+    return SolveWork(
+        work.problem,
+        work.guidance,
+        common.next_attempt_number(work.problem),
+        work.triage_snapshot_digest,
+        common.literature_snapshot_digest(work.problem),
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "run one adaptive, full-paper solver attempt per selected problem"
+            "run adaptive, full-paper solver attempts on selected problems"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""examples:
@@ -687,6 +710,10 @@ def build_parser() -> argparse.ArgumentParser:
   Include maybe items, but only report solver output without critics:
     python src/solve_open_problems.py papers/edemaine \\
       --from-triage attempt,maybe --review none
+
+  Try each unresolved problem up to three times, reviewing between rounds:
+    python src/solve_open_problems.py papers/edemaine \\
+      --from-triage attempt --max-rounds 3
 """,
     )
     parser.add_argument(
@@ -735,6 +762,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=codex_cli.positive_integer,
         default=1,
         help="maximum concurrent solver agents (default: 1)",
+    )
+    parser.add_argument(
+        "-r",
+        "--max-rounds",
+        type=codex_cli.positive_integer,
+        default=1,
+        metavar="N",
+        help=(
+            "maximum solver attempts per selected problem in this run; "
+            "when review is enabled, review after each round and stop after "
+            "a critic-confirmed resolution (default: 1)"
+        ),
     )
     parser.add_argument(
         "--review",
@@ -921,9 +960,16 @@ def main(argv: list[str] | None = None) -> int:
                 f"Would skip resolved literature: "
                 f"{problem.paper_directory} {problem.id}"
             )
+        round_behavior = (
+            "with review between rounds and critic-confirmed early stopping"
+            if args.review != "none"
+            else "without review or early stopping"
+        )
         print(
             f"Selected {len(problems)} problem(s): "
-            f"{len(work_items)} adaptive solver attempt(s); "
+            f"up to {len(work_items) * args.max_rounds} adaptive solver "
+            f"attempt(s) across {args.max_rounds} round(s), "
+            f"{round_behavior}; "
             f"{len(without_work)} without matching current triage; "
             f"{len(literature_resolved)} resolved by current literature."
         )
@@ -946,71 +992,96 @@ def main(argv: list[str] | None = None) -> int:
         concurrency = "sequentially with 1 Codex agent"
     else:
         concurrency = f"with up to {agent_count} concurrent Codex agents"
-    if len(work_items) == 1:
-        scope = "Solving 1 problem with one adaptive attempt"
-    else:
-        scope = (
-            f"Solving {len(work_items)} problems with one adaptive attempt "
-            "per problem"
-        )
+    round_phrase = (
+        "one round"
+        if args.max_rounds == 1
+        else f"up to {args.max_rounds} rounds"
+    )
+    scope = f"Solving {len(work_items)} problem(s) for {round_phrase}"
     print(
         f"{scope}, {concurrency}.",
         flush=True,
     )
-    finished_count = 0
-
-    def report_finished(
-        work: SolveWork,
-        outcome: SolveOutcome | None,
-        error: str | None,
-    ) -> None:
-        nonlocal finished_count
-        finished_count += 1
-        prefix = f"[{finished_count}/{len(work_items)}]"
-        if outcome is not None:
-            print(
-                f"Completed {prefix}: {work.problem.paper_directory} "
-                f"{work.problem.id}/{work.attempt_name} "
-                f"({outcome.message})",
-                flush=True,
-            )
-        else:
-            print(
-                f"Failed {prefix}: {work.problem.paper_directory} "
-                f"{work.problem.id}/{work.attempt_name}: {error}",
-                file=sys.stderr,
-                flush=True,
-            )
-
-    outcomes, failures = solve_many(
-        work_items,
-        codex=codex,
-        codex_version=codex_version,
-        prompt_template=prompt_template,
-        schema_path=schema_path,
-        config_digest=config_digest,
-        options=options,
-        jobs=args.jobs,
-        web_search=args.web_search,
-        on_finished=report_finished,
-    )
-
+    outcomes: list[SolveOutcome] = []
+    failures: list[tuple[SolveWork, str]] = []
     review_outcomes: list[review_solutions.ReviewOutcome] = []
     review_failures: list[
         tuple[review_solutions.AttemptRef, str]
     ] = []
     review_skipped = 0
-    if args.review != "none" and outcomes:
-        attempts = [outcome.attempt for outcome in outcomes]
-        if args.review == "promising":
-            selected_attempts = [
-                attempt
-                for attempt in attempts
-                if review_solutions.is_promising(attempt)
-            ]
+    confirmed_problems: set[Path] = set()
+    active_work = work_items
+
+    for round_number in range(1, args.max_rounds + 1):
+        if not active_work:
+            break
+        if args.max_rounds > 1:
+            print(
+                f"Round {round_number}/{args.max_rounds}: solving "
+                f"{len(active_work)} active problem(s).",
+                flush=True,
+            )
+        round_finished = 0
+
+        def report_finished(
+            work: SolveWork,
+            outcome: SolveOutcome | None,
+            error: str | None,
+        ) -> None:
+            nonlocal round_finished
+            round_finished += 1
+            prefix = f"[{round_finished}/{len(active_work)}]"
+            if args.max_rounds > 1:
+                prefix = (
+                    f"[round {round_number} "
+                    f"{round_finished}/{len(active_work)}]"
+                )
+            if outcome is not None:
+                print(
+                    f"Completed {prefix}: {work.problem.paper_directory} "
+                    f"{work.problem.id}/{work.attempt_name} "
+                    f"({outcome.message})",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"Failed {prefix}: {work.problem.paper_directory} "
+                    f"{work.problem.id}/{work.attempt_name}: {error}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
+        round_outcomes, round_failures = solve_many(
+            active_work,
+            codex=codex,
+            codex_version=codex_version,
+            prompt_template=prompt_template,
+            schema_path=schema_path,
+            config_digest=config_digest,
+            options=options,
+            jobs=args.jobs,
+            web_search=args.web_search,
+            on_finished=report_finished,
+        )
+        outcomes.extend(round_outcomes)
+        failures.extend(round_failures)
+
+        round_review_outcomes: list[
+            review_solutions.ReviewOutcome
+        ] = []
+        if args.review != "none" and round_outcomes:
+            attempts = [outcome.attempt for outcome in round_outcomes]
+            if args.review == "promising":
+                selected_attempts = [
+                    attempt
+                    for attempt in attempts
+                    if review_solutions.is_promising(attempt)
+                ]
+            else:
+                selected_attempts = attempts
+            review_skipped += len(attempts) - len(selected_attempts)
         else:
-            selected_attempts = attempts
-        review_skipped = len(attempts) - len(selected_attempts)
+            selected_attempts = []
         if selected_attempts:
             print(
                 f"Reviewing {len(selected_attempts)} new attempt(s), with up "
@@ -1050,7 +1121,10 @@ def main(argv: list[str] | None = None) -> int:
                         flush=True,
                     )
 
-            review_outcomes, review_failures = review_solutions.review_many(
+            (
+                round_review_outcomes,
+                round_review_failures,
+            ) = review_solutions.review_many(
                 selected_attempts,
                 codex=codex,
                 codex_version=codex_version,
@@ -1062,6 +1136,42 @@ def main(argv: list[str] | None = None) -> int:
                 web_search=args.review_web_search or args.web_search,
                 timeout_seconds=args.review_timeout_minutes * 60,
                 on_finished=report_review_finished,
+            )
+            review_outcomes.extend(round_review_outcomes)
+            review_failures.extend(round_review_failures)
+
+        resolved_this_round = {
+            outcome.attempt.problem.directory
+            for outcome in round_review_outcomes
+            if review_confirms_resolution(outcome)
+        }
+        for problem_directory in sorted(resolved_this_round):
+            confirmed_problems.add(problem_directory)
+            matching = next(
+                outcome
+                for outcome in round_review_outcomes
+                if outcome.attempt.problem.directory == problem_directory
+                and review_confirms_resolution(outcome)
+            )
+            print(
+                f"Critic confirmed a complete resolution: "
+                f"{matching.attempt.problem.paper_directory} "
+                f"{matching.attempt.problem.id}/{matching.attempt.name}.",
+                flush=True,
+            )
+
+        if round_number == args.max_rounds:
+            break
+        active_work = [
+            next_round_work(outcome.work)
+            for outcome in round_outcomes
+            if outcome.work.problem.directory not in resolved_this_round
+        ]
+        if active_work:
+            print(
+                f"Continuing {len(active_work)} unresolved problem(s) to "
+                f"round {round_number + 1}/{args.max_rounds}.",
+                flush=True,
             )
 
     priority_items = [
@@ -1110,6 +1220,7 @@ def main(argv: list[str] | None = None) -> int:
         f"{len(review_outcomes)} review(s); {review_skipped} review(s) "
         f"skipped for no checkable progress; "
         f"{len(review_failures)} review failure(s); "
+        f"{len(confirmed_problems)} critic-confirmed resolution(s); "
         f"{len(literature_resolved)} problem(s) skipped as literature-"
         f"resolved; {len(priority_items)} recommended for human review."
     )

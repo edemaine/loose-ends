@@ -1697,6 +1697,123 @@ class OpenProblemPipelineTests(unittest.TestCase):
             self.assertIn("OP-002/attempt-001", text)
             self.assertIn("Selected 2 problem(s)", text)
 
+    def test_solver_repeats_rounds_until_critic_confirms_resolution(self):
+        with TemporaryDirectory() as temporary:
+            paper = make_analyzed_paper(Path(temporary))
+            events: list[str] = []
+            solve_round = 0
+
+            def fake_solve_many(work_items, **kwargs):
+                nonlocal solve_round
+                solve_round += 1
+                events.append(f"solve-{solve_round}")
+                work = work_items[0]
+                directory = work.problem.directory / work.attempt_name
+                directory.mkdir(parents=True)
+                claimed = (
+                    "partial_result" if solve_round == 1 else "solution"
+                )
+                solver_result = {
+                    "claimed_result_type": claimed,
+                    "checkable_claims": [{"id": "C-001"}],
+                }
+                common.write_json(
+                    directory / "solver-result.json",
+                    solver_result,
+                )
+                attempt = review_solutions.AttemptRef(
+                    work.problem,
+                    directory,
+                    solver_result,
+                )
+                outcome = solve_open_problems.SolveOutcome(
+                    work,
+                    attempt,
+                    claimed,
+                    1,
+                    claimed,
+                )
+                if kwargs.get("on_finished") is not None:
+                    kwargs["on_finished"](work, outcome, None)
+                return [outcome], []
+
+            def fake_review_many(attempts, **kwargs):
+                events.append(f"review-{solve_round}")
+                attempt = attempts[0]
+                if solve_round == 1:
+                    coverage = "partial"
+                    importance = "major"
+                else:
+                    coverage = "complete"
+                    importance = "resolution"
+                outcome = review_solutions.ReviewOutcome(
+                    attempt,
+                    "reviewed",
+                    "well_supported",
+                    coverage,
+                    importance,
+                    "high",
+                    "reviewed",
+                )
+                common.write_json(
+                    attempt.directory / "review-result.json",
+                    {"reviewed_coverage": coverage},
+                )
+                if kwargs.get("on_finished") is not None:
+                    kwargs["on_finished"](attempt, outcome, None)
+                return [outcome], []
+
+            output = StringIO()
+            with (
+                patch.object(
+                    solve_open_problems,
+                    "solve_many",
+                    side_effect=fake_solve_many,
+                ),
+                patch.object(
+                    review_solutions,
+                    "review_many",
+                    side_effect=fake_review_many,
+                ),
+                patch.object(
+                    codex_cli,
+                    "resolve_codex_executable",
+                    return_value="codex",
+                ),
+                patch.object(
+                    codex_cli,
+                    "read_codex_version",
+                    return_value="test",
+                ),
+                redirect_stdout(output),
+            ):
+                returncode = solve_open_problems.main(
+                    [
+                        str(paper / "OP-001"),
+                        "--max-rounds",
+                        "3",
+                        "--review",
+                        "all",
+                    ]
+                )
+
+            self.assertEqual(returncode, 0)
+            self.assertEqual(
+                events,
+                ["solve-1", "review-1", "solve-2", "review-2"],
+            )
+            self.assertTrue((paper / "OP-001" / "attempt-001").is_dir())
+            self.assertTrue((paper / "OP-001" / "attempt-002").is_dir())
+            self.assertFalse((paper / "OP-001" / "attempt-003").exists())
+            self.assertIn(
+                "Critic confirmed a complete resolution",
+                output.getvalue(),
+            )
+            self.assertIn(
+                "1 critic-confirmed resolution(s)",
+                output.getvalue(),
+            )
+
     def test_other_problem_commands_accept_exact_problem_directories(self):
         with TemporaryDirectory() as temporary:
             paper = make_analyzed_paper(Path(temporary))
@@ -1830,6 +1947,13 @@ class OpenProblemPipelineTests(unittest.TestCase):
             ["paper", "--all-problems"]
         )
         self.assertEqual(solver.web_search, "live")
+        self.assertEqual(solver.max_rounds, 1)
+        self.assertEqual(
+            solve_open_problems.build_parser()
+            .parse_args(["paper", "--all-problems", "-r", "3"])
+            .max_rounds,
+            3,
+        )
         self.assertEqual(reviewer.web_search, "live")
         self.assertEqual(literature.web_search, "live")
 

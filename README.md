@@ -341,10 +341,10 @@ Codex turn. `--force` intentionally bypasses both current results and recovery.
 
 ## Attempt solutions
 
-`src/solve_open_problems.py` runs one adaptive Codex research turn per selected
-problem. Unlike triage, every solver receives a disposable copy of the entire
-paper—PDF, submitted source, and metadata when present—together with the
-technical analysis, all triage suggestions, and all previous attempts,
+`src/solve_open_problems.py` runs one or more adaptive Codex research turns per
+selected problem. Unlike triage, every solver receives a disposable copy of
+the entire paper—PDF, submitted source, and metadata when present—together with
+the technical analysis, all triage suggestions, and all previous attempts,
 artifacts, and critiques. A current literature report is also staged with its
 residual problem, source links, and solver briefing. It is therefore not trying
 to solve a problem from its short description alone.
@@ -377,12 +377,29 @@ skipped: the solver receives the precise residual problem. Literature search
 is otherwise optional, and problems with no report continue normally.
 
 `--dry-run` shows one future adaptive attempt number for each selected problem
-and the number of triage suggestions it will receive. All suggestions go into
-the same solver prompt. The solver is explicitly free to combine, reorder,
-abandon, or replace them as evidence develops, and to try proof,
-counterexample, computation, and verification within the same turn. A later
-attempt happens only after the current attempt (and any critic output)
-invalidates triage and a new triage pass recommends more work.
+and the number of triage suggestions it will receive, plus the maximum total
+number of attempts requested. All suggestions go into the same solver prompt.
+The solver is explicitly free to combine, reorder, abandon, or replace them as
+evidence develops, and to try proof, counterexample, computation, and
+verification within the same turn.
+
+`-r N` or `--max-rounds N` requests up to `N` attempts per problem in the same
+invocation. Each active problem gets one attempt, then its new attempt is
+reviewed before the next round begins. A problem leaves the active set when the
+critic reports plausible or well-supported correctness, complete coverage, and
+resolution-level importance. Solver failures also stop later rounds for that
+problem, while other problems continue. Otherwise, the next solver sees the
+new attempt and critique in its history and can repair it or change direction:
+
+```sh
+python src/solve_open_problems.py papers/edemaine \
+  --from-triage attempt --max-rounds 3 --jobs 4
+```
+
+The original triage is selection and advisory guidance for the whole
+invocation; it does not need to be regenerated between these internal rounds.
+With `--review none`, there is no independent early-stop signal, so every
+successfully continuing problem runs for all requested rounds.
 
 Attempts are append-only:
 
