@@ -414,6 +414,13 @@ class WritePaperTests(unittest.TestCase):
             ["--revise", "draft-001", "--prompt", "Add figures"]
         )
         self.assertEqual(revision.revision_instruction, "Add figures")
+        initial = write_paper.build_parser().parse_args(
+            ["attempt-001", "--prompt", "Emphasize the construction"]
+        )
+        self.assertEqual(
+            initial.revision_instruction,
+            "Emphasize the construction",
+        )
         self.assertEqual(
             revision.prompt_template,
             write_paper.DEFAULT_PROMPT_PATH,
@@ -453,9 +460,24 @@ class WritePaperTests(unittest.TestCase):
             revision_instruction="Add figures explaining the construction.",
         )
 
-        self.assertIn("<revision_instruction>", rendered)
+        self.assertIn("<writer_instruction>", rendered)
         self.assertIn("Add figures explaining the construction.", rendered)
         self.assertIn("`addressed_findings` must be empty", rendered)
+
+    def test_writer_prompt_includes_explicit_first_draft_direction(self):
+        rendered = write_paper.render_writer_prompt(
+            "{{MODE_INSTRUCTION}}\n{{CONTEXT_DIRECTORY}}\n"
+            "{{MANUSCRIPT_METADATA_JSON}}",
+            context=Path.cwd(),
+            authors=[],
+            title_hint=None,
+            previous=None,
+            revision_instruction="Emphasize the constructive proof.",
+        )
+
+        self.assertIn("first-draft writer direction", rendered)
+        self.assertIn("<writer_instruction>", rendered)
+        self.assertIn("Emphasize the constructive proof.", rendered)
 
     def test_prompts_keep_internal_review_language_out_of_manuscript(self):
         writer_prompt = write_paper.DEFAULT_PROMPT_PATH.read_text(encoding="utf-8")

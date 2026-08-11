@@ -226,6 +226,24 @@ def _browser_file_uri(path: Path) -> str:
     return resolved.as_uri()
 
 
+def open_in_browser(target: Path | str) -> bool:
+    """Open a local file or URL in the graphical system browser."""
+    if sys.platform == "cygwin":
+        argument = (
+            codex_cli.path_for_codex(target)
+            if isinstance(target, Path)
+            else target
+        )
+        subprocess.Popen(
+            ["cygstart", argument],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return True
+    url = _browser_file_uri(target) if isinstance(target, Path) else target
+    return webbrowser.open(url)
+
+
 def _project_display_path(path: Path) -> str:
     """Format a path relative to this project, with portable separators."""
     resolved = path if path.is_absolute() else path.resolve()
@@ -272,7 +290,7 @@ def _extract_open_problem_markdown(path: Path, problem_id: str) -> str:
     return "\n".join(lines[start:end]).strip()
 
 
-def _html_data(
+def build_review_catalog(
     items: Sequence[HumanReviewItem],
     *,
     include_contents: bool,
@@ -433,6 +451,10 @@ def _html_data(
         data.append(
             {
                 "id": f"review-{index + 1}",
+                "itemKey": (
+                    f"{paper.resolve()}::{problem.id}::"
+                    f"{attempt.name if attempt is not None else ''}"
+                ),
                 "problemKey": f"{paper}::{problem.id}",
                 "paperTitle": problem.paper_title,
                 "paperAuthors": list(problem.paper_authors),
@@ -563,6 +585,43 @@ def _html_data(
     return data
 
 
+# Kept for callers of the original private helper.  New code should use the
+# public name so the standalone report and the live workbench share one data
+# model.
+_html_data = build_review_catalog
+
+
+def load_review_contents(item: dict) -> dict[str, str]:
+    """Load the long Markdown fields for one catalog item on demand."""
+    paper = Path(item["paperDirectory"])
+    problem_id = item["problemId"]
+    attempt_value = item.get("attemptDirectory")
+    attempt = Path(attempt_value) if attempt_value else None
+    problem = paper / problem_id
+    return {
+        "problemStatement": _extract_open_problem_markdown(
+            paper / "analysis" / "open-problems.md",
+            problem_id,
+        ),
+        "triageReport": _read_optional_text(
+            problem / common.TRIAGE_MARKDOWN
+        ),
+        "literatureReport": _read_optional_text(
+            problem / common.LITERATURE_MARKDOWN
+        ),
+        "critique": (
+            _read_optional_text(attempt / "critique.md")
+            if attempt is not None
+            else ""
+        ),
+        "solverAttempt": (
+            _read_optional_text(attempt / "attempt.md")
+            if attempt is not None
+            else ""
+        ),
+    }
+
+
 def render_human_review_html(
     items: Sequence[HumanReviewItem],
     *,
@@ -574,7 +633,7 @@ def render_human_review_html(
 ) -> str:
     """Build a local SPA for navigating human reviews."""
     payload = json.dumps(
-        _html_data(
+        build_review_catalog(
             items,
             include_contents=include_contents,
             problems=problems,
@@ -2416,14 +2475,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             if not args.no_open:
                 try:
-                    if sys.platform == "cygwin":
-                        subprocess.Popen(
-                            ["cygstart", codex_cli.path_for_codex(output)],
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL,
-                        )
-                    else:
-                        webbrowser.open(_browser_file_uri(output))
+                    open_in_browser(output)
                 except OSError as exc:
                     print(
                         f"Could not open the browser automatically: {exc}",

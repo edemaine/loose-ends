@@ -745,10 +745,12 @@ def render_writer_prompt(
             "prior draft."
         )
     if revision_instruction is not None:
+        direction_kind = "revision" if previous is not None else "first-draft"
         mode += (
-            "\n\nThe user explicitly requested this revision direction:\n\n"
-            f"<revision_instruction>\n{revision_instruction}\n"
-            "</revision_instruction>\n\n"
+            f"\n\nThe user explicitly requested this {direction_kind} "
+            "writer direction:\n\n"
+            f"<writer_instruction>\n{revision_instruction}\n"
+            "</writer_instruction>\n\n"
             "Follow it throughout this author-review invocation while "
             "preserving mathematical correctness, evidence requirements, "
             "and all independently verified material."
@@ -2016,7 +2018,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--prompt",
         dest="revision_instruction",
         metavar="TEXT",
-        help="explicit revision direction; requires --revise",
+        help="additional direction for the first draft or revision",
     )
     parser.add_argument(
         "--name",
@@ -2108,8 +2110,6 @@ def main(argv: list[str] | None = None) -> int:
         if args.revision_instruction is not None:
             if not args.revision_instruction.strip():
                 raise common.CodexError("--prompt must be nonempty")
-            if not args.revise:
-                raise common.CodexError("--prompt requires --revise")
         if args.refresh_results and not args.revise:
             raise common.CodexError("--refresh-results requires --revise")
         if args.revise:
@@ -2222,7 +2222,7 @@ def main(argv: list[str] | None = None) -> int:
             f"{args.max_rounds} new draft(s)."
         )
         if args.revision_instruction is not None:
-            print(f"Revision direction: {args.revision_instruction}")
+            print(f"Writer direction: {args.revision_instruction}")
         return 0
 
     try:

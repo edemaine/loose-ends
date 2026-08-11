@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Loose Ends Workbench</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.17.0/dist/katex.min.css">
+  <link rel="stylesheet" href="/styles.css">
+  <script src="https://cdn.jsdelivr.net/npm/markdown-it@14.3.0/dist/markdown-it.min.js" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/katex@0.17.0/dist/katex.min.js" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mdit/plugin-katex@1.0.1/dist/cdn.umd.js" defer></script>
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <button class="brand" data-tab="research" aria-label="Loose Ends home">
+      <span class="brand-mark">LE</span>
+      <span><strong>Loose Ends</strong><small>Research workbench</small></span>
+    </button>
+    <nav class="tabs" aria-label="Workbench sections">
+      <button data-tab="research" class="active">Research</button>
+      <button data-tab="papers">Papers</button>
+      <button data-tab="manuscripts">Manuscripts</button>
+      <button data-tab="activity">Activity <span id="activity-count" class="count"></span></button>
+    </nav>
+    <div id="connection" class="connection">Connecting…</div>
+  </header>
+
+  <div id="notice" class="notice" hidden></div>
+  <div class="workspace">
+    <aside id="sidebar" class="sidebar"></aside>
+    <main id="main" class="main"></main>
+  </div>
+  <div id="selection-bar" class="selection-bar" hidden></div>
+
+  <dialog id="task-dialog" class="task-dialog">
+    <form method="dialog" class="dialog-frame" id="task-form">
+      <header class="dialog-header">
+        <div>
+          <div id="dialog-eyebrow" class="eyebrow">New task</div>
+          <h2 id="dialog-title">Configure task</h2>
+        </div>
+        <button value="cancel" class="icon-button" aria-label="Close dialog">×</button>
+      </header>
+      <div id="dialog-body" class="dialog-body"></div>
+      <footer id="dialog-footer" class="dialog-footer"></footer>
+    </form>
+  </dialog>
+
+  <template id="empty-template">
+    <section class="empty-state">
+      <div class="empty-mark">∴</div>
+      <h1>Nothing selected</h1>
+      <p>Choose an item from the left to inspect its state and next actions.</p>
+    </section>
+  </template>
+</body>
+</html>

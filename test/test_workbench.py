@@ -1,0 +1,274 @@
+from pathlib import Path
+import json
+import sys
+from tempfile import TemporaryDirectory
+import threading
+import time
+import unittest
+from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+import open_problem_common as common
+from watchdog.observers import Observer
+from workbench import CatalogManager, ChangeHandler, EventHub
+from workbench_store import WorkbenchStore
+from workbench_tasks import PlanError, build_plan, probe_outputs
+import workbench_worker
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def make_paper(root: Path) -> Path:
+    paper = root / "arXiv-1234.56789v1"
+    (paper / "source").mkdir(parents=True)
+    (paper / "paper.pdf").write_bytes(b"%PDF-test")
+    (paper / "source" / "main.tex").write_text("Test", encoding="utf-8")
+    analysis = paper / "analysis"
+    analysis.mkdir()
+    (analysis / "summary.md").write_text("# Summary", encoding="utf-8")
+    (analysis / "results.md").write_text("# Results", encoding="utf-8")
+    (analysis / "open-problems.md").write_text(
+        "# Problems\n\n## OP-001: Test\n\nSolve it.\n",
+        encoding="utf-8",
+    )
+    common.write_json(
+        analysis / "manifest.json",
+        {
+            "schema_version": 2,
+            "paper_title": "Test Paper",
+            "paper_authors": ["Ada Lovelace"],
+            "open_problems": [
+                {"id": "OP-001", "title": "Test", "explicitness": "explicit"}
+            ],
+        },
+    )
+    return paper
+
+
+def fake_plan(argv: list[str], *, probe: dict | None = None) -> dict:
+    return {
+        "action": "solve",
+        "title": "Fake task",
+        "units": [
+            {
+                "label": "Fake run",
+                "argv": argv,
+                "cwd": str(PROJECT_ROOT),
+                "targets": [],
+                "probe": probe or {},
+            }
+        ],
+    }
+
+
+class WorkbenchPlanningTests(unittest.TestCase):
+    def test_solver_plan_preserves_prompt_round_and_critic_settings(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = make_paper(root)
+            problem = paper / "OP-001"
+            plan = build_plan(
+                {
+                    "action": "solve",
+                    "targets": [
+                        {"kind": "problem", "path": str(problem), "label": "OP-001"}
+                    ],
+                    "options": {
+                        "prompt": "Try small cases.",
+                        "reviewPrompt": "Check the boundary case.",
+                        "maxRounds": 3,
+                        "review": "all",
+                    },
+                },
+                project_root=PROJECT_ROOT,
+                allowed_roots=[root],
+                manuscripts=root / "manuscripts",
+                catalog_version=7,
+            )
+
+            self.assertEqual(plan["catalogVersion"], 7)
+            self.assertEqual(len(plan["units"]), 1)
+            argv = plan["units"][0]["argv"]
+            self.assertEqual(argv[argv.index("--max-rounds") + 1], "3")
+            self.assertEqual(argv[argv.index("--review") + 1], "all")
+            self.assertIn("Try small cases.", argv)
+            self.assertIn("Check the boundary case.", argv)
+
+    def test_triage_groups_problem_targets_by_paper(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = make_paper(root / "first")
+            second = make_paper(root / "second")
+            targets = [
+                {"kind": "problem", "path": str(first / "OP-001")},
+                {"kind": "problem", "path": str(second / "OP-001")},
+            ]
+            plan = build_plan(
+                {"action": "triage", "targets": targets, "options": {}},
+                project_root=PROJECT_ROOT,
+                allowed_roots=[root],
+                manuscripts=root / "manuscripts",
+                catalog_version=1,
+            )
+            self.assertEqual(len(plan["units"]), 2)
+
+    def test_planner_rejects_targets_outside_configured_roots(self):
+        with TemporaryDirectory() as temporary, TemporaryDirectory() as outside:
+            root = Path(temporary)
+            paper = make_paper(Path(outside))
+            with self.assertRaisesRegex(PlanError, "outside the configured roots"):
+                build_plan(
+                    {
+                        "action": "analyze",
+                        "targets": [{"kind": "paper", "path": str(paper)}],
+                        "options": {},
+                    },
+                    project_root=PROJECT_ROOT,
+                    allowed_roots=[root],
+                    manuscripts=root / "manuscripts",
+                    catalog_version=1,
+                )
+
+
+class WorkbenchStoreTests(unittest.TestCase):
+    def test_worker_persists_console_and_success(self):
+        with TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            store = WorkbenchStore(state / "workbench.sqlite3", state)
+            job = store.create_job(
+                {"action": "solve"},
+                fake_plan([sys.executable, "-u", "-c", "print('hello workbench')"]),
+            )
+            run = job["runs"][0]
+            store.mark_starting(run["id"])
+
+            self.assertEqual(
+                workbench_worker.run_worker(store.database, run["id"]),
+                0,
+            )
+
+            saved = store.get_run(run["id"])
+            self.assertEqual(saved["status"], "succeeded")
+            self.assertEqual(saved["exit_code"], 0)
+            self.assertIn(
+                "hello workbench",
+                Path(saved["log_path"]).read_text(encoding="utf-8"),
+            )
+            self.assertEqual(store.get_job(job["id"])["status"], "succeeded")
+
+    def test_partial_solver_output_is_discovered_and_not_blindly_retried(self):
+        with TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            problem = state / "OP-001"
+            problem.mkdir()
+            code = (
+                "from pathlib import Path; import json; "
+                f"p=Path({str(problem)!r})/'attempt-001'; p.mkdir(); "
+                "(p/'solver-result.json').write_text('{}'); raise SystemExit(2)"
+            )
+            store = WorkbenchStore(state / "workbench.sqlite3", state)
+            plan = fake_plan(
+                [sys.executable, "-u", "-c", code],
+                probe={"kind": "solve", "problem": str(problem), "before": []},
+            )
+            job = store.create_job({"action": "solve"}, plan)
+            run = job["runs"][0]
+            store.mark_starting(run["id"])
+            workbench_worker.run_worker(store.database, run["id"])
+
+            saved = store.get_run(run["id"])
+            self.assertEqual(saved["status"], "partial")
+            self.assertEqual(saved["outputs"], [str((problem / "attempt-001").resolve())])
+            with self.assertRaisesRegex(ValueError, "installed output"):
+                store.retry_run(run["id"])
+
+    def test_stale_heartbeat_becomes_interrupted_and_can_retry(self):
+        with TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            store = WorkbenchStore(state / "workbench.sqlite3", state)
+            job = store.create_job(
+                {"action": "solve"},
+                fake_plan([sys.executable, "-c", "pass"]),
+            )
+            run = job["runs"][0]
+            store.mark_starting(run["id"])
+            store.update_run(run["id"], heartbeat_at=time.time() - 100)
+
+            self.assertEqual(store.mark_stale_runs(older_than=10), [run["id"]])
+            self.assertEqual(store.get_run(run["id"])["status"], "interrupted")
+            retry = store.retry_run(run["id"])
+            self.assertEqual(retry["status"], "queued")
+            self.assertEqual(retry["retry_of"], run["id"])
+
+    def test_probe_handles_missing_problem_directory(self):
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "missing"
+            self.assertEqual(
+                probe_outputs({"kind": "solve", "problem": str(path), "before": []}),
+                [],
+            )
+
+
+class WorkbenchWatchTests(unittest.TestCase):
+    def test_initial_catalog_scan_does_not_block_server_startup(self):
+        scan_allowed = threading.Event()
+
+        def slow_paper_inventory(paths):
+            scan_allowed.wait(5)
+            return []
+
+        with TemporaryDirectory() as temporary, patch(
+            "workbench._paper_inventory",
+            side_effect=slow_paper_inventory,
+        ), patch(
+            "workbench._review_inventory",
+            return_value=[],
+        ), patch(
+            "workbench._manuscript_inventory",
+            return_value=[],
+        ):
+            started = time.monotonic()
+            manager = CatalogManager(
+                [Path(temporary)],
+                Path(temporary) / "manuscripts",
+                EventHub(),
+            )
+            try:
+                self.assertLess(time.monotonic() - started, 0.5)
+                self.assertTrue(manager.snapshot()["loading"])
+                scan_allowed.set()
+                self.assertTrue(manager.wait_until_ready(2))
+                self.assertFalse(manager.snapshot()["loading"])
+            finally:
+                scan_allowed.set()
+                manager.close()
+
+    def test_watchdog_change_invalidates_lazy_review_details(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = make_paper(root)
+            manager = CatalogManager([root], root / "manuscripts", EventHub())
+            observer = Observer()
+            observer.schedule(ChangeHandler(manager), str(root), recursive=True)
+            observer.start()
+            self.addCleanup(manager.close)
+            self.addCleanup(observer.join, 5)
+            self.addCleanup(observer.stop)
+            self.assertTrue(manager.wait_until_ready(8))
+            initial = manager.version
+
+            (paper / "analysis" / "open-problems.md").write_text(
+                "# Problems\n\n## OP-001: Test\n\nUpdated statement.\n",
+                encoding="utf-8",
+            )
+            deadline = time.time() + 8
+            while manager.version == initial and time.time() < deadline:
+                time.sleep(0.1)
+
+            self.assertGreater(manager.version, initial)
+
+
+if __name__ == "__main__":
+    unittest.main()

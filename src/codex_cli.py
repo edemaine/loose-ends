@@ -497,6 +497,10 @@ def wait_for_codex_launch_slot(interval: float) -> None:
     """Space process startups while allowing already-started runs to overlap."""
     if interval <= 0:
         return
+    shared_gate = os.environ.get("LOOSE_ENDS_CODEX_LAUNCH_GATE")
+    if shared_gate:
+        _wait_for_shared_launch_slot(Path(shared_gate), interval)
+        return
     global _next_codex_launch_at
     with _CODEX_LAUNCH_LOCK:
         now = time.monotonic()
@@ -504,6 +508,53 @@ def wait_for_codex_launch_slot(interval: float) -> None:
         if delay:
             time.sleep(delay)
         _next_codex_launch_at = time.monotonic() + interval
+
+
+def _wait_for_shared_launch_slot(path: Path, interval: float) -> None:
+    """Coordinate the startup interval across workbench worker processes."""
+    path = path.expanduser().resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+", encoding="ascii") as lock:
+        if os.name == "nt":
+            import msvcrt
+
+            lock.seek(0, os.SEEK_END)
+            if lock.tell() == 0:
+                lock.write("0")
+                lock.flush()
+            while True:
+                try:
+                    lock.seek(0)
+                    msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    time.sleep(0.05)
+            unlock = lambda: msvcrt.locking(
+                lock.fileno(), msvcrt.LK_UNLCK, 1
+            )
+        else:
+            import fcntl
+
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            unlock = lambda: fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        try:
+            lock.seek(0)
+            raw = lock.read().strip()
+            try:
+                next_launch = float(raw)
+            except ValueError:
+                next_launch = 0.0
+            delay = max(0.0, next_launch - time.time())
+            if delay:
+                time.sleep(delay)
+            lock.seek(0)
+            lock.truncate()
+            lock.write(f"{time.time() + interval:.9f}")
+            lock.flush()
+            os.fsync(lock.fileno())
+        finally:
+            lock.seek(0)
+            unlock()
 
 
 def is_transient_startup_failure(

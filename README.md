@@ -2,8 +2,9 @@
 
 Tooling for studying open problems in research papers with large language models.
 
-The Python code uses only the standard library. Downloading papers needs no
-additional package; analyzing them requires the Codex CLI.
+The research CLI tools use only the Python standard library. The live
+workbench additionally uses `watchdog` for efficient filesystem updates.
+Analyzing papers requires the Codex CLI.
 
 ## Download arXiv papers
 
@@ -553,6 +554,14 @@ automatically picks up newly attempted problems and newer attempts, while an
 selectors remain pinned. Existing result IDs stay stable, and new problem
 streams receive new IDs.
 
+Add a human direction to either a first draft or a revision with `--prompt`:
+
+```sh
+python src/write_paper.py \
+  papers/edemaine/arXiv-.../OP-001/attempt-003 \
+  --prompt "Lead with the constructive interpretation of the result"
+```
+
 Without `--name`, a single-source manuscript is named from the paper directory
 and sorted problem IDs, such as
 `manuscripts/arXiv-1406.6576v2_OP-001_OP-004/`. Cross-paper names join those
@@ -706,6 +715,40 @@ Use `--latest-per-problem` to suppress older selected attempts,
 `--output FILE` to choose the dashboard location, or `--no-open` to avoid
 launching the browser. `--terminal` retains the paged Markdown presentation.
 The command only writes its HTML output and never starts a Codex agent.
+
+## Live research workbench
+
+`src/workbench.py` serves the human-review data as a live local dashboard and
+manages persistent CLI tasks. Install its filesystem-watcher dependency, then
+start it on one or more paper roots:
+
+```sh
+python -m pip install -r requirements.txt
+python src/workbench.py papers/edemaine
+```
+
+The workbench opens at `http://localhost:35007/` by default. It watches paper
+and manuscript files with native `watchdog` events, refreshes the selected view
+after external or managed changes, and provides actions for analysis, triage,
+literature search, solving, independent review, paper writing, and revision.
+
+Every task has two launch steps. The first dialog collects optional human
+directions, maximum rounds, review policy, model settings, authors, and other
+task-specific choices. The second shows the exact targets, prompt messages,
+commands, and replacement warnings. No CLI process starts until the final
+confirmation.
+
+Task intent, commands, status, output paths, and console logs are stored under
+the ignored `.loose-ends/` directory. Detached workers continue if only the web
+server restarts. After a machine restart, abandoned heartbeats are marked
+interrupted and runs that installed no output can be retried. A run that
+installed output before a later phase failed is marked partial so the next
+action can operate on that output without accidentally duplicating it.
+
+Use `--max-workers N` to control concurrent CLI invocations, `--no-open` to
+avoid opening a browser, `--port` to select another local port, or
+`--state-dir` to place the private task database and logs elsewhere. For
+security, the server currently accepts only local loopback bindings.
 
 All Codex-backed commands share the analyzer's `--model`,
 `--reasoning-effort`, `--fast`, `--codex`, Cygwin path conversion, Windows ACL

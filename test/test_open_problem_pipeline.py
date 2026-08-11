@@ -1428,6 +1428,22 @@ class OpenProblemPipelineTests(unittest.TestCase):
         )
         self.assertEqual(display, "papers/second.pdf")
 
+    def test_cygwin_browser_opener_uses_graphical_system_browser(self):
+        url = "http://localhost:35007/"
+        with patch.object(
+            human_review.sys,
+            "platform",
+            "cygwin",
+        ), patch.object(human_review.subprocess, "Popen") as popen:
+            opened = human_review.open_in_browser(url)
+
+        self.assertTrue(opened)
+        popen.assert_called_once_with(
+            ["cygstart", url],
+            stdout=human_review.subprocess.DEVNULL,
+            stderr=human_review.subprocess.DEVNULL,
+        )
+
     def test_solver_recovers_core_artifact_mislisting_without_new_turn(self):
         with TemporaryDirectory() as temporary:
             paper = make_analyzed_paper(Path(temporary))
