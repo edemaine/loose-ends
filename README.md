@@ -551,13 +551,13 @@ Every completed draft is independently reviewed. Ordinary major or minor
 writing findings are passed into another complete writing round; mathematical
 or novelty gaps stop with `needs_research`, an unsupported central result stops
 with `invalid`, and `ready_for_expert_review` stops early for manual inspection.
-`--max-rounds` caps the number of new author-review rounds in one invocation
-and defaults to three:
+`-r`/`--max-rounds` caps the number of new author-review rounds in one
+invocation and defaults to one:
 
 ```sh
 python src/write_paper.py \
   papers/edemaine/arXiv-.../OP-001/attempt-003 \
-  --max-rounds 2
+  -r 2
 ```
 
 Drafts are append-only:

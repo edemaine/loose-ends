@@ -1792,7 +1792,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""examples:
-  Write and independently review one paper, revising up to three rounds:
+  Write and independently review one paper in one author-review round:
     python src/write_paper.py \\
       papers/edemaine/arXiv-.../OP-001/attempt-003
 
@@ -1865,12 +1865,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="optional short title to use or refine",
     )
     parser.add_argument(
+        "-r",
         "--max-rounds",
         type=codex_cli.positive_integer,
-        default=3,
+        default=1,
         help=(
             "maximum new author-review rounds in this invocation, including "
-            "the first draft or revision (default: 3)"
+            "the first draft or revision (default: 1)"
         ),
     )
     parser.add_argument(

@@ -363,12 +363,12 @@ class WritePaperTests(unittest.TestCase):
             self.assertEqual(selectors[0]["kind"], "paper")
             self.assertTrue(changed)
 
-    def test_cli_defaults_to_three_live_frontier_rounds(self):
+    def test_cli_defaults_to_one_live_frontier_round(self):
         parsed = write_paper.build_parser().parse_args(["attempt-001"])
         self.assertEqual(parsed.model, "gpt-5.6-sol")
         self.assertEqual(parsed.reasoning_effort, "xhigh")
         self.assertEqual(parsed.web_search, "live")
-        self.assertEqual(parsed.max_rounds, 3)
+        self.assertEqual(parsed.max_rounds, 1)
         self.assertFalse(parsed.refresh_results)
         self.assertIsNone(parsed.authors)
         self.assertEqual(write_paper._metadata([], None)["authors"], [])
@@ -380,6 +380,10 @@ class WritePaperTests(unittest.TestCase):
             revision.prompt_template,
             write_paper.DEFAULT_PROMPT_PATH,
         )
+        short_rounds = write_paper.build_parser().parse_args(
+            ["attempt-001", "-r", "4"]
+        )
+        self.assertEqual(short_rounds.max_rounds, 4)
 
     def test_writer_prompt_includes_explicit_revision_direction(self):
         rendered = write_paper.render_writer_prompt(
