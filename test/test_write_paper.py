@@ -279,12 +279,95 @@ class WritePaperTests(unittest.TestCase):
                 ],
             )
 
+    def test_legacy_pinned_revision_can_refresh_to_whole_paper(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = make_paper(root)
+            first = make_ready_attempt(paper, "OP-001", 1)
+            draft_directory = root / "manuscript" / "draft-001"
+            draft_directory.mkdir(parents=True)
+            common.write_json(
+                draft_directory / "manifest.json",
+                {
+                    "input_attempts": [
+                        {
+                            "result_id": "R-001",
+                            "attempt_path": str(first),
+                            "paper_directory": str(paper),
+                            "problem_id": "OP-001",
+                            "attempt_name": first.name,
+                        }
+                    ]
+                },
+            )
+            draft = write_paper.DraftRef(draft_directory, 1, {})
+            latest = make_ready_attempt(paper, "OP-001", 2)
+            other = make_ready_attempt(paper, "OP-002", 1)
+
+            pinned, _, selectors, _, changed = write_paper._revision_inputs(draft)
+            refreshed, _, refreshed_selectors, _, refreshed_changed = (
+                write_paper._revision_inputs(draft, refresh_results=True)
+            )
+
+            self.assertEqual([item.attempt.directory for item in pinned], [first])
+            self.assertFalse(changed)
+            self.assertEqual(selectors[0]["kind"], "attempt")
+            self.assertEqual(
+                [item.attempt.directory for item in refreshed],
+                [latest, other],
+            )
+            self.assertEqual(
+                [item.result_id for item in refreshed],
+                ["R-001", "R-002"],
+            )
+            self.assertTrue(refreshed_changed)
+            self.assertEqual(
+                refreshed_selectors,
+                [{"kind": "paper", "path": str(paper.resolve())}],
+            )
+
+    def test_paper_scoped_revision_follows_new_results_by_default(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = make_paper(root)
+            first = make_ready_attempt(paper, "OP-001", 1)
+            draft_directory = root / "manuscript" / "draft-001"
+            draft_directory.mkdir(parents=True)
+            common.write_json(
+                draft_directory / "manifest.json",
+                {
+                    "input_selectors": write_paper.input_selectors([paper]),
+                    "input_attempts": [
+                        {
+                            "result_id": "R-001",
+                            "attempt_path": str(first),
+                            "paper_directory": str(paper),
+                            "problem_id": "OP-001",
+                            "attempt_name": first.name,
+                        }
+                    ],
+                },
+            )
+            draft = write_paper.DraftRef(draft_directory, 1, {})
+            latest = make_ready_attempt(paper, "OP-001", 2)
+            other = make_ready_attempt(paper, "OP-002", 1)
+
+            inputs, _, selectors, _, changed = write_paper._revision_inputs(draft)
+
+            self.assertEqual(
+                [item.attempt.directory for item in inputs],
+                [latest, other],
+            )
+            self.assertEqual(selectors[0]["kind"], "paper")
+            self.assertTrue(changed)
+
     def test_cli_defaults_to_three_live_frontier_rounds(self):
         parsed = write_paper.build_parser().parse_args(["attempt-001"])
         self.assertEqual(parsed.model, "gpt-5.6-sol")
         self.assertEqual(parsed.reasoning_effort, "xhigh")
         self.assertEqual(parsed.web_search, "live")
         self.assertEqual(parsed.max_rounds, 3)
+        self.assertFalse(parsed.refresh_results)
         self.assertIsNone(parsed.authors)
         self.assertEqual(write_paper._metadata([], None)["authors"], [])
         revision = write_paper.build_parser().parse_args(
@@ -575,6 +658,7 @@ class WritePaperTests(unittest.TestCase):
                 return workspace / "main.pdf"
 
             options = codex_cli.ModelOptions("test-model", "high", False)
+            selectors = write_paper.input_selectors([attempt])
             with (
                 patch.object(
                     codex_cli,
@@ -590,6 +674,7 @@ class WritePaperTests(unittest.TestCase):
                 outcome = write_paper.run_pipeline(
                     manuscript,
                     inputs,
+                    selectors=selectors,
                     previous=None,
                     authors=["Test Author"],
                     title_hint=None,
@@ -621,6 +706,12 @@ class WritePaperTests(unittest.TestCase):
                     "previous_draft"
                 ],
                 "draft-001",
+            )
+            self.assertEqual(
+                common.read_json(manuscript / "draft-002" / "manifest.json")[
+                    "input_selectors"
+                ],
+                selectors,
             )
             self.assertTrue(
                 (manuscript / "draft-002" / "paper-critique.md").is_file()
@@ -784,6 +875,68 @@ class WritePaperTests(unittest.TestCase):
                 review_schema_path=Path("review-schema.json"),
                 review_config_digest="reviewer",
                 review_options=options,
+            )
+
+        self.assertEqual(calls, ["author", "critic"])
+        self.assertEqual(outcome.reason, "needs_research")
+
+    def test_changed_result_selection_starts_author_before_critic(self):
+        previous = write_paper.DraftRef(
+            Path("draft-001"),
+            1,
+            {"status": "draft_complete"},
+        )
+        revised = write_paper.DraftRef(
+            Path("draft-002"),
+            2,
+            {"status": "draft_complete"},
+        )
+        review = write_paper.PaperReview(
+            revised,
+            {"verdict": "needs_research"},
+        )
+        options = codex_cli.ModelOptions()
+        calls: list[str] = []
+
+        def author_round(*args, **kwargs):
+            calls.append("author")
+            return revised
+
+        def paper_review(*args, **kwargs):
+            calls.append("critic")
+            return review
+
+        with (
+            patch.object(
+                write_paper,
+                "run_author_round",
+                side_effect=author_round,
+            ),
+            patch.object(
+                write_paper,
+                "run_paper_review",
+                side_effect=paper_review,
+            ),
+        ):
+            outcome = write_paper.run_pipeline(
+                Path("manuscript"),
+                [],
+                previous=previous,
+                authors=[],
+                title_hint=None,
+                max_rounds=1,
+                codex="codex",
+                codex_version="test",
+                latexmk="latexmk",
+                prompt_template="prompt",
+                schema_path=Path("paper-schema.json"),
+                config_digest="writer",
+                options=options,
+                review_prompt_template="review prompt",
+                review_schema_path=Path("review-schema.json"),
+                review_config_digest="reviewer",
+                review_options=options,
+                force_author_round=True,
             )
 
         self.assertEqual(calls, ["author", "critic"])

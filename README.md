@@ -512,6 +512,12 @@ problems with no solver attempt produce a warning and remain open-problem
 context rather than result inputs. Supplying an exact `attempt-NNN` path
 continues to pin that attempt while staging only its earlier history.
 
+The selector policy is stored in every draft. On revision, a paper selector
+automatically picks up newly attempted problems and newer attempts, while an
+`OP-NNN` selector follows newer attempts for that problem. Exact attempt
+selectors remain pinned. Existing result IDs stay stable, and new problem
+streams receive new IDs.
+
 Without `--name`, a single-source manuscript is named from the paper directory
 and sorted problem IDs, such as
 `manuscripts/arXiv-1406.6576v2_OP-001_OP-004/`. Cross-paper names join those
@@ -582,6 +588,21 @@ python src/write_paper.py \
   --revise manuscripts/arXiv-..._OP-001/draft-001 \
   --max-rounds 2
 ```
+
+Use `--refresh-results` to promote pinned selectors—including legacy drafts
+created before selector policies were recorded—to their originating paper
+scope. The revision then uses the latest attempt for every attempted problem
+in those papers and includes newly attempted problems. A changed selection
+starts with an author round before critique:
+
+```sh
+python src/write_paper.py \
+  --revise manuscripts/arXiv-..._OP-001/draft-001 \
+  --refresh-results
+```
+
+Combine it with `--dry-run` to inspect the refreshed result IDs and attempt
+paths without starting Codex.
 
 Add a human-directed revision goal with `--prompt`. This starts an author round
 immediately, even if the selected draft has no paper review yet, and retains

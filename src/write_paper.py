@@ -134,32 +134,87 @@ def _attempt_from_path(path: Path) -> review_solutions.AttemptRef:
     return review_solutions.AttemptRef(exact[0], directory, solver_result)
 
 
-def expand_attempt_inputs(paths: Sequence[Path]) -> tuple[list[Path], list[str]]:
-    """Expand paper/problem inputs to their latest available attempts."""
-    attempts: list[Path] = []
-    warnings: list[str] = []
+def input_selectors(paths: Sequence[Path]) -> list[dict]:
+    """Normalize CLI paper/problem/attempt paths into durable selectors."""
+    selectors = []
     for raw_path in paths:
         path = raw_path.expanduser().resolve()
         if ATTEMPT_RE.fullmatch(path.name):
-            attempts.append(path)
-            continue
-        if (
+            kind = "attempt"
+        elif (
             analyze_papers.OPEN_PROBLEM_ID_RE.fullmatch(path.name)
             and (path.parent / "analysis" / "manifest.json").is_file()
         ):
-            problems = common.discover_problem_refs(
-                [path.parent],
-                problem_ids={path.name},
-            )
+            kind = "problem"
         elif (path / "analysis" / "manifest.json").is_file():
-            problems = common.discover_problem_refs([path])
+            kind = "paper"
         else:
             raise common.CodexError(
                 "paper input must name an analyzed paper, an OP-NNN "
                 f"directory, or an attempt-NNN directory: {raw_path}"
             )
+        selectors.append({"kind": kind, "path": str(path)})
+    return selectors
+
+
+def _selector_paper(selector: dict) -> Path:
+    path = Path(selector["path"]).expanduser().resolve()
+    if selector["kind"] == "paper":
+        return path
+    if selector["kind"] == "problem":
+        return path.parent
+    return path.parent.parent
+
+
+def resolve_input_selectors(
+    selectors: Sequence[dict],
+    *,
+    refresh_results: bool = False,
+) -> tuple[list[Path], list[str], list[dict]]:
+    """Resolve durable selectors, optionally promoting all to paper scope."""
+    normalized = []
+    for selector in selectors:
+        if (
+            not isinstance(selector, dict)
+            or selector.get("kind") not in {"paper", "problem", "attempt"}
+            or not isinstance(selector.get("path"), str)
+        ):
+            raise common.CodexError("draft manifest has invalid input selectors")
+        normalized.append(
+            {
+                "kind": selector["kind"],
+                "path": str(Path(selector["path"]).expanduser().resolve()),
+            }
+        )
+    if refresh_results:
+        normalized = [
+            {"kind": "paper", "path": str(_selector_paper(selector))}
+            for selector in normalized
+        ]
+    effective = []
+    seen_selectors: set[tuple[str, str]] = set()
+    for selector in normalized:
+        key = (selector["kind"], os.path.normcase(selector["path"]))
+        if key not in seen_selectors:
+            seen_selectors.add(key)
+            effective.append(selector)
+
+    attempts: list[Path] = []
+    warnings: list[str] = []
+    for selector in effective:
+        path = Path(selector["path"])
+        if selector["kind"] == "attempt":
+            attempts.append(path)
+            continue
+        if selector["kind"] == "problem":
+            problems = common.discover_problem_refs(
+                [path.parent],
+                problem_ids={path.name},
+            )
+        else:
+            problems = common.discover_problem_refs([path])
         if not problems:
-            raise common.CodexError(f"paper input has no open problems: {raw_path}")
+            raise common.CodexError(f"paper input has no open problems: {path}")
         for problem in problems:
             available = common.attempt_directories(problem)
             if available:
@@ -170,6 +225,12 @@ def expand_attempt_inputs(paths: Sequence[Path]) -> tuple[list[Path], list[str]]
                     "no solver attempts; retained only as an open problem, "
                     "not a result input"
                 )
+    return attempts, warnings, effective
+
+
+def expand_attempt_inputs(paths: Sequence[Path]) -> tuple[list[Path], list[str]]:
+    """Expand paper/problem inputs to their latest available attempts."""
+    attempts, warnings, _ = resolve_input_selectors(input_selectors(paths))
     return attempts, warnings
 
 
@@ -259,7 +320,11 @@ def _readiness_issues(attempt: review_solutions.AttemptRef) -> list[str]:
     return issues
 
 
-def load_paper_inputs(attempt_paths: Sequence[Path]) -> list[PaperInput]:
+def load_paper_inputs(
+    attempt_paths: Sequence[Path],
+    *,
+    preferred_result_ids: dict[tuple[str, str], str] | None = None,
+) -> list[PaperInput]:
     if not attempt_paths:
         raise common.CodexError("select at least one solver attempt")
     attempts = [_attempt_from_path(path) for path in attempt_paths]
@@ -273,20 +338,56 @@ def load_paper_inputs(attempt_paths: Sequence[Path]) -> list[PaperInput]:
             attempt.name,
         )
     )
+    preferred_result_ids = preferred_result_ids or {}
+    assigned: dict[tuple[str, str], str] = {}
+    used_result_ids: set[str] = set()
+    for attempt in attempts:
+        key = (
+            os.path.normcase(str(attempt.problem.paper_directory)),
+            attempt.problem.id,
+        )
+        result_id = preferred_result_ids.get(key)
+        if (
+            isinstance(result_id, str)
+            and RESULT_ID_RE.fullmatch(result_id)
+            and result_id not in used_result_ids
+        ):
+            assigned[key] = result_id
+            used_result_ids.add(result_id)
+    next_result_number = max(
+        (int(result_id.removeprefix("R-")) for result_id in used_result_ids),
+        default=0,
+    )
+    for attempt in attempts:
+        key = (
+            os.path.normcase(str(attempt.problem.paper_directory)),
+            attempt.problem.id,
+        )
+        if key in assigned:
+            continue
+        next_result_number += 1
+        result_id = f"R-{next_result_number:03d}"
+        assigned[key] = result_id
+        used_result_ids.add(result_id)
     inputs: list[PaperInput] = []
-    for index, attempt in enumerate(attempts, 1):
+    for attempt in attempts:
         issues = _readiness_issues(attempt)
         review = common.load_json(attempt.directory / "review-result.json") or {}
         literature = common.literature_result(attempt.problem) or {}
+        key = (
+            os.path.normcase(str(attempt.problem.paper_directory)),
+            attempt.problem.id,
+        )
         inputs.append(
             PaperInput(
-                f"R-{index:03d}",
+                assigned[key],
                 attempt,
                 review,
                 literature,
                 tuple(issues),
             )
         )
+    inputs.sort(key=lambda item: int(item.result_id.removeprefix("R-")))
     return inputs
 
 
@@ -1041,6 +1142,7 @@ def _install_draft(
     generated: Sequence[Path],
     draft_number: int,
     inputs: Sequence[PaperInput],
+    selectors: Sequence[dict],
     previous: DraftRef | None,
     authors: Sequence[str],
     title_hint: str | None,
@@ -1080,6 +1182,7 @@ def _install_draft(
                 "generated_at": common.utc_now(),
                 "draft_number": draft_number,
                 "input_digest": _input_digest(inputs),
+                "input_selectors": [dict(selector) for selector in selectors],
                 "input_attempts": [
                     {
                         "result_id": item.result_id,
@@ -1122,6 +1225,7 @@ def run_author_round(
     manuscript_directory: Path,
     inputs: Sequence[PaperInput],
     *,
+    selectors: Sequence[dict],
     previous: DraftRef | None,
     authors: Sequence[str],
     title_hint: str | None,
@@ -1175,6 +1279,7 @@ def run_author_round(
             generated=generated,
             draft_number=draft_number,
             inputs=inputs,
+            selectors=selectors,
             previous=previous,
             authors=authors,
             title_hint=title_hint,
@@ -1413,6 +1518,7 @@ def run_pipeline(
     manuscript_directory: Path,
     inputs: Sequence[PaperInput],
     *,
+    selectors: Sequence[dict] = (),
     previous: DraftRef | None,
     authors: Sequence[str],
     title_hint: str | None,
@@ -1429,13 +1535,18 @@ def run_pipeline(
     review_schema_path: Path,
     review_config_digest: str,
     review_options: codex_cli.ModelOptions,
+    force_author_round: bool = False,
     web_search: str = "live",
     review_web_search: str = "live",
 ) -> PipelineOutcome:
     drafts: list[DraftRef] = []
     final_review: PaperReview | None = None
     current_previous = previous
-    if current_previous is not None and revision_instruction is None:
+    if (
+        current_previous is not None
+        and revision_instruction is None
+        and not force_author_round
+    ):
         reviewed_now = False
         saved_review = (
             common.load_json(current_previous.directory / "paper-review.json")
@@ -1477,6 +1588,7 @@ def run_pipeline(
         draft = run_author_round(
             manuscript_directory,
             inputs,
+            selectors=selectors,
             previous=current_previous,
             authors=authors,
             title_hint=title_hint,
@@ -1535,21 +1647,63 @@ def _load_draft(path: Path) -> DraftRef:
     return DraftRef(directory, int(match.group(1)), result)
 
 
-def _revision_inputs(draft: DraftRef) -> tuple[list[PaperInput], dict]:
+def _revision_inputs(
+    draft: DraftRef,
+    *,
+    refresh_results: bool = False,
+) -> tuple[list[PaperInput], dict, list[dict], list[str], bool]:
     manifest = common.read_json(
         draft.directory / "manifest.json",
         description=f"draft manifest for {draft.directory}",
     )
     records = manifest.get("input_attempts")
     if not isinstance(records, list) or not all(
-        isinstance(record, dict) and isinstance(record.get("attempt_path"), str)
+        isinstance(record, dict)
+        and isinstance(record.get("attempt_path"), str)
+        and isinstance(record.get("problem_id"), str)
+        and isinstance(record.get("result_id"), str)
         for record in records
     ):
         raise common.CodexError("draft manifest has invalid input_attempts")
-    inputs = load_paper_inputs(
-        [Path(record["attempt_path"]) for record in records],
+    selectors = manifest.get("input_selectors")
+    if selectors is None:
+        selectors = [
+            {"kind": "attempt", "path": record["attempt_path"]}
+            for record in records
+        ]
+    if not isinstance(selectors, list):
+        raise common.CodexError("draft manifest has invalid input_selectors")
+    attempt_paths, warnings, effective_selectors = resolve_input_selectors(
+        selectors,
+        refresh_results=refresh_results,
     )
-    return inputs, manifest
+    preferred_result_ids = {}
+    for record in records:
+        attempt = _attempt_from_path(Path(record["attempt_path"]))
+        preferred_result_ids[
+            (
+                os.path.normcase(str(attempt.problem.paper_directory)),
+                record["problem_id"],
+            )
+        ] = record["result_id"]
+    inputs = load_paper_inputs(
+        attempt_paths,
+        preferred_result_ids=preferred_result_ids,
+    )
+    previous_selection = {
+        (record["result_id"], str(Path(record["attempt_path"]).resolve()))
+        for record in records
+    }
+    current_selection = {
+        (item.result_id, str(item.attempt.directory)) for item in inputs
+    }
+    return (
+        inputs,
+        manifest,
+        effective_selectors,
+        warnings,
+        previous_selection != current_selection,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1576,6 +1730,10 @@ def build_parser() -> argparse.ArgumentParser:
   Continue from an independently reviewed draft:
     python src/write_paper.py --revise manuscripts/.../draft-001 \\
       --max-rounds 2
+
+  Refresh a pinned or legacy draft from all latest paper results:
+    python src/write_paper.py --revise manuscripts/.../draft-001 \\
+      --refresh-results
 """,
     )
     parser.add_argument(
@@ -1591,6 +1749,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--revise",
         type=Path,
         help="reviewed draft-NNN to revise instead of starting a manuscript",
+    )
+    parser.add_argument(
+        "--refresh-results",
+        action="store_true",
+        help=(
+            "with --revise, promote stored selectors to paper scope and use "
+            "all latest attempted results"
+        ),
     )
     parser.add_argument(
         "--prompt",
@@ -1688,10 +1854,20 @@ def main(argv: list[str] | None = None) -> int:
                 raise common.CodexError("--prompt must be nonempty")
             if not args.revise:
                 raise common.CodexError("--prompt requires --revise")
+        if args.refresh_results and not args.revise:
+            raise common.CodexError("--refresh-results requires --revise")
         if args.revise:
-            selection_warnings: list[str] = []
             previous = _load_draft(args.revise)
-            inputs, prior_manifest = _revision_inputs(previous)
+            (
+                inputs,
+                prior_manifest,
+                selectors,
+                selection_warnings,
+                selection_changed,
+            ) = _revision_inputs(
+                previous,
+                refresh_results=args.refresh_results,
+            )
             manuscript_directory = previous.directory.parent
             if args.name:
                 raise common.CodexError("--name cannot be used with --revise")
@@ -1703,8 +1879,12 @@ def main(argv: list[str] | None = None) -> int:
             )
         else:
             previous = None
-            attempt_paths, selection_warnings = expand_attempt_inputs(args.attempts)
+            selectors = input_selectors(args.attempts)
+            attempt_paths, selection_warnings, selectors = resolve_input_selectors(
+                selectors
+            )
             inputs = load_paper_inputs(attempt_paths)
+            selection_changed = False
             name = validate_manuscript_name(
                 args.name or derive_manuscript_name(inputs)
             )
@@ -1764,6 +1944,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.dry_run:
         print(f"Would write one manuscript: {manuscript_directory}")
+        if selection_changed:
+            print("  result selection changed; an author round will run first")
         for warning in selection_warnings:
             print(f"  warning: {warning}")
         for item in inputs:
@@ -1791,6 +1973,11 @@ def main(argv: list[str] | None = None) -> int:
             f"with at most {args.max_rounds} author-review round(s).",
             flush=True,
         )
+        if selection_changed:
+            print(
+                "Result selection changed; starting with an author round.",
+                flush=True,
+            )
         warning_rows = [*selection_warnings]
         warning_rows.extend(
             f"{item.attempt.problem.paper_directory.name}/"
@@ -1805,6 +1992,7 @@ def main(argv: list[str] | None = None) -> int:
         outcome = run_pipeline(
             manuscript_directory,
             inputs,
+            selectors=selectors,
             previous=previous,
             authors=authors,
             title_hint=title_hint,
@@ -1821,6 +2009,7 @@ def main(argv: list[str] | None = None) -> int:
             review_schema_path=review_schema_path,
             review_config_digest=review_config_digest,
             review_options=review_options,
+            force_author_round=selection_changed,
             web_search=args.web_search,
             review_web_search=review_web_search,
         )
