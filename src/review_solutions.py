@@ -794,7 +794,7 @@ def main(argv: list[str] | None = None) -> int:
         UnicodeError,
         json.JSONDecodeError,
     ) as exc:
-        parser.error(str(exc))
+        return codex_cli.report_error(parser, exc)
 
     eligible = [
         attempt
@@ -844,7 +844,7 @@ def main(argv: list[str] | None = None) -> int:
             codex = codex_cli.resolve_codex_executable(args.codex)
             codex_version = codex_cli.read_codex_version(codex)
         except common.CodexError as exc:
-            parser.error(str(exc))
+            return codex_cli.report_error(parser, exc)
         print(
             f"Reviewing {len(pending)} attempt(s), with up to "
             f"{min(args.jobs, len(pending))} Codex critic(s) at once."

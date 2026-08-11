@@ -846,7 +846,7 @@ def main(argv: list[str] | None = None) -> int:
         UnicodeError,
         json.JSONDecodeError,
     ) as exc:
-        parser.error(str(exc))
+        return codex_cli.report_error(parser, exc)
 
     current: list[LiteratureOutcome] = []
     stale: list[common.ProblemRef] = []
@@ -886,7 +886,7 @@ def main(argv: list[str] | None = None) -> int:
             codex = codex_cli.resolve_codex_executable(args.codex)
             codex_version = codex_cli.read_codex_version(codex)
         except common.CodexError as exc:
-            parser.error(str(exc))
+            return codex_cli.report_error(parser, exc)
     else:
         codex = args.codex
         codex_version = "not queried"

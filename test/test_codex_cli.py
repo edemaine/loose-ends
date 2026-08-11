@@ -1,3 +1,5 @@
+import argparse
+from contextlib import redirect_stderr
 from io import StringIO
 from pathlib import Path
 import subprocess
@@ -12,6 +14,53 @@ import codex_cli
 
 
 class CodexCliTests(unittest.TestCase):
+    def test_reports_post_parse_error_without_usage(self):
+        parser = argparse.ArgumentParser(prog="test-tool.py")
+        error_output = StringIO()
+
+        with redirect_stderr(error_output):
+            returncode = codex_cli.report_error(
+                parser,
+                codex_cli.CodexError("the operation failed"),
+            )
+
+        self.assertEqual(returncode, 1)
+        self.assertEqual(
+            error_output.getvalue(),
+            "test-tool.py: error: the operation failed\n",
+        )
+
+    def test_windows_reserved_device_names(self):
+        for name in ("NUL", "nul.txt", "COM1", "LPT9.log", "aux. "):
+            with self.subTest(name=name):
+                self.assertTrue(
+                    codex_cli._is_windows_reserved_device_name(name)
+                )
+        for name in ("NULL", "COM10", "NUL-file", "results.txt"):
+            with self.subTest(name=name):
+                self.assertFalse(
+                    codex_cli._is_windows_reserved_device_name(name)
+                )
+
+    def test_access_check_skips_windows_reserved_device_entries(self):
+        with (
+            TemporaryDirectory() as temporary,
+            patch.object(codex_cli, "is_windows_host", return_value=True),
+            patch.object(
+                codex_cli.os,
+                "walk",
+                return_value=[(temporary, [], ["NUL"])],
+            ),
+            patch.object(
+                codex_cli.Path,
+                "stat",
+                side_effect=AssertionError("reserved entry was inspected"),
+            ),
+        ):
+            self.assertTrue(
+                codex_cli.workspace_is_user_accessible(Path(temporary))
+            )
+
     def test_recognizes_completed_structured_turn(self):
         with TemporaryDirectory() as temporary:
             workspace = Path(temporary)

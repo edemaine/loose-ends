@@ -906,7 +906,7 @@ def main(argv: list[str] | None = None) -> int:
         UnicodeError,
         json.JSONDecodeError,
     ) as exc:
-        parser.error(str(exc))
+        return codex_cli.report_error(parser, exc)
 
     if args.dry_run:
         for work in work_items:
@@ -940,7 +940,7 @@ def main(argv: list[str] | None = None) -> int:
         codex = codex_cli.resolve_codex_executable(args.codex)
         codex_version = codex_cli.read_codex_version(codex)
     except common.CodexError as exc:
-        parser.error(str(exc))
+        return codex_cli.report_error(parser, exc)
     agent_count = min(args.jobs, len(work_items))
     if agent_count == 1:
         concurrency = "sequentially with 1 Codex agent"

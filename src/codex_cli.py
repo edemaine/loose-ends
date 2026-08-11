@@ -28,6 +28,14 @@ CODEX_POLL_INTERVAL_SECONDS = 0.5
 CODEX_STOP_GRACE_SECONDS = 10.0
 _CODEX_LAUNCH_LOCK = threading.Lock()
 _next_codex_launch_at = 0.0
+_WINDOWS_RESERVED_DEVICE_NAMES = {
+    "aux",
+    "con",
+    "nul",
+    "prn",
+    *(f"com{number}" for number in range(1, 10)),
+    *(f"lpt{number}" for number in range(1, 10)),
+}
 
 
 class CodexError(RuntimeError):
@@ -47,6 +55,12 @@ def configure_utf8_stdio() -> None:
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is not None:
             reconfigure(encoding="utf-8", errors="backslashreplace")
+
+
+def report_error(parser: argparse.ArgumentParser, error: BaseException) -> int:
+    """Report a post-parse failure without printing irrelevant CLI usage."""
+    print(f"{parser.prog}: error: {error}", file=sys.stderr)
+    return 1
 
 
 def positive_integer(value: str) -> int:
@@ -355,16 +369,36 @@ def grant_sandbox_read_access(path: Path) -> None:
     )
 
 
+def _is_windows_reserved_device_name(name: str) -> bool:
+    """Recognize names that Win32 resolves as devices instead of files."""
+    basename = name.rstrip(" .").split(".", 1)[0].rstrip(" ").casefold()
+    return basename in _WINDOWS_RESERVED_DEVICE_NAMES
+
+
 def workspace_is_user_accessible(workspace: Path) -> bool:
     """Return whether the invoking user can traverse and read a workspace."""
     try:
         def raise_walk_error(error: OSError) -> None:
             raise error
 
+        windows_host = is_windows_host()
         for root, directories, filenames in os.walk(
             workspace,
             onerror=raise_walk_error,
         ):
+            if windows_host:
+                # Cygwin can create names such as NUL via shell redirection,
+                # but Win32 cannot open them and no pipeline can consume them.
+                directories[:] = [
+                    name
+                    for name in directories
+                    if not _is_windows_reserved_device_name(name)
+                ]
+                filenames = [
+                    name
+                    for name in filenames
+                    if not _is_windows_reserved_device_name(name)
+                ]
             root_path = Path(root)
             for name in directories:
                 (root_path / name).stat()

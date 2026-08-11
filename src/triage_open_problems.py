@@ -563,7 +563,7 @@ def main(argv: list[str] | None = None) -> int:
         UnicodeError,
         json.JSONDecodeError,
     ) as exc:
-        parser.error(str(exc))
+        return codex_cli.report_error(parser, exc)
 
     if repaired_directory_count:
         noun = (
@@ -617,7 +617,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             codex_version = codex_cli.read_codex_version(codex)
         except common.CodexError as exc:
-            parser.error(str(exc))
+            return codex_cli.report_error(parser, exc)
     else:
         codex = repaired_codex or args.codex
         codex_version = "not queried"

@@ -696,7 +696,7 @@ def main(argv: list[str] | None = None) -> int:
         UnicodeError,
         json.JSONDecodeError,
     ) as exc:
-        parser.error(str(exc))
+        return codex_cli.report_error(parser, exc)
 
     if args.recover_complete:
         print(

@@ -1871,7 +1871,7 @@ def main(argv: list[str] | None = None) -> int:
                         file=sys.stderr,
                     )
     except (common.CodexError, OSError, UnicodeError) as exc:
-        parser.error(str(exc))
+        return codex_cli.report_error(parser, exc)
     return 0
 
 
