@@ -1068,6 +1068,12 @@ def render_human_review_html(
       document.getElementById("review-data").textContent
     );
     const state = { selectedProblem: "", selectedItem: "", tab: "attempt" };
+    const pageScrollPositions = new Map();
+    let renderedItemId = "";
+    let scrollUpdateFrame = null;
+    if ("scrollRestoration" in history) {
+      history.scrollRestoration = "manual";
+    }
     const search = document.getElementById("search");
     const claimFilter = document.getElementById("claim-filter");
     const correctnessFilter = document.getElementById("correctness-filter");
@@ -1293,6 +1299,70 @@ def render_human_review_html(
       return body;
     }
 
+    function historyPayload(scrollY = window.scrollY) {
+      return {
+        humanReview: true,
+        selectedProblem: state.selectedProblem,
+        selectedItem: state.selectedItem,
+        tab: state.tab,
+        scrollY
+      };
+    }
+
+    function itemUrl(itemId) {
+      return itemId ? `#${encodeURIComponent(itemId)}` : "#";
+    }
+
+    function rememberCurrentScroll({ updateHistory = true } = {}) {
+      if (!renderedItemId) return;
+      const scrollY = window.scrollY;
+      pageScrollPositions.set(renderedItemId, scrollY);
+      if (
+        updateHistory &&
+        history.state?.humanReview &&
+        history.state.selectedItem === renderedItemId
+      ) {
+        history.replaceState(
+          historyPayload(scrollY),
+          "",
+          itemUrl(renderedItemId)
+        );
+      }
+    }
+
+    function restorePageScroll(itemId, preferredScroll) {
+      const scrollY = Number.isFinite(preferredScroll)
+        ? preferredScroll
+        : pageScrollPositions.get(itemId) ?? 0;
+      pageScrollPositions.set(itemId, scrollY);
+      requestAnimationFrame(() => {
+        window.scrollTo({ top: scrollY, left: 0, behavior: "auto" });
+      });
+      return scrollY;
+    }
+
+    function navigateToItem(item) {
+      if (!item) return;
+      rememberCurrentScroll();
+      state.selectedProblem = item.problemKey;
+      state.selectedItem = item.id;
+      state.tab = "attempt";
+      render();
+      renderedItemId = state.selectedItem;
+      const scrollY = pageScrollPositions.get(renderedItemId) ?? 0;
+      const historyMethod =
+        history.state?.humanReview &&
+        history.state.selectedItem === renderedItemId
+          ? "replaceState"
+          : "pushState";
+      history[historyMethod](
+        historyPayload(scrollY),
+        "",
+        itemUrl(renderedItemId)
+      );
+      restorePageScroll(renderedItemId, scrollY);
+    }
+
     function renderProblemControls(items) {
       const problems = latestProblems(items);
       if (!problems.some(item => item.problemKey === state.selectedProblem)) {
@@ -1342,11 +1412,7 @@ def render_human_review_html(
             )
           );
           button.addEventListener("click", () => {
-            state.selectedProblem = item.problemKey;
-            state.selectedItem = problemAttempts[0]?.id || "";
-            state.tab = "attempt";
-            if (state.selectedItem) location.hash = state.selectedItem;
-            render();
+            navigateToItem(problemAttempts[0]);
           });
           section.append(button);
         });
@@ -1369,10 +1435,7 @@ def render_human_review_html(
         button.append(node("strong", "", item.attemptName));
         appendAttemptTags(button, item);
         button.addEventListener("click", () => {
-          state.selectedItem = item.id;
-          state.tab = "attempt";
-          location.hash = item.id;
-          render();
+          navigateToItem(item);
         });
         attemptList.append(button);
       });
@@ -1520,8 +1583,14 @@ def render_human_review_html(
         );
         button.type = "button";
         button.addEventListener("click", () => {
+          rememberCurrentScroll();
           state.tab = key;
           renderReview(item);
+          history.replaceState(
+            historyPayload(window.scrollY),
+            "",
+            itemUrl(state.selectedItem)
+          );
         });
         tabs.append(button);
       });
@@ -1597,9 +1666,21 @@ def render_human_review_html(
     }
 
     function updateFilters() {
+      rememberCurrentScroll();
       state.selectedProblem = "";
       state.selectedItem = "";
+      state.tab = "attempt";
       render();
+      renderedItemId = state.selectedItem;
+      if (renderedItemId) {
+        const scrollY = pageScrollPositions.get(renderedItemId) ?? 0;
+        history.replaceState(
+          historyPayload(scrollY),
+          "",
+          itemUrl(renderedItemId)
+        );
+        restorePageScroll(renderedItemId, scrollY);
+      }
     }
     search.addEventListener("input", updateFilters);
     claimFilter.addEventListener("change", updateFilters);
@@ -1614,7 +1695,38 @@ def render_human_review_html(
     none.addEventListener("change", updateFilters);
     current.addEventListener("change", updateFilters);
     stale.addEventListener("change", updateFilters);
-    const requested = location.hash.slice(1);
+    window.addEventListener("scroll", () => {
+      if (scrollUpdateFrame !== null) return;
+      scrollUpdateFrame = requestAnimationFrame(() => {
+        scrollUpdateFrame = null;
+        rememberCurrentScroll();
+      });
+    }, { passive: true });
+
+    window.addEventListener("popstate", event => {
+      rememberCurrentScroll({ updateHistory: false });
+      const requested = event.state?.humanReview
+        ? event.state.selectedItem
+        : decodeURIComponent(location.hash.slice(1));
+      const requestedItem = allItems.find(item => item.id === requested);
+      if (!requestedItem) return;
+      state.selectedProblem = requestedItem.problemKey;
+      state.selectedItem = requestedItem.id;
+      state.tab = event.state?.humanReview
+        ? event.state.tab || "attempt"
+        : "attempt";
+      render();
+      renderedItemId = state.selectedItem;
+      const storedScroll =
+        event.state?.humanReview &&
+        event.state.selectedItem === renderedItemId &&
+        Number.isFinite(event.state.scrollY)
+          ? event.state.scrollY
+          : pageScrollPositions.get(renderedItemId);
+      restorePageScroll(renderedItemId, storedScroll);
+    });
+
+    const requested = decodeURIComponent(location.hash.slice(1));
     const requestedItem = allItems.find(item => item.id === requested);
     if (requestedItem) {
       state.selectedProblem = requestedItem.problemKey;
@@ -1629,6 +1741,21 @@ def render_human_review_html(
     document.getElementById("filter-stale-wrap").hidden =
       !allItems.some(item => !item.current);
     render();
+    renderedItemId = state.selectedItem;
+    const initialScroll =
+      history.state?.humanReview &&
+      history.state.selectedItem === renderedItemId &&
+      Number.isFinite(history.state.scrollY)
+        ? history.state.scrollY
+        : 0;
+    if (renderedItemId) {
+      history.replaceState(
+        historyPayload(initialScroll),
+        "",
+        itemUrl(renderedItemId)
+      );
+      restorePageScroll(renderedItemId, initialScroll);
+    }
   </script>
 </body>
 </html>
