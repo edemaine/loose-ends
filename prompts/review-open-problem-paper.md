@@ -15,6 +15,13 @@ paper as written. The earlier solver and paper writer are evidence, not truth.
 Try to falsify each main theorem and check it against the exact original
 problem before accepting it.
 
+Assess each `R-###` according to the result the manuscript actually advertises
+under its stated scope. If every advertised theorem and limitation is
+supported, use `supported` even when the paper deliberately answers only part
+of a broader or open-ended originating program. Use `partially_supported` only
+when some material part of the advertised manuscript result lacks support, and
+describe that issue in a finding unless it is purely editorial.
+
 When a result entry lists `prior_attempts`, inspect those earlier attempts,
 artifacts, and reviews too. Verify every historical construction or lemma on
 which the selected attempt or manuscript relies; do not assume that selection

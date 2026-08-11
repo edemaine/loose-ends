@@ -444,9 +444,6 @@ reconstruction of published work is still mathematically a `solution`.
 External sources actually used are recorded, while literature provenance is
 owned by `literature_review.py`. Code, data, and auxiliary derivations can be
 retained under `artifacts/`.
-Repositories containing pre-migration attempts can rewrite them once with
-`python src/migrate_solver_claims.py papers --apply`; the old solver status and
-novelty label are retained only as audit metadata in each attempt manifest.
 If a completed Codex turn is preserved because driver validation or
 installation fails, retrying the same solve command recovers the matching
 `.solve-run-*` workspace before starting another model turn.

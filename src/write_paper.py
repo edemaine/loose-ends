@@ -1630,9 +1630,13 @@ def validate_paper_review(
     if verdict == "ready_for_expert_review":
         if action != "human_review" or any(
             finding["severity"] in {"blocking", "major"} for finding in findings
-        ) or any(review["assessment"] != "supported" for review in reviews):
+        ) or any(
+            review["assessment"] in {"unsupported", "incorrect"}
+            for review in reviews
+        ):
             raise common.CodexError(
-                "ready_for_expert_review has major findings or wrong action"
+                "ready_for_expert_review has an incompatible action, major "
+                "finding, or unsupported result"
             )
     if verdict in REVISION_VERDICTS and (action != "revise" or not findings):
         raise common.CodexError(

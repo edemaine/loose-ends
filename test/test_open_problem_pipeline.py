@@ -2,7 +2,6 @@ from pathlib import Path
 from contextlib import redirect_stdout
 from io import StringIO
 import json
-import os
 import sys
 from tempfile import TemporaryDirectory
 import unittest
@@ -16,8 +15,6 @@ import human_review
 import open_problem_common as common
 import review_solutions
 import literature_review
-import migrate_problem_directories
-import migrate_solver_claims
 import solve_open_problems
 import triage_open_problems
 
@@ -78,57 +75,6 @@ def write_run_files(workspace: Path) -> None:
 
 
 class OpenProblemPipelineTests(unittest.TestCase):
-    def test_legacy_solver_migration_preserves_audit_metadata(self):
-        with TemporaryDirectory() as temporary:
-            paper = make_analyzed_paper(Path(temporary))
-            problem = common.discover_problem_refs(
-                [paper], problem_ids={"OP-001"}
-            )[0]
-            attempt = problem.directory / "attempt-001"
-            attempt.mkdir(parents=True)
-            common.write_json(
-                attempt / "solver-result.json",
-                {
-                    "status": "known_resolution",
-                    "novelty_status": "known_result_reconstruction",
-                    "summary": "Reconstructed a theorem.",
-                    "external_sources": [],
-                    "checkable_claims": [{"id": "C-001"}],
-                    "artifacts": [],
-                    "warnings": [],
-                },
-            )
-            common.write_json(
-                attempt / "manifest.json",
-                {"schema_version": 2, "status": "known_resolution"},
-            )
-
-            self.assertEqual(
-                migrate_solver_claims.migrate_result(
-                    attempt / "solver-result.json", apply=False
-                ),
-                "known_resolution -> solution",
-            )
-            self.assertIn(
-                "status",
-                common.read_json(attempt / "solver-result.json"),
-            )
-            migrate_solver_claims.migrate_result(
-                attempt / "solver-result.json", apply=True
-            )
-            result = common.read_json(attempt / "solver-result.json")
-            manifest = common.read_json(attempt / "manifest.json")
-            self.assertEqual(result["claimed_result_type"], "solution")
-            self.assertNotIn("status", result)
-            self.assertNotIn("novelty_status", result)
-            self.assertEqual(
-                manifest["legacy_solver_status"], "known_resolution"
-            )
-            self.assertEqual(
-                manifest["legacy_solver_novelty_status"],
-                "known_result_reconstruction",
-            )
-
     def test_human_priority_is_derived_from_merit_axes(self):
         base = {
             "correctness": "plausible",
@@ -1939,47 +1885,6 @@ class OpenProblemPipelineTests(unittest.TestCase):
                     )
                 self.assertEqual(returncode, 0)
                 self.assertIn(expected, output.getvalue())
-
-    def test_problem_directory_migration_flattens_layout(self):
-        with TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            paper = make_analyzed_paper(root / "papers")
-            legacy = paper / "attempts"
-            attempt = legacy / "OP-001" / "attempt-001"
-            attempt.mkdir(parents=True)
-            run = legacy / ".triage-run-preserved"
-            run.mkdir()
-            manuscripts = root / "manuscripts"
-            manuscript = manuscripts / "draft-001" / "manifest.json"
-            manuscript.parent.mkdir(parents=True)
-            common.write_json(
-                manuscript,
-                {
-                    "input_attempts": [
-                        {"attempt_path": str(attempt.resolve())}
-                    ]
-                },
-            )
-
-            returncode = migrate_problem_directories.main(
-                [
-                    str(root / "papers"),
-                    "--manuscripts",
-                    str(manuscripts),
-                    "--apply",
-                ]
-            )
-
-            self.assertEqual(returncode, 0)
-            self.assertFalse(legacy.exists())
-            self.assertTrue((paper / "OP-001" / "attempt-001").is_dir())
-            self.assertTrue(
-                (paper / ".runs" / ".triage-run-preserved").is_dir()
-            )
-            saved_path = common.read_json(manuscript)["input_attempts"][0][
-                "attempt_path"
-            ]
-            self.assertNotIn(f"{os.sep}attempts{os.sep}", saved_path)
 
     def test_step_based_triage_manifest_is_deliberately_stale(self):
         with TemporaryDirectory() as temporary:

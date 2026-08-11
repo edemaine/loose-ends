@@ -819,8 +819,12 @@ class WritePaperTests(unittest.TestCase):
                             "result_reviews": [
                                 {
                                     "result_id": "R-001",
-                                    "assessment": "supported",
-                                    "explanation": "The result is supported.",
+                                    "assessment": "partially_supported",
+                                    "explanation": (
+                                        "Every stated theorem is supported; "
+                                        "the result intentionally answers only "
+                                        "part of a broader program."
+                                    ),
                                 }
                             ],
                             "findings": [],
