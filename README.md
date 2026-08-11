@@ -641,19 +641,25 @@ human expert review, never an assertion that the paper is publication-ready.
 
 ## Human review
 
-`src/human_review.py` turns the derived high- and medium-priority
-recommendations into a local HTML dashboard:
+`src/human_review.py` turns the extracted open problems, solver attempts, and
+critic reviews into a local HTML dashboard:
 
 ```sh
 python src/human_review.py papers/edemaine
 ```
 
-The command writes `human-review.html` and opens it in a browser. Independent
-filters cover solver claim type, critic correctness, reviewed coverage,
-importance, verification confidence, derived human priority, literature
-status, and current versus stale/legacy review state. They can, for example,
-show well-supported solution claims of major importance while excluding
-problems already resolved in the literature. Literature filters distinguish
+The command writes `human-review.html` and opens it in a browser. Every
+extracted problem appears, including problems with no solver attempt and
+attempts still awaiting a critic. The Attempt status filter switches among
+unattempted, attempted/unreviewed, and reviewed problems; all three are shown
+by default. Unattempted views still include the full problem statement,
+triage and literature context, paper analysis links, and relevant files.
+
+Independent filters also cover solver claim type, critic correctness, reviewed
+coverage, importance, verification confidence, derived human priority,
+literature status, and current versus stale/legacy review state. They can, for
+example, show well-supported solution claims of major importance while
+excluding problems already resolved in the literature. Literature filters distinguish
 full and partial resolutions, no resolution found, uncertainty, and missing
 literature review. Current and stale review toggles are both enabled by default;
 stale and legacy assessments are visibly labeled. An always-visible
@@ -668,8 +674,9 @@ structured records, and artifacts. The browser loads
 Markdown-it and its KaTeX plugin to render Markdown and math in one parsing
 pass, supporting `\(...\)`, `\[...\]`, `$...$`, and `$$...$$` delimiters.
 Papers are alphabetical by title, problems are numeric by ID, and attempts are
-newest first. Each problem card shows the newest visible attempt's claim type,
-correctness, coverage, and importance, plus the total number of attempts.
+newest first. Each problem card shows its attempt status and total number of
+attempts. Reviewed cards additionally show claim type, correctness, coverage,
+and importance; unreviewed attempts show their solver claim type.
 
 Use `--latest-per-problem` to suppress older selected attempts,
 `--summary-only` for a compact index, `--priority high` to narrow the queue,

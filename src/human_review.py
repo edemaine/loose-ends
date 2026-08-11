@@ -58,12 +58,26 @@ def discover_human_reviews(
     attempt_names: set[str] | None = None,
     include_stale: bool = True,
     latest_per_problem: bool = False,
+    allow_empty: bool = False,
 ) -> list[HumanReviewItem]:
     """Find reviewed attempts selected for human inspection."""
-    attempts = review_solutions.discover_attempt_refs(
-        problems,
-        attempt_names=attempt_names,
-    )
+    attempts: list[review_solutions.AttemptRef] = []
+    for problem in problems:
+        for directory in common.attempt_directories(problem):
+            if (
+                attempt_names is not None
+                and directory.name not in attempt_names
+            ):
+                continue
+            result = common.read_json(
+                directory / "solver-result.json",
+                description=(
+                    f"solver result for {problem.id}/{directory.name}"
+                ),
+            )
+            attempts.append(
+                review_solutions.AttemptRef(problem, directory, result)
+            )
     items: list[HumanReviewItem] = []
     for attempt in attempts:
         result_path = attempt.directory / "review-result.json"
@@ -108,7 +122,7 @@ def discover_human_reviews(
             -_attempt_number(item.attempt),
         )
     )
-    if not items:
+    if not items and not allow_empty:
         levels = ", ".join(
             sorted(priority, key=PRIORITY_RANK.__getitem__)
         )
@@ -131,30 +145,47 @@ def _append_list(
     lines.append("")
 
 
-def _relevant_paths(item: HumanReviewItem) -> list[Path]:
-    attempt = item.attempt
-    paper = attempt.problem.paper_directory
+def _relevant_problem_paths(
+    problem: common.ProblemRef,
+    attempt: review_solutions.AttemptRef | None = None,
+) -> list[Path]:
+    paper = problem.paper_directory
     paths = [
         paper / "paper.pdf",
         paper / "analysis" / "summary.md",
         paper / "analysis" / "results.md",
         paper / "analysis" / "open-problems.md",
-        attempt.problem.directory / common.LITERATURE_MARKDOWN,
-        attempt.problem.directory / common.LITERATURE_RESULT,
-        attempt.directory / "attempt.md",
-        attempt.directory / "solver-result.json",
-        attempt.directory / "critique.md",
-        attempt.directory / "review-result.json",
+        problem.directory / common.TRIAGE_MARKDOWN,
+        problem.directory / common.TRIAGE_RESULT,
+        problem.directory / common.LITERATURE_MARKDOWN,
+        problem.directory / common.LITERATURE_RESULT,
     ]
-    artifacts = attempt.directory / "artifacts"
-    if artifacts.is_dir():
+    if attempt is not None:
         paths.extend(
-            sorted(
-                (path for path in artifacts.rglob("*") if path.is_file()),
-                key=lambda path: path.as_posix(),
+            (
+                attempt.directory / "attempt.md",
+                attempt.directory / "solver-result.json",
+                attempt.directory / "critique.md",
+                attempt.directory / "review-result.json",
             )
         )
+        artifacts = attempt.directory / "artifacts"
+        if artifacts.is_dir():
+            paths.extend(
+                sorted(
+                    (
+                        path
+                        for path in artifacts.rglob("*")
+                        if path.is_file()
+                    ),
+                    key=lambda path: path.as_posix(),
+                )
+            )
     return [path for path in paths if path.is_file()]
+
+
+def _relevant_paths(item: HumanReviewItem) -> list[Path]:
+    return _relevant_problem_paths(item.attempt.problem, item.attempt)
 
 
 def _append_file_contents(
@@ -245,15 +276,130 @@ def _html_data(
     items: Sequence[HumanReviewItem],
     *,
     include_contents: bool,
+    problems: Sequence[common.ProblemRef] | None = None,
+    attempt_names: set[str] | None = None,
+    latest_per_problem: bool = False,
 ) -> list[dict]:
     data: list[dict] = []
     problem_statements: dict[tuple[Path, str], str] = {}
     problem_attempt_counts: dict[tuple[Path, str], int] = {}
-    for index, item in enumerate(items):
-        attempt = item.attempt
-        problem = attempt.problem
+    reviewed = {
+        item.attempt.directory: item
+        for item in items
+    }
+    rows: list[
+        tuple[
+            common.ProblemRef,
+            review_solutions.AttemptRef | None,
+            HumanReviewItem | None,
+        ]
+    ] = []
+    if problems is None:
+        rows.extend((item.attempt.problem, item.attempt, item) for item in items)
+    else:
+        for problem in problems:
+            all_attempts = common.attempt_directories(problem)
+            attempts = [
+                directory
+                for directory in all_attempts
+                if attempt_names is None or directory.name in attempt_names
+            ]
+            if not attempts:
+                if attempt_names is None and not all_attempts:
+                    rows.append((problem, None, None))
+                continue
+            added = False
+            for directory in attempts:
+                item = reviewed.get(directory)
+                if item is not None:
+                    rows.append((problem, item.attempt, item))
+                    added = True
+                    continue
+                if (directory / "review-result.json").is_file():
+                    continue
+                solver_result = common.read_json(
+                    directory / "solver-result.json",
+                    description=(
+                        f"solver result for {problem.id}/{directory.name}"
+                    ),
+                )
+                rows.append(
+                    (
+                        problem,
+                        review_solutions.AttemptRef(
+                            problem,
+                            directory,
+                            solver_result,
+                        ),
+                        None,
+                    )
+                )
+                added = True
+            if not added:
+                # Reviews filtered by freshness or explicit attempt selection
+                # are effectively awaiting an applicable review.
+                directory = attempts[-1]
+                solver_result = common.read_json(
+                    directory / "solver-result.json",
+                    description=(
+                        f"solver result for {problem.id}/{directory.name}"
+                    ),
+                )
+                rows.append(
+                    (
+                        problem,
+                        review_solutions.AttemptRef(
+                            problem,
+                            directory,
+                            solver_result,
+                        ),
+                        None,
+                    )
+                )
+
+    if latest_per_problem:
+        latest_rows: dict[
+            tuple[Path, str],
+            tuple[
+                common.ProblemRef,
+                review_solutions.AttemptRef | None,
+                HumanReviewItem | None,
+            ],
+        ] = {}
+        for row in rows:
+            problem, attempt, _ = row
+            key = (problem.paper_directory, problem.id)
+            previous = latest_rows.get(key)
+            previous_attempt = previous[1] if previous is not None else None
+            if previous is None or (
+                attempt is not None
+                and (
+                    previous_attempt is None
+                    or _attempt_number(attempt)
+                    > _attempt_number(previous_attempt)
+                )
+            ):
+                latest_rows[key] = row
+        rows = list(latest_rows.values())
+
+    for index, (problem, attempt, item) in enumerate(rows):
         paper = problem.paper_directory
         problem_key = (paper, problem.id)
+        if problem_key not in problem_attempt_counts:
+            problem_attempt_counts[problem_key] = len(
+                common.attempt_directories(problem)
+            )
+        attempt_status = (
+            "reviewed"
+            if item is not None
+            else "unreviewed"
+            if attempt is not None
+            else "unattempted"
+        )
+        review_result = item.review_result if item is not None else {}
+        solver_result = attempt.solver_result if attempt is not None else {}
+        triage = common.triage_result(problem)
+        triage_current = common.triage_is_current(problem)
         literature = (
             common.literature_result(problem)
             if common.literature_is_current(problem)
@@ -266,11 +412,7 @@ def _html_data(
                     problem.id,
                 )
             )
-        if problem_key not in problem_attempt_counts:
-            problem_attempt_counts[problem_key] = len(
-                common.attempt_directories(problem)
-            )
-        paths = _relevant_paths(item)
+        paths = _relevant_problem_paths(problem, attempt)
         files = []
         for path in paths:
             try:
@@ -283,8 +425,9 @@ def _html_data(
                     "path": str(path),
                     "uri": _browser_file_uri(path),
                     "artifact": (
-                        attempt.directory / "artifacts"
-                    ) in path.parents,
+                        attempt is not None
+                        and attempt.directory / "artifacts" in path.parents
+                    ),
                 }
             )
         data.append(
@@ -302,41 +445,71 @@ def _html_data(
                     else ""
                 ),
                 "explicitness": problem.explicitness,
-                "attemptName": attempt.name,
-                "attemptDirectory": str(attempt.directory),
+                "attemptStatus": attempt_status,
+                "attemptName": attempt.name if attempt is not None else "",
+                "attemptDirectory": (
+                    str(attempt.directory) if attempt is not None else ""
+                ),
                 "attemptDisplayPath": _project_display_path(
                     attempt.directory
+                    if attempt is not None
+                    else problem.directory
                 ),
-                "attemptNumber": _attempt_number(attempt),
+                "attemptNumber": (
+                    _attempt_number(attempt) if attempt is not None else -1
+                ),
                 "totalAttemptCount": problem_attempt_counts[problem_key],
-                "priority": item.priority,
-                "current": item.current,
-                "legacyVerdict": item.review_result.get("verdict", ""),
+                "priority": item.priority if item is not None else "",
+                "current": item.current if item is not None else None,
+                "legacyVerdict": review_result.get("verdict", ""),
                 "reviewSchema": (
                     "current"
-                    if item.review_result.get("correctness")
+                    if review_result.get("correctness")
                     in review_solutions.CORRECTNESS_LEVELS
                     else "legacy"
+                    if item is not None
+                    else "none"
                 ),
-                "correctness": item.review_result.get(
-                    "correctness", "legacy"
+                "correctness": review_result.get(
+                    "correctness", "legacy" if item is not None else ""
                 ),
-                "reviewedCoverage": item.review_result.get(
-                    "reviewed_coverage", "legacy"
+                "reviewedCoverage": review_result.get(
+                    "reviewed_coverage", "legacy" if item is not None else ""
                 ),
-                "importance": item.review_result.get(
-                    "importance", "legacy"
+                "importance": review_result.get(
+                    "importance", "legacy" if item is not None else ""
                 ),
-                "verificationConfidence": item.review_result.get(
-                    "verification_confidence", "legacy"
+                "verificationConfidence": review_result.get(
+                    "verification_confidence",
+                    "legacy" if item is not None else "",
                 ),
-                "criticSummary": item.review_result.get("summary", ""),
-                "claimedResultType": common.claimed_result_type(
-                    attempt.solver_result
+                "criticSummary": review_result.get("summary", ""),
+                "claimedResultType": (
+                    common.claimed_result_type(solver_result)
+                    if attempt is not None
+                    else ""
                 ),
-                "solverSummary": attempt.solver_result.get("summary", ""),
-                "externalSources": attempt.solver_result.get(
+                "solverSummary": solver_result.get("summary", ""),
+                "externalSources": solver_result.get(
                     "external_sources", []
+                ),
+                "triageClassification": (
+                    triage.get("classification", "")
+                    if triage is not None
+                    else ""
+                ),
+                "triageCurrent": triage_current,
+                "triageSummary": (
+                    triage.get("rationale", "")
+                    if triage is not None
+                    else ""
+                ),
+                "triageReport": (
+                    _read_optional_text(
+                        problem.directory / common.TRIAGE_MARKDOWN
+                    )
+                    if include_contents and triage is not None
+                    else ""
                 ),
                 "literatureStatus": (
                     literature.get("resolution_status", "")
@@ -360,29 +533,29 @@ def _html_data(
                     if include_contents and literature is not None
                     else ""
                 ),
-                "claimReviews": item.review_result.get(
+                "claimReviews": review_result.get(
                     "claim_reviews", []
                 ),
-                "blockingGaps": item.review_result.get(
+                "blockingGaps": review_result.get(
                     "blocking_gaps", []
                 ),
-                "recommendedNextSteps": item.review_result.get(
+                "recommendedNextSteps": review_result.get(
                     "recommended_next_steps", []
                 ),
-                "warnings": item.review_result.get("warnings", []),
+                "warnings": review_result.get("warnings", []),
                 "files": files,
                 "critique": (
                     _read_optional_text(
                         attempt.directory / "critique.md"
                     )
-                    if include_contents
+                    if include_contents and attempt is not None
                     else ""
                 ),
                 "solverAttempt": (
                     _read_optional_text(
                         attempt.directory / "attempt.md"
                     )
-                    if include_contents
+                    if include_contents and attempt is not None
                     else ""
                 ),
             }
@@ -394,12 +567,31 @@ def render_human_review_html(
     items: Sequence[HumanReviewItem],
     *,
     include_contents: bool = True,
+    problems: Sequence[common.ProblemRef] | None = None,
+    initial_priorities: set[str] | None = None,
+    attempt_names: set[str] | None = None,
+    latest_per_problem: bool = False,
 ) -> str:
     """Build a local SPA for navigating human reviews."""
     payload = json.dumps(
-        _html_data(items, include_contents=include_contents),
+        _html_data(
+            items,
+            include_contents=include_contents,
+            problems=problems,
+            attempt_names=attempt_names,
+            latest_per_problem=latest_per_problem,
+        ),
         ensure_ascii=False,
     ).replace("</", "<\\/")
+    settings_payload = json.dumps(
+        {
+            "initialPriorities": sorted(
+                initial_priorities
+                if initial_priorities is not None
+                else {"high", "medium"}
+            )
+        }
+    )
     return """<!doctype html>
 <html lang="en">
 <head>
@@ -645,6 +837,8 @@ def render_human_review_html(
       text-transform: uppercase;
     }
     .attempt-tag.claim { color: var(--teal); }
+    .attempt-tag.status { color: var(--medium); }
+    .attempt-tag.known { color: #285f7a; background: #dcecf4; }
     .main {
       min-width: 0;
       padding: 40px clamp(18px, 4vw, 78px) 80px;
@@ -675,6 +869,8 @@ def render_human_review_html(
     .badge.high { color: var(--high); background: var(--high-bg); }
     .badge.medium { color: var(--medium); background: var(--medium-bg); }
     .badge.low, .badge.none { color: var(--low); background: var(--low-bg); }
+    .badge.unattempted { color: var(--low); background: var(--low-bg); }
+    .badge.unreviewed { color: var(--medium); background: var(--medium-bg); }
     .badge.solution {
       color: #256046;
       background: #dcefe4;
@@ -949,9 +1145,17 @@ def render_human_review_html(
             placeholder="Paper title/id, problem, attempt…"
             autocomplete="off">
         </label>
+        <label class="control">Attempt status
+          <select id="attempt-status-filter">
+            <option value="all">All open problems</option>
+            <option value="unattempted">Unattempted</option>
+            <option value="unreviewed">Attempted, awaiting review</option>
+            <option value="reviewed">Reviewed</option>
+          </select>
+        </label>
         <label class="control">Claim type
           <select id="claim-filter">
-            <option value="all">All reviewed attempts</option>
+            <option value="all">Any claim type</option>
             <option value="resolution">Any resolution claim</option>
             <option value="solution">Solution</option>
             <option value="counterexample">Counterexample</option>
@@ -1055,7 +1259,7 @@ def render_human_review_html(
     </aside>
     <main class="main">
       <div class="empty" id="empty" hidden>
-        <h1>No matching reviews</h1>
+        <h1>No matching open problems</h1>
         <p>Change the search, mathematical assessment, literature, review
           status, or human-priority filters.</p>
       </div>
@@ -1063,9 +1267,14 @@ def render_human_review_html(
     </main>
   </div>
   <script id="review-data" type="application/json">""" + payload + """</script>
+  <script id="review-settings" type="application/json">""" + settings_payload + """
+  </script>
   <script>
     const allItems = JSON.parse(
       document.getElementById("review-data").textContent
+    );
+    const settings = JSON.parse(
+      document.getElementById("review-settings").textContent
     );
     const state = { selectedProblem: "", selectedItem: "", tab: "attempt" };
     const pageScrollPositions = new Map();
@@ -1075,6 +1284,9 @@ def render_human_review_html(
       history.scrollRestoration = "manual";
     }
     const search = document.getElementById("search");
+    const attemptStatusFilter = document.getElementById(
+      "attempt-status-filter"
+    );
     const claimFilter = document.getElementById("claim-filter");
     const correctnessFilter = document.getElementById("correctness-filter");
     const coverageFilter = document.getElementById("coverage-filter");
@@ -1086,6 +1298,9 @@ def render_human_review_html(
     const low = document.getElementById("filter-low");
     const none = document.getElementById("filter-none");
     const priorityFilters = { high, medium, low, none };
+    Object.entries(priorityFilters).forEach(([level, input]) => {
+      input.checked = settings.initialPriorities.includes(level);
+    });
     const current = document.getElementById("filter-current");
     const stale = document.getElementById("filter-stale");
     const problemList = document.getElementById("problem-list");
@@ -1144,6 +1359,11 @@ def render_human_review_html(
       }
     }
 
+    function matchesAttemptStatus(item) {
+      return attemptStatusFilter.value === "all" ||
+        attemptStatusFilter.value === item.attemptStatus;
+    }
+
     function matchesDimension(select, value) {
       return select.value === "all" || select.value === value;
     }
@@ -1199,10 +1419,20 @@ def render_human_review_html(
     function filteredItems() {
       const query = search.value.trim().toLowerCase();
       return allItems.filter(item => {
-        if (priorityFilters[item.priority] &&
-            !priorityFilters[item.priority].checked) return false;
-        if (item.current && !current.checked) return false;
-        if (!item.current && !stale.checked) return false;
+        if (!matchesAttemptStatus(item)) return false;
+        if (item.attemptStatus === "reviewed") {
+          if (priorityFilters[item.priority] &&
+              !priorityFilters[item.priority].checked) return false;
+          if (item.current && !current.checked) return false;
+          if (!item.current && !stale.checked) return false;
+        } else if (
+          correctnessFilter.value !== "all" ||
+          coverageFilter.value !== "all" ||
+          importanceFilter.value !== "all" ||
+          confidenceFilter.value !== "all"
+        ) {
+          return false;
+        }
         if (!matchesClaimType(item)) return false;
         if (!matchesCorrectness(item)) return false;
         if (!matchesCoverage(item)) return false;
@@ -1217,6 +1447,7 @@ def render_human_review_html(
           item.problemId, item.problemTitle,
           item.problemStatement,
           item.attemptName, item.criticSummary, item.solverSummary,
+          item.attemptStatus, item.triageClassification, item.triageSummary,
           item.claimedResultType, item.correctness, item.reviewedCoverage,
           item.importance, item.verificationConfidence,
           item.literatureStatus, item.literatureSummary, item.legacyVerdict
@@ -1258,17 +1489,38 @@ def render_human_review_html(
       return String(value || "unknown").replaceAll("_", " ");
     }
 
-    function appendAttemptTags(parent, item) {
+    function statusLabel(value) {
+      return value === "unreviewed"
+        ? "attempted, awaiting review"
+        : humanize(value);
+    }
+
+    function appendAttemptTags(parent, item, { includeKnown = false } = {}) {
       const tags = node("div", "attempt-tags");
-      [
-        ["claim", item.claimedResultType],
-        ["correctness", item.correctness],
-        ["coverage", item.reviewedCoverage],
-        ["importance", item.importance]
-      ].forEach(([dimension, value]) => {
+      const values = [];
+      if (includeKnown && item.literatureStatus === "resolved") {
+        values.push(["known", "known"]);
+      }
+      if (item.claimedResultType) {
+        values.push(["claim", item.claimedResultType]);
+      }
+      if (item.attemptStatus === "reviewed") {
+        values.push(
+          ["correctness", item.correctness],
+          ["coverage", item.reviewedCoverage],
+          ["importance", item.importance]
+        );
+      } else {
+        values.push(["status", statusLabel(item.attemptStatus)]);
+      }
+      values.forEach(([dimension, value]) => {
         const tag = node(
           "span",
-          `attempt-tag${dimension === "claim" ? " claim" : ""}`,
+          `attempt-tag${
+            dimension === "claim" ? " claim" :
+            dimension === "status" ? " status" :
+            dimension === "known" ? " known" : ""
+          }`,
           humanize(value)
         );
         tag.title = `${dimension}: ${humanize(value)}`;
@@ -1401,11 +1653,12 @@ def render_human_review_html(
           button.append(
             node("strong", "", `${item.problemId} — ${item.problemTitle}`)
           );
-          appendAttemptTags(button, item);
+          appendAttemptTags(button, item, { includeKnown: true });
           button.append(
             node(
               "span",
               "problem-meta",
+              `${statusLabel(item.attemptStatus)} · ` +
               `${item.totalAttemptCount} total attempt${
                 item.totalAttemptCount === 1 ? "" : "s"
               }`
@@ -1432,7 +1685,13 @@ def render_human_review_html(
           `attempt-card${item.id === state.selectedItem ? " active" : ""}`
         );
         button.type = "button";
-        button.append(node("strong", "", item.attemptName));
+        button.append(
+          node(
+            "strong",
+            "",
+            item.attemptName || "No attempts yet"
+          )
+        );
         appendAttemptTags(button, item);
         button.addEventListener("click", () => {
           navigateToItem(item);
@@ -1444,24 +1703,43 @@ def render_human_review_html(
     function renderReview(item) {
       review.replaceChildren();
       const top = node("div", "topline");
-      top.append(
-        node("span", `badge ${item.priority}`, item.priority),
-        node(
-          "span",
-          "verdict",
-          `${item.claimedResultType.replaceAll("_", " ")} · ${item.attemptName}`
-        )
-      );
-      top.append(
-        node("span", "badge", item.correctness.replaceAll("_", " ")),
-        node(
-          "span", "badge", `coverage: ${item.reviewedCoverage.replaceAll("_", " ")}`
-        ),
-        node("span", "badge", `importance: ${item.importance}`),
-        node(
-          "span", "badge", `verification: ${item.verificationConfidence}`
-        )
-      );
+      if (item.attemptStatus === "reviewed") {
+        top.append(
+          node("span", `badge ${item.priority}`, item.priority),
+          node(
+            "span",
+            "verdict",
+            `${humanize(item.claimedResultType)} · ${item.attemptName}`
+          ),
+          node("span", "badge", humanize(item.correctness)),
+          node(
+            "span", "badge", `coverage: ${humanize(item.reviewedCoverage)}`
+          ),
+          node("span", "badge", `importance: ${item.importance}`),
+          node(
+            "span", "badge",
+            `verification: ${item.verificationConfidence}`
+          )
+        );
+      } else {
+        top.append(
+          node(
+            "span",
+            `badge ${item.attemptStatus}`,
+            statusLabel(item.attemptStatus)
+          ),
+          node(
+            "span",
+            "verdict",
+            item.attemptName || "No solver attempt"
+          )
+        );
+        if (item.claimedResultType) {
+          top.append(
+            node("span", "badge", humanize(item.claimedResultType))
+          );
+        }
+      }
       if (item.literatureStatus) {
         top.append(
           node(
@@ -1471,7 +1749,9 @@ def render_human_review_html(
           )
         );
       }
-      if (!item.current) top.append(node("span", "stale", "STALE REVIEW"));
+      if (item.attemptStatus === "reviewed" && !item.current) {
+        top.append(node("span", "stale", "STALE REVIEW"));
+      }
       if (item.reviewSchema === "legacy") {
         top.append(node("span", "stale", "LEGACY ASSESSMENT"));
       }
@@ -1506,6 +1786,19 @@ def render_human_review_html(
       review.append(problemStatement);
 
       const summaries = node("div", "summary-grid");
+      if (item.triageSummary) {
+        const triage = node("section", "summary");
+        triage.append(
+          node(
+            "h2",
+            "",
+            `Triage · ${item.triageClassification || "unclassified"}` +
+              `${item.triageCurrent ? "" : " · stale"}`
+          ),
+          markdownBody(item.triageSummary, "No triage summary.")
+        );
+        summaries.append(triage);
+      }
       if (item.literatureSummary) {
         const literature = node("section", "summary literature-summary");
         literature.append(
@@ -1519,28 +1812,33 @@ def render_human_review_html(
         );
         summaries.append(literature);
       }
-      const critic = node("section", "summary");
-      critic.append(
-        node(
-          "h2",
-          "",
-          item.reviewSchema === "legacy"
-            ? `Critic · legacy ${item.legacyVerdict}`
-            : `Critic · ${item.correctness} · ${item.reviewedCoverage}`
-        ),
-        markdownBody(item.criticSummary, "No critic summary.")
-      );
-      const solver = node("section", "summary");
-      solver.append(
-        node(
-          "h2",
-          "",
-          `Solver claim · ${item.claimedResultType}`
-        ),
-        markdownBody(item.solverSummary, "No solver summary.")
-      );
-      summaries.append(solver, critic);
-      review.append(summaries);
+      if (item.attemptStatus !== "unattempted") {
+        const solver = node("section", "summary");
+        solver.append(
+          node(
+            "h2",
+            "",
+            `Solver claim · ${item.claimedResultType}`
+          ),
+          markdownBody(item.solverSummary, "No solver summary.")
+        );
+        summaries.append(solver);
+      }
+      if (item.attemptStatus === "reviewed") {
+        const critic = node("section", "summary");
+        critic.append(
+          node(
+            "h2",
+            "",
+            item.reviewSchema === "legacy"
+              ? `Critic · legacy ${item.legacyVerdict}`
+              : `Critic · ${item.correctness} · ${item.reviewedCoverage}`
+          ),
+          markdownBody(item.criticSummary, "No critic summary.")
+        );
+        summaries.append(critic);
+      }
+      if (summaries.childElementCount) review.append(summaries);
 
       if (Array.isArray(item.claimReviews) && item.claimReviews.length) {
         const section = node("section", "section");
@@ -1566,17 +1864,27 @@ def render_human_review_html(
       const panels = {
         critique: item.critique,
         attempt: item.solverAttempt,
+        triage: item.triageReport,
         literature: item.literatureReport,
         files: item.files
       };
-      const tabEntries = [
-        ["attempt", "Solution attempt"],
-        ["critique", "Critique"],
-      ];
+      const tabEntries = [];
+      if (item.attemptStatus !== "unattempted") {
+        tabEntries.push(["attempt", "Solution attempt"]);
+      }
+      if (item.attemptStatus === "reviewed") {
+        tabEntries.push(["critique", "Critique"]);
+      }
+      if (item.triageReport) {
+        tabEntries.push(["triage", "Triage"]);
+      }
       if (item.literatureReport) {
         tabEntries.push(["literature", "Literature"]);
       }
       tabEntries.push(["files", `Files (${item.files.length})`]);
+      if (!tabEntries.some(([key]) => key === state.tab)) {
+        state.tab = tabEntries[0][0];
+      }
       tabEntries.forEach(([key, label]) => {
         const button = node(
           "button", `tab${state.tab === key ? " active" : ""}`, label
@@ -1647,9 +1955,29 @@ def render_human_review_html(
         uncertain: "uncertain literature status",
         missing: "no literature review"
       };
-      const countParts = [`${items.length} shown`];
+      const problemCount = new Set(
+        items.map(item => item.problemKey)
+      ).size;
+      const statusCount = ["unattempted", "unreviewed", "reviewed"]
+        .map(status => [
+          status,
+          new Set(
+            items
+              .filter(item => item.attemptStatus === status)
+              .map(item => item.problemKey)
+          ).size
+        ])
+        .filter(([, count]) => count)
+        .map(([status, count]) => `${count} ${statusLabel(status)}`)
+        .join(" · ");
+      const countParts = [
+        `${problemCount} problem${problemCount === 1 ? "" : "s"} shown`
+      ];
+      if (statusCount) countParts.push(statusCount);
       if (countText) countParts.push(countText);
-      const staleCount = items.filter(item => !item.current).length;
+      const staleCount = items.filter(
+        item => item.attemptStatus === "reviewed" && !item.current
+      ).length;
       if (staleCount) countParts.push(`${staleCount} stale`);
       if (focusLabels[claimFilter.value]) {
         countParts.push(focusLabels[claimFilter.value]);
@@ -1683,6 +2011,7 @@ def render_human_review_html(
       }
     }
     search.addEventListener("input", updateFilters);
+    attemptStatusFilter.addEventListener("change", updateFilters);
     claimFilter.addEventListener("change", updateFilters);
     correctnessFilter.addEventListener("change", updateFilters);
     coverageFilter.addEventListener("change", updateFilters);
@@ -1734,12 +2063,18 @@ def render_human_review_html(
     }
     ["low", "none"].forEach(level => {
       document.getElementById(`filter-${level}-wrap`).hidden =
-        !allItems.some(item => item.priority === level);
+        !allItems.some(
+          item => item.attemptStatus === "reviewed" && item.priority === level
+        );
     });
     document.getElementById("filter-current-wrap").hidden =
-      !allItems.some(item => item.current);
+      !allItems.some(
+        item => item.attemptStatus === "reviewed" && item.current
+      );
     document.getElementById("filter-stale-wrap").hidden =
-      !allItems.some(item => !item.current);
+      !allItems.some(
+        item => item.attemptStatus === "reviewed" && !item.current
+      );
     render();
     renderedItemId = state.selectedItem;
     const initialScroll =
@@ -1896,7 +2231,7 @@ def render_human_review_report(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "show solver attempts by derived human-review priority"
+            "browse open problems, solver attempts, and critic reviews"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""examples:
@@ -1927,7 +2262,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_PRIORITY,
         metavar="LEVELS",
         help=(
-            "comma-separated human-priority levels to show "
+            "comma-separated reviewed-attempt priority levels initially "
+            "shown in HTML, or included in terminal output "
             "(default: high,medium)"
         ),
     )
@@ -2004,14 +2340,22 @@ def main(argv: list[str] | None = None) -> int:
             args.paths,
             problem_ids=set(args.problem_ids) if args.problem_ids else None,
         )
+        review_priority = (
+            priority
+            if args.terminal
+            else set(review_solutions.HUMAN_PRIORITY_LEVELS)
+        )
         items = discover_human_reviews(
             problems,
-            priority=priority,
+            priority=review_priority,
             attempt_names=(
                 set(args.attempt_names) if args.attempt_names else None
             ),
             include_stale=not args.current_only,
-            latest_per_problem=args.latest_per_problem,
+            latest_per_problem=(
+                args.latest_per_problem if args.terminal else False
+            ),
+            allow_empty=not args.terminal,
         )
         if args.terminal:
             if args.output is not None:
@@ -2035,10 +2379,18 @@ def main(argv: list[str] | None = None) -> int:
             dashboard = render_human_review_html(
                 items,
                 include_contents=not args.summary_only,
+                problems=problems,
+                initial_priorities=priority,
+                attempt_names=(
+                    set(args.attempt_names) if args.attempt_names else None
+                ),
+                latest_per_problem=args.latest_per_problem,
             )
             output.write_text(dashboard, encoding="utf-8")
             print(
-                f"Wrote {len(items)} human-review item(s) to {output}."
+                f"Wrote human-review dashboard for {len(problems)} open "
+                f"problem(s), including {len(items)} reviewed attempt(s), "
+                f"to {output}."
             )
             if not args.no_open:
                 try:

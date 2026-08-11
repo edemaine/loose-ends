@@ -1362,6 +1362,79 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 dashboard.index('["critique", "Critique"]'),
             )
 
+            empty_paper = make_analyzed_paper(Path(temporary) / "empty")
+            empty_problems = common.discover_problem_refs([empty_paper])
+            coverage_problems = [*problems, *empty_problems]
+            coverage_data = human_review._html_data(
+                items,
+                include_contents=True,
+                problems=coverage_problems,
+            )
+            self.assertEqual(
+                [
+                    entry["attemptStatus"]
+                    for entry in coverage_data
+                ].count("reviewed"),
+                2,
+            )
+            self.assertEqual(
+                [
+                    entry["attemptStatus"]
+                    for entry in coverage_data
+                ].count("unreviewed"),
+                1,
+            )
+            self.assertEqual(
+                [
+                    entry["attemptStatus"]
+                    for entry in coverage_data
+                ].count("unattempted"),
+                2,
+            )
+            unattempted = next(
+                entry
+                for entry in coverage_data
+                if entry["attemptStatus"] == "unattempted"
+            )
+            self.assertEqual(unattempted["attemptName"], "")
+            self.assertEqual(unattempted["totalAttemptCount"], 0)
+            self.assertIn("analysis/open-problems.md", {
+                file["label"] for file in unattempted["files"]
+            })
+            coverage_dashboard = human_review.render_human_review_html(
+                items,
+                problems=coverage_problems,
+                initial_priorities={"high", "medium"},
+            )
+            self.assertIn('id="attempt-status-filter"', coverage_dashboard)
+            self.assertIn(
+                '<option value="unattempted">Unattempted</option>',
+                coverage_dashboard,
+            )
+            self.assertIn(
+                "attempted, awaiting review",
+                coverage_dashboard,
+            )
+            self.assertIn('"attemptStatus": "unattempted"', coverage_dashboard)
+            self.assertIn('"initialPriorities": ["high", "medium"]', coverage_dashboard)
+
+            empty_output = Path(temporary) / "empty-review.html"
+            with redirect_stdout(StringIO()):
+                returncode = human_review.main(
+                    [
+                        str(empty_paper),
+                        "--summary-only",
+                        "--no-open",
+                        "--output",
+                        str(empty_output),
+                    ]
+                )
+            self.assertEqual(returncode, 0)
+            self.assertIn(
+                '"attemptStatus": "unattempted"',
+                empty_output.read_text(encoding="utf-8"),
+            )
+
     def test_human_review_converts_project_root_only_once(self):
         human_review._native_project_root.cache_clear()
         self.addCleanup(human_review._native_project_root.cache_clear)
