@@ -78,8 +78,8 @@ button { color: inherit; }
 .connection { margin-left: auto; color: var(--muted); font-size: 12px; }
 .connection.live::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 6px; border-radius: 50%; background: #36a36e; }
 
-.notice { padding: 6px 14px; background: var(--amber-soft); color: #714b0c; border-bottom: 1px solid #e8d6a7; }
-.loading-notice { background: var(--panel); color: var(--ink); }
+.notice { position: fixed; z-index: 25; left: 50%; bottom: 12px; transform: translateX(-50%); width: min(900px, calc(100vw - 24px)); padding: 8px 10px; border: 1px solid #e8d6a7; border-radius: 10px; background: var(--amber-soft); color: #714b0c; box-shadow: 0 18px 50px var(--selection-shadow); }
+.loading-notice { border-color: var(--line-strong); background: var(--panel); color: var(--ink); }
 .catalog-progress { width: 100%; }
 .progress-line { display: flex; justify-content: space-between; gap: 16px; margin-bottom: 6px; color: var(--muted); font-size: 11px; }
 .progress-line strong { color: var(--heading); }
