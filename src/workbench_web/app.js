@@ -52,6 +52,9 @@ const pageScrollPositions = new Map();
 let renderedUrl = "";
 let scrollUpdateFrame = null;
 let navigationReady = false;
+let eventConnection = null;
+let eventReconnectNeedsRefresh = false;
+let sessionRefresh = null;
 
 if ("scrollRestoration" in history) history.scrollRestoration = "manual";
 
@@ -287,17 +290,51 @@ function fileUrl(path) {
   return `/api/file?${new URLSearchParams({ path })}`;
 }
 
-async function api(path, options = {}) {
+async function refreshSession() {
+  if (sessionRefresh) return sessionRefresh;
+  sessionRefresh = (async () => {
+    const value = await api("/api/bootstrap", {}, false);
+    state.csrf = value.csrf;
+    state.eventSequence = value.eventSequence || 0;
+    state.catalog = value.catalog;
+    state.jobs = value.jobs;
+    state.detailCache.clear();
+    if (navigationReady) {
+      syncNavigation({ replace: true, preserveScroll: true });
+      connectEvents();
+    }
+    return value;
+  })();
+  try {
+    return await sessionRefresh;
+  } finally {
+    sessionRefresh = null;
+  }
+}
+
+async function api(path, options = {}, retryConfirmation = true) {
+  const requestOptions = { ...options };
   const headers = { ...(options.headers || {}) };
   if (options.body && typeof options.body !== "string") {
     headers["Content-Type"] = "application/json";
-    options.body = JSON.stringify(options.body);
+    requestOptions.body = JSON.stringify(options.body);
   }
-  if (options.method && options.method !== "GET") {
+  const method = String(options.method || "GET").toUpperCase();
+  if (method !== "GET") {
     headers["X-Workbench-CSRF"] = state.csrf;
   }
-  const response = await fetch(path, { ...options, headers });
+  const response = await fetch(path, { ...requestOptions, headers });
   const result = await response.json().catch(() => ({ error: response.statusText }));
+  if (
+    !response.ok &&
+    retryConfirmation &&
+    method !== "GET" &&
+    response.status === 403 &&
+    result.code === "invalid_confirmation_token"
+  ) {
+    await refreshSession();
+    return api(path, options, false);
+  }
   if (!response.ok) throw new Error(result.error || response.statusText);
   return result;
 }
@@ -1684,14 +1721,25 @@ async function refreshJobs({ preserveActivityDetail = false } = {}) {
 }
 
 function connectEvents() {
+  const previousConnection = eventConnection;
+  eventConnection = null;
+  previousConnection?.close();
   const events = new EventSource(`/api/events?${new URLSearchParams({
     since: String(state.eventSequence || 0),
   })}`);
+  eventConnection = events;
   events.addEventListener("open", () => {
+    if (eventConnection !== events) return;
     connection.textContent = "Live";
     connection.className = "connection live";
+    if (eventReconnectNeedsRefresh) {
+      eventReconnectNeedsRefresh = false;
+      refreshSession().catch(error => showNotice(error.message, true));
+    }
   });
   events.addEventListener("error", () => {
+    if (eventConnection !== events) return;
+    eventReconnectNeedsRefresh = true;
     connection.textContent = "Reconnecting…";
     connection.className = "connection";
   });

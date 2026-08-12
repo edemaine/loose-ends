@@ -1058,6 +1058,8 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Cache-Control", "no-store")
+        if self.close_connection:
+            self.send_header("Connection", "close")
         if length is not None:
             self.send_header("Content-Length", str(length))
         self.end_headers()
@@ -1067,8 +1069,17 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
         self._headers(status, "application/json; charset=utf-8", len(data))
         self.wfile.write(data)
 
-    def send_error_json(self, status: int, message: str) -> None:
-        self.send_json({"error": message}, status)
+    def send_error_json(
+        self,
+        status: int,
+        message: str,
+        *,
+        code: str | None = None,
+    ) -> None:
+        value = {"error": message}
+        if code is not None:
+            value["code"] = code
+        self.send_json(value, status)
 
     def read_json(self) -> dict:
         try:
@@ -1087,10 +1098,16 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
 
     def require_mutation_auth(self) -> bool:
         if not self._origin_is_allowed():
+            self.close_connection = True
             self.send_error_json(403, "untrusted request origin")
             return False
         if self.headers.get("X-Workbench-CSRF") != self.app.csrf:
-            self.send_error_json(403, "missing or invalid confirmation token")
+            self.close_connection = True
+            self.send_error_json(
+                403,
+                "browser session expired; refresh and try again",
+                code="invalid_confirmation_token",
+            )
             return False
         return True
 
@@ -1149,6 +1166,7 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         if not self._host_is_allowed():
+            self.close_connection = True
             self.send_error_json(403, "untrusted host")
             return
         if not self.require_mutation_auth():
@@ -1297,6 +1315,7 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                     )
                 self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            self.close_connection = True
             return
 
 
