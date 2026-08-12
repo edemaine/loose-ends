@@ -14,6 +14,7 @@ const state = {
   selectedProblem: "",
   researchFilters: reviewModel.createDefaultFilters(),
   researchFiltersOpen: false,
+  revealSidebarSelection: false,
   sidebarScroll: { research: 0, papers: 0, manuscripts: 0, activity: 0 },
   paperSort: "alphabetical",
   selectedPaper: "",
@@ -152,24 +153,31 @@ function applyLocation({ scrollY } = {}) {
       state.catalog.reviews.find(item => item.id === legacy || item.itemKey === legacy);
     state.selectedReview = requested?.itemKey || "";
     state.selectedProblem = requested?.problemKey || "";
+    state.revealSidebarSelection = Boolean(requested);
     state.detailTab = parameters.get("detail") || "attempt";
   } else if (state.tab === "papers") {
     const requested = parameters.get("paper");
-    state.selectedPaper = state.catalog.papers.find(
+    const paper = state.catalog.papers.find(
       item => item.urlKey === requested || item.path === requested,
-    )?.key || "";
+    );
+    state.selectedPaper = paper?.key || "";
+    state.revealSidebarSelection = Boolean(paper);
   } else if (state.tab === "manuscripts") {
     const requested = parameters.get("manuscript");
     const manuscript = state.catalog.manuscripts.find(
       item => item.urlKey === requested || item.path === requested,
     );
     state.selectedManuscript = manuscript?.key || "";
+    state.revealSidebarSelection = Boolean(manuscript);
     const requestedDraft = parameters.get("draft");
     state.selectedDraft = manuscript?.drafts.find(
       draft => draft.name === requestedDraft || draft.urlKey === requestedDraft,
     )?.key || manuscript?.latest.key || "";
   } else {
     state.selectedJob = parameters.get("job") || "";
+    state.revealSidebarSelection = state.jobs.some(
+      job => job.id === state.selectedJob,
+    );
   }
   render();
   const canonicalUrl = currentUrl();
@@ -620,7 +628,19 @@ function restoreSidebarScroll(tab) {
   const scrollingElement = tab === "research"
     ? sidebar.querySelector(".problem-scroll")
     : sidebar;
-  if (scrollingElement) scrollingElement.scrollTop = state.sidebarScroll[tab] || 0;
+  if (!scrollingElement) return;
+  scrollingElement.scrollTop = state.sidebarScroll[tab] || 0;
+  if (!state.revealSidebarSelection) return;
+  state.revealSidebarSelection = false;
+  const selected = scrollingElement.querySelector(".side-card.active");
+  if (!selected) return;
+  const viewport = scrollingElement.getBoundingClientRect();
+  const card = selected.getBoundingClientRect();
+  const centered = scrollingElement.scrollTop +
+    (card.top + card.bottom - viewport.top - viewport.bottom) / 2;
+  const maximum = scrollingElement.scrollHeight - scrollingElement.clientHeight;
+  scrollingElement.scrollTop = Math.max(0, Math.min(maximum, centered));
+  state.sidebarScroll[tab] = scrollingElement.scrollTop;
 }
 
 function sidebarSearch(placeholder) {
