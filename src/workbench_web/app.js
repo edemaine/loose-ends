@@ -48,6 +48,7 @@ const viewPaths = Object.freeze({
   manuscripts: "/manuscripts",
   activity: "/activity",
 });
+const tabUrlStoragePrefix = "loose-ends-workbench:tab-url:";
 const initialPriorities = ["high", "medium"];
 const pageScrollPositions = new Map();
 let renderedUrl = "";
@@ -68,6 +69,32 @@ try {
 
 function tabFromPath(pathname) {
   return Object.entries(viewPaths).find(([, path]) => path === pathname)?.[0] || "research";
+}
+
+function rememberTabUrl(tab, url) {
+  try {
+    const value = new URL(url, location.origin);
+    if (value.origin !== location.origin || value.pathname !== viewPaths[tab]) return;
+    localStorage.setItem(
+      `${tabUrlStoragePrefix}${tab}`,
+      `${value.pathname}${value.search}${value.hash}`,
+    );
+  } catch (error) {
+    console.warn("Unable to remember tab state", error);
+  }
+}
+
+function rememberedTabUrl(tab) {
+  try {
+    const stored = localStorage.getItem(`${tabUrlStoragePrefix}${tab}`);
+    if (!stored) return "";
+    const value = new URL(stored, location.origin);
+    if (value.origin !== location.origin || value.pathname !== viewPaths[tab]) return "";
+    return `${value.pathname}${value.search}${value.hash}`;
+  } catch (error) {
+    console.warn("Unable to restore tab state", error);
+    return "";
+  }
 }
 
 function currentUrl() {
@@ -137,6 +164,7 @@ function syncNavigation({ replace = false, preserveScroll = false } = {}) {
   const method = replace || url === renderedUrl ? "replaceState" : "pushState";
   history[method](historyPayload(scrollY), "", url);
   renderedUrl = url;
+  rememberTabUrl(state.tab, url);
   restorePageScroll(url, scrollY);
 }
 
@@ -186,6 +214,7 @@ function applyLocation({ scrollY } = {}) {
     : pageScrollPositions.get(scrollPositionKey(canonicalUrl)) ?? 0;
   history.replaceState(historyPayload(restoredScroll), "", canonicalUrl);
   renderedUrl = canonicalUrl;
+  rememberTabUrl(state.tab, canonicalUrl);
   restorePageScroll(canonicalUrl, restoredScroll);
 }
 
@@ -581,8 +610,17 @@ function setTab(tab) {
   syncNavigation();
 }
 
+function restoreTab(tab) {
+  const url = rememberedTabUrl(tab) || viewPaths[tab];
+  if (url === renderedUrl) return;
+  rememberCurrentScroll();
+  const scrollY = pageScrollPositions.get(scrollPositionKey(url)) ?? 0;
+  history.pushState(historyPayload(scrollY), "", url);
+  applyLocation({ scrollY });
+}
+
 document.querySelectorAll("[data-tab]").forEach(value => {
-  value.addEventListener("click", () => setTab(value.dataset.tab));
+  value.addEventListener("click", () => restoreTab(value.dataset.tab));
 });
 
 function render() {
