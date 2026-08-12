@@ -440,6 +440,41 @@ function visibleProblemSelectionControl() {
   return label;
 }
 
+function awaitingReviewAttemptsForTargets(values) {
+  const paperPaths = new Set(
+    values.filter(value => value.kind === "paper").map(value => value.path),
+  );
+  const problemKeys = new Set(
+    values.filter(value => value.kind === "problem").map(targetKey),
+  );
+  const latest = new Map();
+  state.catalog.reviews.forEach(item => {
+    if (item.attemptStatus !== "unreviewed" || !item.attemptDirectory) return;
+    if (
+      !paperPaths.has(item.paperDirectory) &&
+      !problemKeys.has(targetKey(problemTarget(item)))
+    ) return;
+    const previous = latest.get(item.problemKey);
+    if (!previous || item.attemptNumber > previous.attemptNumber) {
+      latest.set(item.problemKey, item);
+    }
+  });
+  return [...latest.values()]
+    .sort(reviewModel.compareProblems)
+    .map(attemptTarget);
+}
+
+function appendAwaitingReviewAction(values) {
+  const attempts = awaitingReviewAttemptsForTargets(values);
+  if (!attempts.length) return;
+  const action = button(
+    `Review (${attempts.length.toLocaleString()})`,
+    () => openTask("review", attempts),
+  );
+  action.title = `${attempts.length.toLocaleString()} awaiting-review attempt${attempts.length === 1 ? "" : "s"}`;
+  selectionBar.append(action);
+}
+
 function renderSelectionBar() {
   selectionBar.replaceChildren();
   const values = [...state.selection.values()];
@@ -455,11 +490,13 @@ function renderSelectionBar() {
       selectionBar.append(button("Literature", () => openTask("literature", problems)));
       selectionBar.append(button("Solve", () => openTask("solve", problems), "button primary"));
     }
+    appendAwaitingReviewAction(values);
   }
   if ([...kinds].every(kind => kind === "problem")) {
     selectionBar.append(button("Triage", () => openTask("triage", values)));
     selectionBar.append(button("Literature", () => openTask("literature", values)));
     selectionBar.append(button("Solve", () => openTask("solve", values), "button primary"));
+    appendAwaitingReviewAction(values);
   }
   if ([...kinds].every(kind => kind === "attempt")) {
     selectionBar.append(button("Review", () => openTask("review", values)));

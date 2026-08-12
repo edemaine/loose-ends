@@ -134,6 +134,9 @@ class WorkbenchPlanningTests(unittest.TestCase):
         self.assertIn("reviewModel.summaryCards(item)", app)
         self.assertIn("reviewModel.createMarkdownRenderer(window)", app)
         self.assertIn("function visibleProblemSelectionControl", app)
+        self.assertIn("function awaitingReviewAttemptsForTargets", app)
+        self.assertIn("appendAwaitingReviewAction(values)", app)
+        self.assertIn("awaiting-review attempt", app)
         self.assertIn("input.indeterminate", app)
         self.assertIn("jobDetails: new Map()", app)
         self.assertIn("preserveActivityDetail", app)
@@ -155,6 +158,8 @@ class WorkbenchPlanningTests(unittest.TestCase):
             PROJECT_ROOT / "src" / "workbench_web" / "styles.css"
         ).read_text(encoding="utf-8")
         self.assertIn(".selection-bar[hidden] { display: none; }", styles)
+        self.assertIn(".selection-bar .button:hover, .selection-bar .button:focus-visible", styles)
+        self.assertIn(".selection-bar .button:active", styles)
         self.assertIn(".paper-list-controls { display: grid; gap: 6px; }", styles)
         self.assertNotIn(".research-controls > .search", styles)
         self.assertIn(".console-cursor", styles)

@@ -261,7 +261,9 @@ button { color: inherit; }
 
 .selection-bar { position: fixed; z-index: 30; left: 50%; bottom: 12px; transform: translateX(-50%); width: min(900px, calc(100vw - 24px)); display: flex; align-items: center; gap: 7px; padding: 8px 10px; border: 1px solid var(--selection-border); border-radius: 10px; background: var(--selection-bg); color: white; box-shadow: 0 18px 50px var(--selection-shadow); }
 .selection-bar[hidden] { display: none; }
-.selection-bar .button { border-color: rgba(255,255,255,.35); background: rgba(255,255,255,.09); color: white; }
+.selection-bar .button { border-color: rgba(255,255,255,.35); background: rgba(255,255,255,.09); color: white; transition: background-color .12s ease, border-color .12s ease, transform .12s ease; }
+.selection-bar .button:hover, .selection-bar .button:focus-visible { border-color: rgba(255,255,255,.9); background: rgba(255,255,255,.22); transform: translateY(-1px); outline: none; }
+.selection-bar .button:active { background: rgba(255,255,255,.3); transform: translateY(0); }
 .selection-bar strong { margin-right: auto; }
 
 .task-dialog { width: min(850px, calc(100vw - 30px)); max-height: calc(100vh - 34px); border: 0; border-radius: 16px; padding: 0; background: var(--panel); color: var(--ink); box-shadow: 0 35px 90px var(--dialog-shadow); }
