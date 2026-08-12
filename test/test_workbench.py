@@ -4,8 +4,9 @@ import sys
 from tempfile import TemporaryDirectory
 import threading
 import time
+from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -487,6 +488,34 @@ class WorkbenchStoreTests(unittest.TestCase):
 
 
 class WorkbenchWatchTests(unittest.TestCase):
+    def test_watchdog_ignores_directory_metadata_changes(self):
+        catalog = Mock()
+        handler = ChangeHandler(catalog)
+
+        handler.on_any_event(
+            SimpleNamespace(
+                event_type="modified",
+                is_directory=True,
+                src_path=str(PROJECT_ROOT / "papers"),
+            )
+        )
+
+        catalog.schedule.assert_not_called()
+
+    def test_watchdog_schedules_file_content_changes(self):
+        catalog = Mock()
+        handler = ChangeHandler(catalog)
+
+        handler.on_any_event(
+            SimpleNamespace(
+                event_type="modified",
+                is_directory=False,
+                src_path=str(PROJECT_ROOT / "papers" / "metadata.json"),
+            )
+        )
+
+        catalog.schedule.assert_called_once_with()
+
     def test_initial_catalog_scan_does_not_block_server_startup(self):
         scan_allowed = threading.Event()
 

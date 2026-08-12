@@ -602,18 +602,15 @@ class CatalogManager:
         return self.ready.wait(timeout)
 
     def _refresh_loop(self) -> None:
-        next_full_refresh = time.monotonic() + 300
-        while not self.stopping.wait(0.1):
-            scheduled = self.pending.wait(0.5)
-            if not scheduled and time.monotonic() < next_full_refresh:
+        while not self.stopping.is_set():
+            if not self.pending.wait(0.5):
                 continue
-            if scheduled:
-                self.pending.clear()
-                # Coalesce installation bursts produced by atomic directory moves.
-                time.sleep(0.3)
-                self.pending.clear()
-            self.refresh(force=scheduled)
-            next_full_refresh = time.monotonic() + 300
+            self.pending.clear()
+            # Coalesce installation bursts produced by atomic directory moves.
+            if self.stopping.wait(0.3):
+                break
+            self.pending.clear()
+            self.refresh(force=True)
 
     def snapshot(self) -> dict:
         with self.lock:
@@ -669,6 +666,14 @@ class ChangeHandler(FileSystemEventHandler):
             "closed",
             "closed_no_write",
         }:
+            return
+        # File changes already carry the useful event.  The extra directory
+        # mtime notification is noisy (and can be emitted independently by
+        # filesystem services) without identifying changed catalog content.
+        if (
+            getattr(event, "event_type", "") == "modified"
+            and getattr(event, "is_directory", False)
+        ):
             return
         paths = [event.src_path]
         destination = getattr(event, "dest_path", "")
