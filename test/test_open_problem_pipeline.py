@@ -301,6 +301,19 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 context_directory=workspace / "inputs",
             )
             self.assertEqual(rendered, "Claims: `C-001`")
+            constrained = review_solutions.write_attempt_review_schema(
+                review_solutions.DEFAULT_SCHEMA_PATH,
+                workspace,
+                attempt,
+            )
+            schema = common.read_json(constrained)
+            reviews_schema = schema["properties"]["claim_reviews"]
+            self.assertEqual(reviews_schema["minItems"], 1)
+            self.assertEqual(reviews_schema["maxItems"], 1)
+            self.assertEqual(
+                reviews_schema["items"]["properties"]["claim_id"]["enum"],
+                ["C-001"],
+            )
 
     def setUp(self):
         patcher = patch.object(codex_cli, "grant_sandbox_read_access")

@@ -211,6 +211,43 @@ def render_prompt(
     )
 
 
+def write_attempt_review_schema(
+    schema_path: Path,
+    workspace: Path,
+    attempt: AttemptRef,
+) -> Path:
+    """Constrain structured claim IDs and count to the target attempt."""
+    schema = common.read_json(schema_path, description="review schema")
+    claims = attempt.solver_result.get("checkable_claims")
+    if not isinstance(claims, list):
+        raise common.CodexError(
+            f"{attempt.directory}/solver-result.json has invalid claims"
+        )
+    claim_ids = [
+        claim.get("id")
+        for claim in claims
+        if isinstance(claim, dict) and isinstance(claim.get("id"), str)
+    ]
+    if len(claim_ids) != len(claims) or len(set(claim_ids)) != len(claim_ids):
+        raise common.CodexError(
+            f"{attempt.directory}/solver-result.json has invalid claim IDs"
+        )
+    try:
+        reviews_schema = schema["properties"]["claim_reviews"]
+        claim_id_schema = reviews_schema["items"]["properties"]["claim_id"]
+    except (KeyError, TypeError) as exc:
+        raise common.CodexError(
+            "review schema cannot be specialized by target claim IDs"
+        ) from exc
+    reviews_schema["minItems"] = len(claim_ids)
+    reviews_schema["maxItems"] = len(claim_ids)
+    if claim_ids:
+        claim_id_schema["enum"] = claim_ids
+    output = workspace / "review-output-schema.json"
+    common.write_json(output, schema)
+    return output
+
+
 def validate_review_result(
     result_path: Path,
     workspace: Path,
@@ -292,8 +329,15 @@ def validate_review_result(
         accepted_reviews.append(review)
     if reviewed_ids != expected_ids:
         missing = expected_ids.difference(reviewed_ids)
+        unexpected = (
+            "; supplied unknown IDs: " + ", ".join(ignored_ids)
+            if ignored_ids
+            else ""
+        )
         raise common.CodexError(
-            "review response omitted claims: " + ", ".join(sorted(missing))
+            "review response omitted claims: "
+            + ", ".join(sorted(missing))
+            + unexpected
         )
     if ignored_ids:
         result["claim_reviews"] = accepted_reviews
@@ -627,11 +671,16 @@ def review_attempt(
             attempt=attempt,
             context_directory=context,
         )
+        attempt_schema_path = write_attempt_review_schema(
+            schema_path,
+            workspace,
+            attempt,
+        )
         result_path = codex_cli.run_structured_codex(
             codex=codex,
             workspace=workspace,
             prompt=prompt,
-            schema_path=schema_path,
+            schema_path=attempt_schema_path,
             options=options,
             web_search=web_search,
             launch_interval=launch_interval,

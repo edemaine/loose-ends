@@ -39,6 +39,11 @@ each claim before accepting it. Re-run small computations or inspect artifacts
 when practical. Do not silently repair the solver's argument: clearly separate
 what it actually establishes from a possible repair.
 
+Before reviewing the paper's analysis or provenance, read the target attempt's
+`solver-result.json` and `attempt.md`. The `claim_reviews` entries assess those
+solver claims—not the open-problem extraction, analysis entries, or paper
+results that happen to have other identifiers.
+
 Classify the attempt on four independent axes:
 
 - `correctness` concerns support for the mathematical argument: use
