@@ -13,6 +13,7 @@ const state = {
   selectedReview: "",
   selectedProblem: "",
   researchFilters: reviewModel.createDefaultFilters(),
+  researchFiltersOpen: false,
   paperSort: "alphabetical",
   selectedPaper: "",
   selectedManuscript: "",
@@ -483,6 +484,10 @@ document.querySelectorAll("[data-tab]").forEach(value => {
 });
 
 function render() {
+  const renderedResearchFilters = sidebar.querySelector(".research-filters");
+  if (renderedResearchFilters) {
+    state.researchFiltersOpen = renderedResearchFilters.open;
+  }
   document.querySelectorAll("[data-tab]").forEach(value => {
     value.classList.toggle("active", value.dataset.tab === state.tab);
   });
@@ -618,6 +623,10 @@ function filterToggle(label, checked, handler) {
 
 function renderResearchFilters() {
   const details = node("details", "research-filters");
+  details.open = state.researchFiltersOpen;
+  details.addEventListener("toggle", () => {
+    state.researchFiltersOpen = details.open;
+  });
   const summary = node("summary");
   summary.append(node("span", "", "Problem filters"));
   summary.append(visibleProblemSelectionControl());
