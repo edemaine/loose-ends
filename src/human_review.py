@@ -913,13 +913,13 @@ def render_human_review_html(
       overflow: auto;
     }
     .brand {
-      color: var(--navy);
+      color: var(--heading);
       font: 750 25px/1.05 ui-serif, Georgia, serif;
       letter-spacing: -0.025em;
     }
     .eyebrow {
       margin-top: 8px;
-      color: var(--teal);
+      color: var(--accent);
       font-size: 11px;
       font-weight: 800;
       letter-spacing: 0.16em;
@@ -964,8 +964,8 @@ def render_human_review_html(
       outline: none;
     }
     input[type="search"]:focus {
-      border-color: var(--teal);
-      box-shadow: 0 0 0 3px rgba(40, 120, 111, 0.14);
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-ring);
     }
     select {
       width: 100%;
@@ -977,8 +977,8 @@ def render_human_review_html(
       outline: none;
     }
     select:focus {
-      border-color: var(--teal);
-      box-shadow: 0 0 0 3px rgba(40, 120, 111, 0.14);
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-ring);
     }
     .filters { display: flex; gap: 8px; }
     .filter {
@@ -1011,7 +1011,7 @@ def render_human_review_html(
     }
     .paper-group { display: grid; gap: 6px; }
     .paper-title {
-      color: var(--teal);
+      color: var(--accent);
       font-size: 11px;
       font-weight: 850;
       letter-spacing: 0.035em;
@@ -1031,17 +1031,17 @@ def render_human_review_html(
     }
     .problem-card:hover {
       border-color: var(--line);
-      border-left-color: var(--teal);
+      border-left-color: var(--accent);
       background: var(--surface);
     }
     .problem-card.active {
-      border-color: var(--teal);
+      border-color: var(--accent);
       background: var(--surface);
-      box-shadow: 0 0 0 2px rgba(40, 120, 111, 0.12);
+      box-shadow: 0 0 0 2px var(--accent-ring);
     }
     .problem-card strong {
       display: block;
-      color: var(--navy);
+      color: var(--heading);
       font-size: 13px;
       line-height: 1.4;
     }
@@ -1062,12 +1062,12 @@ def render_human_review_html(
       cursor: pointer;
       transition: 120ms ease;
     }
-    .attempt-card:hover { border-color: #97ada8; transform: translateY(-1px); }
+    .attempt-card:hover { border-color: var(--accent-border); transform: translateY(-1px); }
     .attempt-card.active {
-      border-color: var(--teal);
-      box-shadow: 0 0 0 2px rgba(40, 120, 111, 0.13);
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px var(--accent-ring);
     }
-    .attempt-card strong { display: block; color: var(--navy); }
+    .attempt-card strong { display: block; color: var(--heading); }
     .attempt-tags {
       display: flex;
       flex-wrap: wrap;
@@ -1086,7 +1086,7 @@ def render_human_review_html(
       line-height: 1.35;
       text-transform: uppercase;
     }
-    .attempt-tag.claim { color: var(--teal); }
+    .attempt-tag.claim { color: var(--accent); }
     .attempt-tag.status { color: var(--medium); }
     .attempt-tag.known { color: var(--known); background: var(--known-bg); }
     .main {
@@ -1134,7 +1134,7 @@ def render_human_review_html(
       background: var(--known-bg);
     }
     .badge.literature {
-      color: var(--teal);
+      color: var(--accent);
       background: var(--glow);
     }
     .verdict {
@@ -1145,7 +1145,7 @@ def render_human_review_html(
     h1 {
       max-width: 880px;
       margin: 17px 0 8px;
-      color: var(--navy);
+      color: var(--heading);
       font: 760 clamp(30px, 4vw, 49px)/1.07 ui-serif, Georgia, serif;
       letter-spacing: -0.035em;
     }
@@ -1175,7 +1175,7 @@ def render_human_review_html(
     .summary.literature-summary { grid-column: 1 / -1; }
     .summary h2, .section h2 {
       margin: 0 0 9px;
-      color: var(--navy);
+      color: var(--heading);
       font-size: 14px;
       letter-spacing: 0.025em;
     }
@@ -1185,7 +1185,7 @@ def render_human_review_html(
     }
     .problem-statement > h2 {
       margin: 0 0 9px;
-      color: var(--navy);
+      color: var(--heading);
       font-size: 14px;
       letter-spacing: 0.025em;
     }
@@ -1196,7 +1196,7 @@ def render_human_review_html(
     }
     .claim-list, .plain-list { margin: 0; padding-left: 21px; }
     .claim-list li, .plain-list li { margin: 7px 0; }
-    .claim-list strong { color: var(--navy); }
+    .claim-list strong { color: var(--heading); }
     .tabs {
       display: flex;
       gap: 3px;
@@ -1212,7 +1212,7 @@ def render_human_review_html(
       font-weight: 750;
       cursor: pointer;
     }
-    .tab.active { color: var(--navy); border-bottom-color: var(--teal); }
+    .tab.active { color: var(--heading); border-bottom-color: var(--accent); }
     .tab-panel { padding-top: 18px; }
     .markdown-body {
       margin: 0;
@@ -1231,7 +1231,7 @@ def render_human_review_html(
     .markdown-body h4, .markdown-body h5, .markdown-body h6 {
       max-width: none;
       margin: 1.45em 0 0.55em;
-      color: var(--navy);
+      color: var(--heading);
       font-family: ui-serif, Georgia, serif;
       font-weight: 750;
       line-height: 1.22;
@@ -1255,7 +1255,7 @@ def render_human_review_html(
     .markdown-body li { margin: 0.28em 0; }
     .markdown-body blockquote {
       margin: 1em 0;
-      border-left: 4px solid var(--teal);
+      border-left: 4px solid var(--accent);
       padding: 1px 0 1px 15px;
       color: var(--muted);
     }
@@ -1277,7 +1277,7 @@ def render_human_review_html(
       font: 0.9em ui-monospace, "Cascadia Code", Consolas, monospace;
     }
     .markdown-body pre code { background: transparent; padding: 0; }
-    .markdown-body a { color: var(--teal); }
+    .markdown-body a { color: var(--accent); }
     .markdown-body hr {
       margin: 1.5em 0;
       border: 0;
@@ -1295,7 +1295,7 @@ def render_human_review_html(
       text-align: left;
       vertical-align: top;
     }
-    .markdown-body th { background: var(--panel); color: var(--navy); }
+    .markdown-body th { background: var(--panel); color: var(--heading); }
     .markdown-body del { color: var(--muted); }
     .markdown-body .katex-display {
       overflow-x: auto;
@@ -1323,10 +1323,10 @@ def render_human_review_html(
       border-radius: 10px;
       background: var(--surface);
       padding: 10px 12px;
-      color: var(--navy);
+      color: var(--heading);
       text-decoration: none;
     }
-    .file:hover { border-color: var(--teal); }
+    .file:hover { border-color: var(--accent); }
     .file strong { display: block; }
     .file span {
       display: block;
