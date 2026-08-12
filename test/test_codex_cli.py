@@ -14,6 +14,46 @@ import codex_cli
 
 
 class CodexCliTests(unittest.TestCase):
+    def test_secure_windows_sandbox_preflight_fails_once_and_is_cached(self):
+        completed = subprocess.CompletedProcess(
+            ["codex", "sandbox"],
+            1,
+            stdout="",
+            stderr=(
+                "windows sandbox failed: helper_unknown_error: "
+                "apply deny-read ACLs"
+            ),
+        )
+        with (
+            patch.object(codex_cli, "is_windows_host", return_value=True),
+            patch.object(
+                codex_cli,
+                "_windows_sandbox_probe_command",
+                return_value=["codex", "sandbox"],
+            ),
+            patch.object(
+                codex_cli,
+                "_windows_sandbox_probe_error",
+                None,
+            ),
+            patch.object(
+                codex_cli,
+                "_windows_sandbox_probe_succeeded",
+                False,
+            ),
+            patch.object(subprocess, "run", return_value=completed) as run,
+        ):
+            for _ in range(2):
+                with self.assertRaisesRegex(
+                    codex_cli.CodexError,
+                    "before the agent was started",
+                ):
+                    codex_cli.require_secure_windows_sandbox(
+                        "codex",
+                        Path("."),
+                    )
+        run.assert_called_once()
+
     def test_shared_prompt_arguments_separate_direction_from_template(self):
         parser = argparse.ArgumentParser()
         default_template = Path("default-prompt.md")

@@ -225,6 +225,8 @@ def _validated_artifact_paths(workspace: Path, values: object) -> list[Path]:
 def validate_solver_result(
     result_path: Path,
     workspace: Path,
+    *,
+    require_markdown: bool = True,
 ) -> tuple[dict, list[Path]]:
     result = common.read_json(result_path, description="solver response")
     claimed_result_type = result.get("claimed_result_type")
@@ -297,21 +299,119 @@ def validate_solver_result(
         raise common.CodexError(
             f"{claimed_result_type} response contains no checkable claims"
         )
-    contents = common.validate_markdown(
-        workspace / "attempt.md",
-        description="solver attempt",
-    )
-    missing_ids = [claim_id for claim_id in claim_ids if claim_id not in contents]
-    if missing_ids:
-        raise common.CodexError(
-            "attempt.md omits claims: " + ", ".join(sorted(missing_ids))
+    if require_markdown:
+        contents = common.validate_markdown(
+            workspace / "attempt.md",
+            description="solver attempt",
         )
+        missing_ids = [
+            claim_id for claim_id in claim_ids if claim_id not in contents
+        ]
+        if missing_ids:
+            raise common.CodexError(
+                "attempt.md omits claims: "
+                + ", ".join(sorted(missing_ids))
+            )
     artifacts = _validated_artifact_paths(workspace, result.get("artifacts"))
     result["artifacts"] = [
         path.relative_to(workspace).as_posix()
         for path in artifacts
     ]
     return result, artifacts
+
+
+def _recovered_attempt_markdown(work: SolveWork, result: dict) -> str:
+    """Render the auditable structured result when the sandbox blocked Markdown."""
+    lines = [
+        f"# {work.problem.id} — {work.problem.title}",
+        "",
+        "> **Driver recovery notice.** The elevated Windows sandbox blocked "
+        "the solver from creating `attempt.md`. This document was generated "
+        "from the completed structured solver response; it may be less "
+        "detailed than the intended research narrative.",
+        "",
+        "## Solver summary",
+        "",
+        result["summary"].strip(),
+        "",
+        "## Checkable claims",
+        "",
+    ]
+    claims = result["checkable_claims"]
+    if not claims:
+        lines.extend(["No checkable claim was reported.", ""])
+    for claim in claims:
+        lines.extend(
+            [
+                f"### {claim['id']} — {claim['type']}",
+                "",
+                f"**Statement.** {claim['statement'].strip()}",
+                "",
+                f"**Support.** {claim['support'].strip()}",
+                "",
+                f"**Remaining gap.** {claim['remaining_gap'].strip()}",
+                "",
+            ]
+        )
+    lines.extend(["## External sources", ""])
+    sources = result["external_sources"]
+    if not sources:
+        lines.extend(["No external source was reported.", ""])
+    for source in sources:
+        lines.extend(
+            [
+                f"- [{source['title']}]({source['url']}) — "
+                f"{source['used_for']} Verification: "
+                f"{source['verification']}",
+                "",
+            ]
+        )
+    lines.extend(["## Warnings and limitations", ""])
+    warnings = result["warnings"]
+    if not warnings:
+        lines.extend(["No warning was reported.", ""])
+    else:
+        lines.extend(f"- {warning}" for warning in warnings)
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def recover_missing_attempt_markdown(
+    work: SolveWork,
+    workspace: Path,
+) -> bool:
+    """Recover a completed result whose only core write failure was ACL setup."""
+    attempt_path = workspace / "attempt.md"
+    if attempt_path.is_file():
+        return False
+    result_path = workspace / "agent-result.json"
+    events_path = workspace / "events.jsonl"
+    log_path = workspace / "run.log"
+    if not codex_cli.structured_turn_is_complete(events_path, result_path):
+        return False
+    try:
+        log = log_path.read_text(encoding="utf-8", errors="replace").lower()
+    except OSError:
+        return False
+    if codex_cli.WINDOWS_SANDBOX_ACL_FAILURE not in log:
+        return False
+    result, _ = validate_solver_result(
+        result_path,
+        workspace,
+        require_markdown=False,
+    )
+    warning = (
+        "Driver recovery: attempt.md was synthesized from the completed "
+        "structured response after the elevated Windows sandbox ACL failure."
+    )
+    if warning not in result["warnings"]:
+        result["warnings"].append(warning)
+        common.write_json(result_path, result)
+    attempt_path.write_text(
+        _recovered_attempt_markdown(work, result),
+        encoding="utf-8",
+    )
+    return True
 
 
 def _install_attempt(
@@ -454,7 +554,6 @@ def recover_solver_work(
             (workspace / name).is_file()
             for name in (
                 "agent-result.json",
-                "attempt.md",
                 "events.jsonl",
                 "run.log",
             )
@@ -468,6 +567,9 @@ def recover_solver_work(
         if not matches:
             continue
         assert record is not None
+        recover_missing_attempt_markdown(work, workspace)
+        if not (workspace / "attempt.md").is_file():
+            continue
         result, artifacts = validate_solver_result(
             workspace / "agent-result.json",
             workspace,
@@ -568,6 +670,7 @@ def solve_work(
             web_search=web_search,
             launch_interval=launch_interval,
         )
+        recover_missing_attempt_markdown(work, workspace)
         result, artifacts = validate_solver_result(result_path, workspace)
         destination = _install_attempt(
             work,
@@ -1003,6 +1106,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         codex = codex_cli.resolve_codex_executable(args.codex)
         codex_version = codex_cli.read_codex_version(codex)
+        # Probe once before announcing or submitting the batch.  Per-turn
+        # probing remains as a guard against a helper that fails later, but a
+        # persistently broken Windows helper must not create one workspace and
+        # failure report per selected problem.
+        codex_cli.require_secure_windows_sandbox(codex, PROJECT_ROOT)
     except common.CodexError as exc:
         return codex_cli.report_error(parser, exc)
     agent_count = min(args.jobs, len(work_items))

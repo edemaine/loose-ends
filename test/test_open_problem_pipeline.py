@@ -1,5 +1,5 @@
 from pathlib import Path
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 import json
 import sys
@@ -1529,6 +1529,66 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 ".solve-run-preserved",
             )
 
+    def test_solver_recovers_markdown_blocked_by_windows_sandbox(self):
+        with TemporaryDirectory() as temporary:
+            paper = make_analyzed_paper(Path(temporary))
+            problem = common.discover_problem_refs(
+                [paper],
+                problem_ids={"OP-001"},
+            )[0]
+            work = solve_open_problems.SolveWork(
+                problem,
+                solve_open_problems.generic_guidance(),
+                1,
+                None,
+            )
+            workspace = problem.directory / ".solve-run-blocked"
+            workspace.mkdir(parents=True)
+            common.write_json(
+                workspace / "agent-result.json",
+                {
+                    "claimed_result_type": "partial_result",
+                    "summary": "A lemma was proved.",
+                    "external_sources": [],
+                    "checkable_claims": [
+                        {
+                            "id": "C-001",
+                            "type": "lemma",
+                            "statement": "The lemma holds.",
+                            "support": "Here is its proof.",
+                            "remaining_gap": "The theorem remains.",
+                        }
+                    ],
+                    "artifacts": [],
+                    "warnings": [],
+                },
+            )
+            (workspace / "events.jsonl").write_text(
+                '{"type":"turn.completed"}\n',
+                encoding="utf-8",
+            )
+            (workspace / "run.log").write_text(
+                "windows sandbox: helper_unknown_error: "
+                "apply deny-read ACLs\n",
+                encoding="utf-8",
+            )
+
+            self.assertTrue(
+                solve_open_problems.recover_missing_attempt_markdown(
+                    work,
+                    workspace,
+                )
+            )
+            attempt = (workspace / "attempt.md").read_text(encoding="utf-8")
+            self.assertIn("Driver recovery notice", attempt)
+            self.assertIn("C-001", attempt)
+            result, artifacts = solve_open_problems.validate_solver_result(
+                workspace / "agent-result.json",
+                workspace,
+            )
+            self.assertEqual(result["claimed_result_type"], "partial_result")
+            self.assertEqual(artifacts, [])
+
     def test_response_schemas_avoid_unsupported_unique_items(self):
         schemas = Path(__file__).resolve().parents[1] / "schemas"
         for path in schemas.glob("*.json"):
@@ -1751,6 +1811,45 @@ class OpenProblemPipelineTests(unittest.TestCase):
             self.assertIn("OP-002/attempt-001", text)
             self.assertIn("Selected 2 problem(s)", text)
 
+    def test_solver_aborts_batch_when_secure_sandbox_preflight_fails(self):
+        with TemporaryDirectory() as temporary:
+            paper = make_analyzed_paper(Path(temporary))
+            error = StringIO()
+            with (
+                patch.object(
+                    codex_cli,
+                    "resolve_codex_executable",
+                    return_value="codex",
+                ),
+                patch.object(
+                    codex_cli,
+                    "read_codex_version",
+                    return_value="test",
+                ),
+                patch.object(
+                    codex_cli,
+                    "require_secure_windows_sandbox",
+                    side_effect=common.CodexError("sandbox unavailable"),
+                ) as preflight,
+                patch.object(solve_open_problems, "solve_many") as solve_many,
+                redirect_stderr(error),
+            ):
+                returncode = solve_open_problems.main(
+                    [str(paper / "OP-001")]
+                )
+
+            self.assertEqual(returncode, 1)
+            preflight.assert_called_once_with(
+                "codex",
+                solve_open_problems.PROJECT_ROOT,
+            )
+            solve_many.assert_not_called()
+            self.assertEqual(
+                error.getvalue().count("sandbox unavailable"),
+                1,
+            )
+            self.assertFalse(any((paper / "OP-001").glob(".solve-run-*")))
+
     def test_solver_repeats_rounds_until_critic_confirms_resolution(self):
         with TemporaryDirectory() as temporary:
             paper = make_analyzed_paper(Path(temporary))
@@ -1839,6 +1938,10 @@ class OpenProblemPipelineTests(unittest.TestCase):
                     "read_codex_version",
                     return_value="test",
                 ),
+                patch.object(
+                    codex_cli,
+                    "require_secure_windows_sandbox",
+                ) as preflight,
                 redirect_stdout(output),
             ):
                 returncode = solve_open_problems.main(
@@ -1852,6 +1955,10 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 )
 
             self.assertEqual(returncode, 0)
+            preflight.assert_called_once_with(
+                "codex",
+                solve_open_problems.PROJECT_ROOT,
+            )
             self.assertEqual(
                 events,
                 ["solve-1", "review-1", "solve-2", "review-2"],

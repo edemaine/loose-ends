@@ -9,7 +9,7 @@ from functools import lru_cache
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import signal
 import shutil
 import subprocess
@@ -26,8 +26,12 @@ CODEX_LAUNCH_INTERVAL_SECONDS = 1.0
 MAX_CODEX_START_ATTEMPTS = 3
 CODEX_POLL_INTERVAL_SECONDS = 0.5
 CODEX_STOP_GRACE_SECONDS = 10.0
+WINDOWS_SANDBOX_ACL_FAILURE = "helper_unknown_error: apply deny-read acls"
 _CODEX_LAUNCH_LOCK = threading.Lock()
+_WINDOWS_SANDBOX_PROBE_LOCK = threading.Lock()
 _next_codex_launch_at = 0.0
+_windows_sandbox_probe_error: str | None = None
+_windows_sandbox_probe_succeeded = False
 _WINDOWS_RESERVED_DEVICE_NAMES = {
     "aux",
     "con",
@@ -372,6 +376,85 @@ def windows_icacls_for_sandbox() -> str:
     if sys.platform == "cygwin":
         return path_for_codex(Path(executable))
     return executable
+
+
+def _windows_sandbox_probe_command(codex: str, workspace: Path) -> list[str]:
+    windows_directory = os.environ.get("WINDIR", r"C:\Windows")
+    executable = str(
+        PureWindowsPath(windows_directory) / "System32" / "whoami.exe"
+    )
+    return [
+        codex,
+        "sandbox",
+        "-c",
+        'windows.sandbox="elevated"',
+        "-P",
+        ":workspace",
+        "-C",
+        path_for_codex(workspace),
+        executable,
+    ]
+
+
+def require_secure_windows_sandbox(codex: str, workspace: Path) -> None:
+    """Fail before model use when the elevated Windows helper is broken."""
+    global _windows_sandbox_probe_error
+    global _windows_sandbox_probe_succeeded
+    if not is_windows_host():
+        return
+    with _WINDOWS_SANDBOX_PROBE_LOCK:
+        if _windows_sandbox_probe_error is not None:
+            raise CodexError(_windows_sandbox_probe_error)
+        if _windows_sandbox_probe_succeeded:
+            return
+        command = _windows_sandbox_probe_command(codex, workspace)
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=workspace,
+                env=codex_subprocess_environment(),
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            detail = str(exc)
+        else:
+            if completed.returncode == 0:
+                _windows_sandbox_probe_succeeded = True
+                return
+            detail = (completed.stderr or completed.stdout).strip()
+            if not detail:
+                detail = f"exit status {completed.returncode}"
+        _windows_sandbox_probe_error = (
+            "secure elevated Windows sandbox preflight failed before the "
+            f"agent was started: {detail}. Stop other active Codex CLI "
+            "batches and retry; if none are active, restart Codex or Windows."
+        )
+        raise CodexError(_windows_sandbox_probe_error)
+
+
+def note_windows_sandbox_failure(log_path: Path) -> None:
+    """Prevent further model launches after an elevated-helper ACL failure."""
+    global _windows_sandbox_probe_error
+    global _windows_sandbox_probe_succeeded
+    if not is_windows_host():
+        return
+    try:
+        log = log_path.read_text(encoding="utf-8", errors="replace").lower()
+    except OSError:
+        return
+    if WINDOWS_SANDBOX_ACL_FAILURE not in log:
+        return
+    with _WINDOWS_SANDBOX_PROBE_LOCK:
+        _windows_sandbox_probe_succeeded = False
+        _windows_sandbox_probe_error = (
+            "the elevated Windows sandbox helper failed while applying "
+            "deny-read ACLs. Further agents were not launched to avoid "
+            "wasting credits; stop other Codex CLI batches and retry, or "
+            "restart Codex or Windows if no batch is active."
+        )
 
 
 def grant_workspace_owner_inheritance(workspace: Path) -> None:
@@ -791,6 +874,7 @@ def run_structured_codex(
     """Run one structured Codex turn and return its final-response path."""
     workspace = workspace.resolve()
     grant_workspace_owner_inheritance(workspace)
+    require_secure_windows_sandbox(codex, workspace)
     result_path = workspace / result_filename
     events_path = workspace / events_filename
     log_path = workspace / log_filename
@@ -877,7 +961,14 @@ def run_structured_codex(
         ):
             break
 
-    normalize_workspace_access(workspace, codex)
+    note_windows_sandbox_failure(log_path)
+    try:
+        normalize_workspace_access(workspace, codex)
+    except CodexError as exc:
+        if not structured_turn_is_complete(events_path, result_path):
+            raise
+        with log_path.open("a", encoding="utf-8") as log:
+            log.write(f"\nDriver ACL recovery warning: {exc}\n")
     if timed_out:
         raise CodexError(
             f"Codex exceeded the {timeout_seconds:g}-second wall-clock "
