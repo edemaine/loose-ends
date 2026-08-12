@@ -163,6 +163,7 @@ button { color: inherit; }
 .side-card input { width: 13px; height: 13px; margin: 2px 0 0; accent-color: var(--accent); }
 .side-card strong { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; color: var(--heading); font-size: 12px; line-height: 1.22; }
 .side-card small { display: block; overflow: hidden; margin-top: 1px; color: var(--muted); font-size: 9px; line-height: 1.2; text-overflow: ellipsis; white-space: nowrap; }
+.side-card > span > .badge { margin-top: 3px; padding: 2px 5px; font-size: 8px; }
 .attempt-tags { display: flex; min-width: 0; flex-wrap: wrap; gap: 2px; margin-top: 2px; }
 .attempt-tag { max-width: 100%; overflow: hidden; border-radius: 999px; background: var(--low-bg); color: var(--low); padding: 1px 4px; font-size: 8px; font-weight: 800; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
 .attempt-tag.claim { background: var(--accent-soft); color: var(--accent); }

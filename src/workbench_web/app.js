@@ -1207,7 +1207,8 @@ function renderActivity({ preserveDetail = false } = {}) {
   const list = node("div", "side-list");
   jobs.forEach(job => appendSideCard(list, {
     title: job.title,
-    meta: `${taskStatus(job.status).label} · ${formatTime(job.created_at)}`,
+    meta: `Created ${formatTime(job.created_at)}`,
+    tags: taskStatusBadge(job.status),
     active: state.selectedJob === job.id,
     onClick: () => {
       state.selectedJob = job.id;
