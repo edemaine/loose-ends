@@ -1085,11 +1085,17 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError as exc:
+            self.close_connection = True
             raise PlanError("invalid content length") from exc
         if length <= 0 or length > 2_000_000:
+            self.close_connection = True
             raise PlanError("invalid request body")
+        data = self.rfile.read(length)
+        if len(data) != length:
+            self.close_connection = True
+            raise PlanError("incomplete request body")
         try:
-            value = json.loads(self.rfile.read(length))
+            value = json.loads(data)
         except (UnicodeError, json.JSONDecodeError) as exc:
             raise PlanError("request body must be valid JSON") from exc
         if not isinstance(value, dict):
@@ -1169,11 +1175,11 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
             self.close_connection = True
             self.send_error_json(403, "untrusted host")
             return
-        if not self.require_mutation_auth():
-            return
         parsed = urlsplit(self.path)
         try:
             body = self.read_json()
+            if not self.require_mutation_auth():
+                return
             if parsed.path == "/api/plans":
                 self.send_json(self.app.create_plan(body), 201)
             elif parsed.path == "/api/jobs":

@@ -1,4 +1,5 @@
 from pathlib import Path
+from io import BytesIO
 import json
 import subprocess
 import sys
@@ -80,6 +81,28 @@ def fake_plan(argv: list[str], *, probe: dict | None = None) -> dict:
 
 
 class WorkbenchPlanningTests(unittest.TestCase):
+    def test_request_json_consumes_exact_body_before_next_request(self):
+        payload = b'{"action":"literature"}'
+        trailing = b"GET /research HTTP/1.1\r\n"
+        handler = object.__new__(workbench.WorkbenchHandler)
+        handler.headers = {"Content-Length": str(len(payload))}
+        handler.rfile = BytesIO(payload + trailing)
+        handler.close_connection = False
+
+        self.assertEqual(handler.read_json(), {"action": "literature"})
+        self.assertEqual(handler.rfile.read(), trailing)
+        self.assertFalse(handler.close_connection)
+
+    def test_incomplete_request_body_forces_connection_close(self):
+        handler = object.__new__(workbench.WorkbenchHandler)
+        handler.headers = {"Content-Length": "20"}
+        handler.rfile = BytesIO(b"{}")
+        handler.close_connection = False
+
+        with self.assertRaisesRegex(PlanError, "incomplete request body"):
+            handler.read_json()
+        self.assertTrue(handler.close_connection)
+
     def test_spa_routes_and_shared_assets_are_served(self):
         class RecordingHandler(workbench.WorkbenchHandler):
             def _host_is_allowed(self):
@@ -124,6 +147,11 @@ class WorkbenchPlanningTests(unittest.TestCase):
         )
         self.assertIn('code="invalid_confirmation_token"', server)
         self.assertIn('self.send_header("Connection", "close")', server)
+        self.assertLess(
+            server.index("body = self.read_json()"),
+            server.index("if not self.require_mutation_auth()"),
+        )
+        self.assertIn('raise PlanError("incomplete request body")', server)
         self.assertIn("except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):", server)
         self.assertIn('history[method](historyPayload(scrollY), "", url)', app)
         self.assertIn('value.searchParams.delete("detail")', app)
