@@ -81,6 +81,13 @@
   });
   const priorityLevels = Object.freeze(["high", "medium", "low", "none"]);
   const freshnessLevels = Object.freeze(["current", "stale"]);
+  const paperSortOptions = Object.freeze([
+    ["alphabetical", "Alphabetical"],
+    ["publication", "Publication date (newest)"],
+    ["activity", "Latest activity"],
+    ["results", "Most results (weighted)"],
+    ["problems", "Most open problems"],
+  ]);
 
   function humanize(value, fallback = "unknown") {
     return String(value || fallback).replaceAll("_", " ");
@@ -178,7 +185,100 @@
     );
   }
 
-  function groupProblemsByPaper(items) {
+  function normalizePaperSort(value) {
+    return paperSortOptions.some(([key]) => key === value)
+      ? value
+      : "alphabetical";
+  }
+
+  function timestamp(value) {
+    if (Number.isFinite(value)) return Number(value);
+    const parsed = Date.parse(value || "");
+    return Number.isFinite(parsed) ? parsed / 1000 : 0;
+  }
+
+  function paperTitleWithYear(title, published) {
+    const paperTitle = String(title || "");
+    const value = timestamp(published);
+    if (!value) return paperTitle;
+    const year = new Date(value * 1000).getUTCFullYear();
+    return Number.isFinite(year) ? `${paperTitle} (${year})` : paperTitle;
+  }
+
+  function paperResultWeight(item) {
+    if (item.attemptStatus === "reviewed" && item.correctness === "incorrect") return 0;
+    if (["solution", "counterexample"].includes(item.claimedResultType)) return 1;
+    if (["partial_result", "obstruction"].includes(item.claimedResultType)) return 0.1;
+    return 0;
+  }
+
+  function paperMetrics(items) {
+    const metrics = new Map();
+    const bestResultByProblem = new Map();
+    items.forEach(item => {
+      const key = item.paperUrlKey || item.paperDirectory;
+      if (!metrics.has(key)) {
+        metrics.set(key, {
+          activityTimestamp: 0,
+          publicationTimestamp: 0,
+          problemCount: 0,
+          resultScore: 0,
+        });
+      }
+      const metric = metrics.get(key);
+      metric.activityTimestamp = Math.max(
+        metric.activityTimestamp,
+        timestamp(item.paperActivityTimestamp),
+      );
+      metric.publicationTimestamp = Math.max(
+        metric.publicationTimestamp,
+        timestamp(item.paperPublished),
+      );
+      metric.problemCount = Math.max(
+        metric.problemCount,
+        Number(item.paperProblemCount) || 0,
+      );
+      const resultKey = `${key}::${item.problemKey}`;
+      const previousResult = bestResultByProblem.get(resultKey);
+      bestResultByProblem.set(resultKey, {
+        key,
+        weight: Math.max(previousResult?.weight || 0, paperResultWeight(item)),
+      });
+    });
+    bestResultByProblem.forEach(({ key, weight }) => {
+      if (metrics.has(key)) metrics.get(key).resultScore += weight;
+    });
+    return metrics;
+  }
+
+  function comparePaperIdentity(left, right) {
+    return String(left.paperTitle || left.title || "").localeCompare(
+      String(right.paperTitle || right.title || ""),
+      undefined,
+      { sensitivity: "base", numeric: true },
+    ) || String(left.paperDirectory || left.path || "").localeCompare(
+      String(right.paperDirectory || right.path || ""),
+    );
+  }
+
+  function comparePaperEntries(left, right, requestedSort) {
+    const sort = normalizePaperSort(requestedSort);
+    if (sort === "publication") {
+      return right.publicationTimestamp - left.publicationTimestamp || comparePaperIdentity(left, right);
+    }
+    if (sort === "activity") {
+      return right.activityTimestamp - left.activityTimestamp || comparePaperIdentity(left, right);
+    }
+    if (sort === "results") {
+      return right.resultScore - left.resultScore || comparePaperIdentity(left, right);
+    }
+    if (sort === "problems") {
+      return right.problemCount - left.problemCount || comparePaperIdentity(left, right);
+    }
+    return comparePaperIdentity(left, right);
+  }
+
+  function groupProblemsByPaper(items, sort = "alphabetical", referenceItems = items) {
     const groups = new Map();
     latestProblems(items).forEach(item => {
       const key = item.paperUrlKey || item.paperDirectory;
@@ -187,7 +287,40 @@
       }
       groups.get(key).problems.push(item);
     });
-    return [...groups.values()];
+    const metrics = paperMetrics(referenceItems);
+    return [...groups.values()].map(group => ({
+      ...group,
+      ...(metrics.get(group.key) || {
+        activityTimestamp: 0,
+        publicationTimestamp: 0,
+        problemCount: group.problems.length,
+        resultScore: 0,
+      }),
+    })).sort((left, right) => comparePaperEntries(left, right, sort));
+  }
+
+  function sortPapers(papers, sort = "alphabetical", referenceItems = []) {
+    const metrics = paperMetrics(referenceItems);
+    return papers.map(paper => {
+      const key = paper.urlKey || paper.path;
+      const metric = metrics.get(key) || {};
+      return {
+        ...paper,
+        activityTimestamp: Math.max(
+          timestamp(paper.activityTimestamp),
+          metric.activityTimestamp || 0,
+        ),
+        publicationTimestamp: Math.max(
+          timestamp(paper.published),
+          metric.publicationTimestamp || 0,
+        ),
+        problemCount: Math.max(
+          Number(paper.problemCount) || 0,
+          metric.problemCount || 0,
+        ),
+        resultScore: metric.resultScore || 0,
+      };
+    }).sort((left, right) => comparePaperEntries(left, right, sort));
   }
 
   function attemptTags(item, { includeKnown = false } = {}) {
@@ -424,6 +557,7 @@
     filterOptions,
     priorityLevels,
     freshnessLevels,
+    paperSortOptions,
     humanize,
     titleize,
     statusLabel,
@@ -433,7 +567,12 @@
     compareProblems,
     latestProblems,
     attemptsForProblem,
+    normalizePaperSort,
+    paperTitleWithYear,
+    paperResultWeight,
+    paperMetrics,
     groupProblemsByPaper,
+    sortPapers,
     attemptTags,
     detailBadges,
     summaryCards,

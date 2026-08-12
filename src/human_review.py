@@ -377,6 +377,56 @@ def _read_optional_text(path: Path) -> str:
         return ""
 
 
+def _modified_timestamp(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def paper_timeline(
+    paper: Path,
+    *,
+    metadata: dict | None = None,
+) -> dict[str, str | float]:
+    """Return publication metadata and installed-project activity for a paper."""
+    if metadata is None:
+        value = common.load_json(paper / "metadata.json")
+        metadata = value if isinstance(value, dict) else {}
+    published = metadata.get("published")
+    updated = metadata.get("updated")
+    return {
+        "published": published if isinstance(published, str) else "",
+        "updated": updated if isinstance(updated, str) else "",
+        "activityTimestamp": max(
+            _modified_timestamp(paper / "metadata.json"),
+            _modified_timestamp(paper / "analysis" / "manifest.json"),
+        ),
+    }
+
+
+def _problem_activity_timestamp(
+    problem: common.ProblemRef,
+    attempts: Sequence[Path],
+) -> float:
+    paths = [
+        problem.directory / common.TRIAGE_RESULT,
+        problem.directory / common.TRIAGE_MANIFEST,
+        problem.directory / common.LITERATURE_RESULT,
+        problem.directory / common.LITERATURE_MANIFEST,
+    ]
+    for attempt in attempts:
+        paths.extend(
+            (
+                attempt / "solver-result.json",
+                attempt / "manifest.json",
+                attempt / "review-result.json",
+                attempt / "review-manifest.json",
+            )
+        )
+    return max((_modified_timestamp(path) for path in paths), default=0.0)
+
+
 _OPEN_PROBLEM_HEADING_RE = re.compile(
     r"^(?P<marks>#{1,6})[ \t]+(?P<id>OP-[0-9]+)\b.*$",
     re.IGNORECASE,
@@ -537,6 +587,37 @@ def build_review_catalog(
         (problem.paper_directory, problem.id): problem
         for problem, _, _ in rows
     }
+    paper_facts: dict[Path, dict[str, str | float | int]] = {}
+    for problem_key, problem in unique_problems.items():
+        paper = problem.paper_directory
+        if paper not in paper_facts:
+            metadata_value = common.load_json(paper / "metadata.json")
+            metadata = (
+                metadata_value if isinstance(metadata_value, dict) else {}
+            )
+            manifest_value = common.load_json(
+                paper / "analysis" / "manifest.json"
+            )
+            manifest = (
+                manifest_value if isinstance(manifest_value, dict) else {}
+            )
+            open_problems = manifest.get("open_problems", [])
+            paper_facts[paper] = {
+                **paper_timeline(paper, metadata=metadata),
+                "problemCount": (
+                    len(open_problems)
+                    if isinstance(open_problems, list)
+                    else 0
+                ),
+            }
+        attempts = problem_attempt_directories.get(problem_key)
+        if attempts is None:
+            attempts = common.attempt_directories(problem)
+            problem_attempt_directories[problem_key] = attempts
+        paper_facts[paper]["activityTimestamp"] = max(
+            float(paper_facts[paper]["activityTimestamp"]),
+            _problem_activity_timestamp(problem, attempts),
+        )
     context_papers = {
         problem.paper_directory
         for problem in unique_problems.values()
@@ -657,6 +738,12 @@ def build_review_catalog(
                 "paperTitle": problem.paper_title,
                 "paperAuthors": list(problem.paper_authors),
                 "paperDirectory": str(paper),
+                "paperPublished": paper_facts[paper]["published"],
+                "paperUpdated": paper_facts[paper]["updated"],
+                "paperActivityTimestamp": paper_facts[paper][
+                    "activityTimestamp"
+                ],
+                "paperProblemCount": paper_facts[paper]["problemCount"],
                 "problemId": problem.id,
                 "problemTitle": problem.title,
                 "problemStatement": (
@@ -1372,6 +1459,9 @@ def render_human_review_html(
             placeholder="Paper title/id, problem, attempt…"
             autocomplete="off">
         </label>
+        <label class="control">Sort papers
+          <select id="paper-sort"></select>
+        </label>
         <label class="control">Attempt status
           <select id="attempt-status-filter"></select>
         </label>
@@ -1449,6 +1539,8 @@ def render_human_review_html(
       history.scrollRestoration = "manual";
     }
     const search = document.getElementById("search");
+    const paperSort = document.getElementById("paper-sort");
+    paperSort.title = "Most results uses the best result per problem: solutions and counterexamples 1.0, partial results and obstructions 0.1, reviewed incorrect results 0.";
     const attemptStatusFilter = document.getElementById(
       "attempt-status-filter"
     );
@@ -1466,6 +1558,7 @@ def render_human_review_html(
         select.append(option);
       });
     }
+    populateFilter(paperSort, LooseEndsReviewModel.paperSortOptions);
     [
       [attemptStatusFilter, "attemptStatus"],
       [claimFilter, "claim"],
@@ -1597,6 +1690,9 @@ def render_human_review_html(
       if (query) {
         parameters.set("q", query);
       }
+      if (paperSort.value !== "alphabetical") {
+        parameters.set("sort", paperSort.value);
+      }
       LooseEndsReviewModel.filtersToSearchParams(
         parameters,
         activeReviewFilters(),
@@ -1615,6 +1711,9 @@ def render_human_review_html(
     function applyControlsFromLocation() {
       const parameters = new URLSearchParams(location.search);
       search.value = parameters.get("q") || "";
+      paperSort.value = LooseEndsReviewModel.normalizePaperSort(
+        parameters.get("sort")
+      );
       const filters = LooseEndsReviewModel.filtersFromSearchParams(
         parameters,
         settings.initialPriorities
@@ -1692,14 +1791,26 @@ def render_human_review_html(
     }
 
     function renderProblemControls(items) {
-      const problems = latestProblems(items);
+      const groups = groupProblemsByPaper(
+        items,
+        paperSort.value,
+        allItems
+      );
+      const problems = groups.flatMap(group => group.problems);
       if (!problems.some(item => item.problemKey === state.selectedProblem)) {
         state.selectedProblem = problems[0]?.problemKey || "";
       }
       problemList.replaceChildren();
-      groupProblemsByPaper(items).forEach(group => {
+      groups.forEach(group => {
         const section = node("section", "paper-group");
-        section.append(node("div", "paper-title", group.paperTitle));
+        section.append(node(
+          "div",
+          "paper-title",
+          LooseEndsReviewModel.paperTitleWithYear(
+            group.paperTitle,
+            group.publicationTimestamp
+          )
+        ));
         group.problems.forEach(item => {
           const problemAttempts = attemptsForProblem(
             items, item.problemKey
@@ -1940,7 +2051,20 @@ def render_human_review_html(
         history.replaceState(historyPayload(0), "", itemUrl(""));
       }
     }
+    function updatePaperSort() {
+      rememberCurrentScroll();
+      render();
+      renderedItemId = state.selectedItem;
+      const scrollY = pageScrollPositions.get(renderedItemId) ?? 0;
+      history.replaceState(
+        historyPayload(scrollY),
+        "",
+        itemUrl(renderedItemId)
+      );
+      restorePageScroll(renderedItemId, scrollY);
+    }
     search.addEventListener("input", updateFilters);
+    paperSort.addEventListener("change", updatePaperSort);
     attemptStatusFilter.addEventListener("change", updateFilters);
     claimFilter.addEventListener("change", updateFilters);
     correctnessFilter.addEventListener("change", updateFilters);

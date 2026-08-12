@@ -13,6 +13,7 @@ const state = {
   selectedReview: "",
   selectedProblem: "",
   researchFilters: reviewModel.createDefaultFilters(),
+  paperSort: "alphabetical",
   selectedPaper: "",
   selectedManuscript: "",
   selectedDraft: "",
@@ -66,6 +67,9 @@ function tabFromPath(pathname) {
 function currentUrl() {
   const parameters = new URLSearchParams();
   if (state.search.trim()) parameters.set("q", state.search.trim());
+  if (["research", "papers"].includes(state.tab) && state.paperSort !== "alphabetical") {
+    parameters.set("sort", state.paperSort);
+  }
   if (state.tab === "research") {
     reviewModel.filtersToSearchParams(parameters, state.researchFilters, initialPriorities);
     const item = state.catalog.reviews.find(value => value.itemKey === state.selectedReview);
@@ -125,6 +129,7 @@ function applyLocation({ scrollY } = {}) {
   const parameters = new URLSearchParams(location.search);
   state.tab = tabFromPath(location.pathname);
   state.search = parameters.get("q") || "";
+  state.paperSort = reviewModel.normalizePaperSort(parameters.get("sort"));
   if (state.tab === "research") {
     state.researchFilters = reviewModel.filtersFromSearchParams(parameters, initialPriorities);
     const identity = reviewModel.identityFromSearchParams(parameters);
@@ -514,6 +519,25 @@ function sidebarSearch(placeholder) {
   return input;
 }
 
+function paperSortControl() {
+  const wrapper = node("label", "paper-sort-control");
+  wrapper.append(node("span", "", "Sort papers"));
+  const select = node("select");
+  select.title = "Most results uses the best result per problem: solutions and counterexamples 1.0, partial results and obstructions 0.1, reviewed incorrect results 0.";
+  reviewModel.paperSortOptions.forEach(([value, label]) => {
+    const option = node("option", "", label);
+    option.value = value;
+    option.selected = state.paperSort === value;
+    select.append(option);
+  });
+  select.addEventListener("change", () => {
+    state.paperSort = reviewModel.normalizePaperSort(select.value);
+    syncNavigation({ replace: true, preserveScroll: true });
+  });
+  wrapper.append(select);
+  return wrapper;
+}
+
 function attemptTagsNode(item, options = {}) {
   const tags = node("span", "attempt-tags");
   reviewModel.attemptTags(item, options).forEach(value => {
@@ -638,11 +662,20 @@ function renderResearchFilters() {
 
 function renderResearch() {
   sidebar.replaceChildren();
-  const controls = node("div", "research-controls");
-  controls.append(sidebarSearch("Search open problems…"), renderResearchFilters());
+  const controls = node("div", "paper-list-controls research-controls");
+  controls.append(
+    sidebarSearch("Search open problems…"),
+    paperSortControl(),
+    renderResearchFilters(),
+  );
   sidebar.append(controls);
   const reviews = filteredReviews();
-  const problems = reviewModel.latestProblems(reviews);
+  const paperGroups = reviewModel.groupProblemsByPaper(
+    reviews,
+    state.paperSort,
+    state.catalog.reviews,
+  );
+  const problems = paperGroups.flatMap(group => group.problems);
   const requested = state.catalog.reviews.find(item => item.itemKey === state.selectedReview);
   if (requested) state.selectedProblem = requested.problemKey;
   if (!problems.some(item => item.problemKey === state.selectedProblem)) {
@@ -650,8 +683,12 @@ function renderResearch() {
   }
   const listScroll = node("div", "problem-scroll");
   listScroll.append(node("div", "sidebar-heading queue-summary", reviewModel.queueSummary(reviews, state.researchFilters)));
-  for (const group of reviewModel.groupProblemsByPaper(reviews)) {
-    listScroll.append(node("div", "sidebar-heading paper-heading", group.paperTitle));
+  for (const group of paperGroups) {
+    listScroll.append(node(
+      "div",
+      "sidebar-heading paper-heading",
+      reviewModel.paperTitleWithYear(group.paperTitle, group.publicationTimestamp),
+    ));
     const list = node("div", "side-list");
     group.problems.forEach(item => {
       appendSideCard(list, {
@@ -858,12 +895,24 @@ function fileGrid(files) {
 }
 
 function renderPapers() {
-  sidebar.replaceChildren(sidebarSearch("Search source papers…"));
+  const controls = node("div", "paper-list-controls");
+  controls.append(
+    sidebarSearch("Search source papers…"),
+    paperSortControl(),
+  );
+  sidebar.replaceChildren(controls);
   const query = state.search.trim().toLowerCase();
-  const papers = state.catalog.papers.filter(paper => !query || `${paper.title} ${paper.name} ${paper.authors.join(" ")}`.toLowerCase().includes(query));
+  const papers = reviewModel.sortPapers(
+    state.catalog.papers.filter(paper => !query || `${paper.title} ${paper.name} ${paper.authors.join(" ")}`.toLowerCase().includes(query)),
+    state.paperSort,
+    state.catalog.reviews,
+  );
   const list = node("div", "side-list");
   papers.forEach(paper => appendSideCard(list, {
-    title: paper.title,
+    title: reviewModel.paperTitleWithYear(
+      paper.title,
+      paper.publicationTimestamp,
+    ),
     meta: paper.analyzed ? `${paper.problemCount} open problems` : "Not analyzed",
     active: state.selectedPaper === paper.key,
     selectedTarget: paperTarget(paper),

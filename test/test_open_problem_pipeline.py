@@ -27,6 +27,15 @@ def make_analyzed_paper(root: Path) -> Path:
         "\\section{Results}\nA theorem and an open problem.\n",
         encoding="utf-8",
     )
+    common.write_json(
+        paper / "metadata.json",
+        {
+            "title": "Test Paper",
+            "authors": ["Ada Lovelace"],
+            "published": "2024-01-02T00:00:00Z",
+            "updated": "2024-01-03T00:00:00Z",
+        },
+    )
     analysis = paper / "analysis"
     analysis.mkdir()
     (analysis / "summary.md").write_text(
@@ -1297,6 +1306,12 @@ class OpenProblemPipelineTests(unittest.TestCase):
             )
             self.assertEqual(dashboard_data[0]["totalAttemptCount"], 2)
             self.assertEqual(
+                dashboard_data[0]["paperPublished"],
+                "2024-01-02T00:00:00Z",
+            )
+            self.assertEqual(dashboard_data[0]["paperProblemCount"], 2)
+            self.assertGreater(dashboard_data[0]["paperActivityTimestamp"], 0)
+            self.assertEqual(
                 human_review._project_display_path(
                     human_review.PROJECT_ROOT / "papers" / "example"
                 ),
@@ -1325,6 +1340,10 @@ class OpenProblemPipelineTests(unittest.TestCase):
             self.assertIn("appendAttemptTags(button, item)", dashboard)
             self.assertNotIn("showing ${item.attemptName}", dashboard)
             self.assertIn('id="claim-filter"', dashboard)
+            self.assertIn('id="paper-sort"', dashboard)
+            self.assertIn("LooseEndsReviewModel.paperSortOptions", dashboard)
+            self.assertIn("LooseEndsReviewModel.paperTitleWithYear", dashboard)
+            self.assertIn('parameters.set("sort", paperSort.value)', dashboard)
             self.assertIn('id="correctness-filter"', dashboard)
             self.assertIn('id="coverage-filter"', dashboard)
             self.assertIn('id="importance-filter"', dashboard)

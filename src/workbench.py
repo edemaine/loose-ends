@@ -107,6 +107,7 @@ def _paper_inventory(paths: Iterable[Path]) -> list[dict]:
             analysis=manifest,
             metadata=metadata,
         )
+        timeline = human_review.paper_timeline(paper, metadata=metadata)
         resolved = paper.resolve()
         records.append(
             {
@@ -116,6 +117,9 @@ def _paper_inventory(paths: Iterable[Path]) -> list[dict]:
                 "name": paper.name,
                 "title": title,
                 "authors": authors,
+                "published": timeline["published"],
+                "updated": timeline["updated"],
+                "activityTimestamp": timeline["activityTimestamp"],
                 "analyzed": bool(manifest),
                 "problemCount": len(manifest.get("open_problems", [])),
                 "analysisStatus": manifest.get("status", ""),

@@ -120,8 +120,10 @@ button { color: inherit; }
   outline: none;
 }
 .search:focus, input:focus, select:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring); outline: none; }
+.paper-list-controls { display: grid; gap: 6px; }
 .research-controls { flex: none; }
-.research-controls > .search { margin-bottom: 6px; }
+.paper-sort-control { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 7px; color: var(--muted); font-size: 9px; font-weight: 800; }
+.paper-sort-control select { min-width: 0; width: 100%; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); padding: 4px 5px; font-size: 10px; }
 .research-filters { border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
 .research-filters > summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 5px 8px; color: var(--heading); font-size: 11px; font-weight: 800; cursor: pointer; }
 .select-visible { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: 9px; font-weight: 700; cursor: pointer; white-space: nowrap; }
