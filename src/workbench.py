@@ -6,12 +6,14 @@ from __future__ import annotations
 import argparse
 from collections import deque
 import hashlib
+import ipaddress
 import json
 import mimetypes
 import os
 from pathlib import Path
 import re
 import secrets
+import socket
 import subprocess
 import sys
 import threading
@@ -25,6 +27,7 @@ import codex_cli
 import human_review
 import open_problem_common as common
 import review_solutions
+import write_paper
 from workbench_store import ACTIVE_STATUSES, WorkbenchStore
 from workbench_tasks import PlanError, build_plan, probe_outputs
 
@@ -108,7 +111,10 @@ def _paper_inventory(paths: Iterable[Path]) -> list[dict]:
     return records
 
 
-def _review_inventory(paths: Iterable[Path]) -> list[dict]:
+def _review_inventory(
+    paths: Iterable[Path],
+    progress=None,
+) -> list[dict]:
     try:
         problems = common.discover_problem_refs(paths)
     except common.CodexError as exc:
@@ -125,10 +131,101 @@ def _review_inventory(paths: Iterable[Path]) -> list[dict]:
         items,
         include_contents=False,
         problems=problems,
+        progress=progress,
     )
 
 
-def _manuscript_inventory(directory: Path) -> list[dict]:
+def _manuscript_sources(
+    manifest: dict,
+    papers: list[dict],
+    reviews: list[dict],
+) -> dict:
+    paper_lookup = {
+        os.path.normcase(str(Path(item["path"]).resolve())): item
+        for item in papers
+    }
+    problem_lookup = {
+        (
+            os.path.normcase(str(Path(item["paperDirectory"]).resolve())),
+            item["problemId"],
+        ): item
+        for item in reviews
+    }
+    source_papers: dict[str, dict] = {}
+    source_problems: dict[tuple[str, str], dict] = {}
+
+    def add(paper_value: object, problem_id: object = None) -> None:
+        if not isinstance(paper_value, str) or not paper_value:
+            return
+        try:
+            paper = write_paper.resolve_manifest_path(paper_value)
+        except (OSError, ValueError):
+            return
+        paper_key = os.path.normcase(str(paper.resolve()))
+        paper_record = paper_lookup.get(paper_key, {})
+        paper_title = str(paper_record.get("title") or paper.name)
+        source_papers[paper_key] = {
+            "key": paper_key,
+            "path": str(paper.resolve()),
+            "title": paper_title,
+        }
+        if not isinstance(problem_id, str) or not problem_id:
+            return
+        review = problem_lookup.get((paper_key, problem_id), {})
+        source_problems[(paper_key, problem_id)] = {
+            "key": f"{paper_key}::{problem_id}",
+            "paperPath": str(paper.resolve()),
+            "paperTitle": paper_title,
+            "id": problem_id,
+            "title": str(review.get("problemTitle") or problem_id),
+        }
+
+    selectors = manifest.get("input_selectors", [])
+    if isinstance(selectors, list):
+        for selector in selectors:
+            if not isinstance(selector, dict):
+                continue
+            value = selector.get("path")
+            kind = selector.get("kind")
+            if not isinstance(value, str) or kind not in {"paper", "problem", "attempt"}:
+                continue
+            try:
+                path = write_paper.resolve_manifest_path(value)
+            except (OSError, ValueError):
+                continue
+            if kind == "paper":
+                add(str(path))
+            elif kind == "problem":
+                add(str(path.parent), path.name)
+            else:
+                add(str(path.parent.parent), path.parent.name)
+
+    attempts = manifest.get("input_attempts", [])
+    if isinstance(attempts, list):
+        for attempt in attempts:
+            if isinstance(attempt, dict):
+                add(attempt.get("paper_directory"), attempt.get("problem_id"))
+
+    return {
+        "papers": sorted(
+            source_papers.values(),
+            key=lambda item: (item["title"].casefold(), item["path"]),
+        ),
+        "problems": sorted(
+            source_problems.values(),
+            key=lambda item: (
+                item["paperTitle"].casefold(),
+                item["id"],
+            ),
+        ),
+    }
+
+
+def _manuscript_inventory(
+    directory: Path,
+    papers: list[dict] | None = None,
+    reviews: list[dict] | None = None,
+) -> list[dict]:
     if not directory.is_dir():
         return []
     manuscripts = []
@@ -151,6 +248,11 @@ def _manuscript_inventory(directory: Path) -> list[dict]:
                     "status": result.get("status") or manifest.get("status") or "",
                     "verdict": review.get("verdict", "unreviewed"),
                     "summary": review.get("summary", ""),
+                    "sources": _manuscript_sources(
+                        manifest,
+                        papers or [],
+                        reviews or [],
+                    ),
                     "files": [
                         str(path.resolve())
                         for path in (
@@ -249,9 +351,30 @@ class CatalogManager:
 
     def refresh(self, *, force: bool = False) -> None:
         try:
+            self._set_progress("papers", "Scanning papers…")
             papers = _paper_inventory(self.paths)
-            reviews = _review_inventory(self.paths)
-            manuscripts = _manuscript_inventory(self.manuscripts)
+            self._set_progress("problems", "Discovering open problems…")
+
+            last_progress = -25
+
+            def review_progress(current: int, total: int) -> None:
+                nonlocal last_progress
+                if current == 0 or current == total or current - last_progress >= 25:
+                    last_progress = current
+                    self._set_progress(
+                        "reviews",
+                        "Building review catalog…",
+                        current=current,
+                        total=total,
+                    )
+
+            reviews = _review_inventory(self.paths, progress=review_progress)
+            self._set_progress("manuscripts", "Reading manuscripts…")
+            manuscripts = _manuscript_inventory(
+                self.manuscripts,
+                papers,
+                reviews,
+            )
             value = {
                 "papers": papers,
                 "reviews": reviews,
@@ -278,15 +401,34 @@ class CatalogManager:
         with self.lock:
             if fingerprint == self.fingerprint and not force:
                 self.error = ""
-                return
-            self.fingerprint = fingerprint
-            self.version += 1
-            value["version"] = self.version
-            value["error"] = ""
-            self.catalog = value
-            self.error = ""
+                self.catalog["error"] = ""
+                self.catalog["loading"] = False
+                self.catalog.pop("progress", None)
+            else:
+                self.fingerprint = fingerprint
+                self.version += 1
+                value["version"] = self.version
+                value["error"] = ""
+                self.catalog = value
+                self.error = ""
         self.ready.set()
         self.hub.publish("catalog.changed", version=self.version)
+
+    def _set_progress(
+        self,
+        phase: str,
+        label: str,
+        *,
+        current: int | None = None,
+        total: int | None = None,
+    ) -> None:
+        progress = {"phase": phase, "label": label}
+        if current is not None and total is not None:
+            progress.update({"current": current, "total": total})
+        with self.lock:
+            self.catalog["loading"] = True
+            self.catalog["progress"] = progress
+        self.hub.publish("catalog.progress", **progress)
 
     def schedule(self) -> None:
         self.pending.set()
@@ -580,6 +722,52 @@ def _relative_to(path: Path, root: Path) -> bool:
         return False
 
 
+LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+WILDCARD_HOSTS = {"0.0.0.0", "::"}
+
+
+def _request_hostname_allowed(
+    hostname: str | None,
+    *,
+    network_enabled: bool,
+    allowed_hostnames: set[str],
+) -> bool:
+    if not hostname:
+        return False
+    normalized = hostname.casefold().rstrip(".")
+    if normalized in LOOPBACK_HOSTS or normalized in allowed_hostnames:
+        return True
+    if not network_enabled:
+        return False
+    try:
+        ipaddress.ip_address(normalized)
+    except ValueError:
+        return False
+    return True
+
+
+def _same_request_origin(host_header: str, origin: str) -> bool:
+    try:
+        host = urlsplit(f"//{host_header}")
+        source = urlsplit(origin)
+        host_port = host.port
+        source_port = source.port
+    except ValueError:
+        return False
+    if (
+        source.scheme not in {"http", "https"}
+        or not host.hostname
+        or not source.hostname
+    ):
+        return False
+    if source.hostname.casefold().rstrip(".") != host.hostname.casefold().rstrip("."):
+        return False
+    if host_port is None:
+        return True
+    expected_source_port = source_port or (443 if source.scheme == "https" else 80)
+    return expected_source_port == host_port
+
+
 class WorkbenchHandler(BaseHTTPRequestHandler):
     server_version = "LooseEndsWorkbench/1"
     protocol_version = "HTTP/1.1"
@@ -593,14 +781,24 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
 
     def _host_is_allowed(self) -> bool:
         host = self.headers.get("Host", "")
-        hostname = urlsplit(f"//{host}").hostname
-        return hostname in {"localhost", "127.0.0.1", "::1"}
+        try:
+            hostname = urlsplit(f"//{host}").hostname
+        except ValueError:
+            return False
+        return _request_hostname_allowed(
+            hostname,
+            network_enabled=self.server.network_enabled,  # type: ignore[attr-defined]
+            allowed_hostnames=self.server.allowed_hostnames,  # type: ignore[attr-defined]
+        )
 
     def _origin_is_allowed(self) -> bool:
         origin = self.headers.get("Origin")
         if not origin:
             return True
-        return urlsplit(origin).hostname in {"localhost", "127.0.0.1", "::1"}
+        return self._host_is_allowed() and _same_request_origin(
+            self.headers.get("Host", ""),
+            origin,
+        )
 
     def _headers(self, status: int, content_type: str, length: int | None = None) -> None:
         self.send_response(status)
@@ -839,9 +1037,26 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
 class WorkbenchHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, address: tuple[str, int], app: WorkbenchApplication):
+    def __init__(
+        self,
+        address: tuple[str, int],
+        app: WorkbenchApplication,
+        *,
+        allowed_hostnames: Iterable[str] = (),
+    ):
         super().__init__(address, WorkbenchHandler)
         self.app = app
+        bind_host = address[0].casefold().rstrip(".")
+        self.network_enabled = bind_host not in LOOPBACK_HOSTS
+        machine_names = {
+            socket.gethostname().casefold().rstrip("."),
+            socket.getfqdn().casefold().rstrip("."),
+        }
+        self.allowed_hostnames = {
+            value.casefold().rstrip(".")
+            for value in {*machine_names, *allowed_hostnames, bind_host}
+            if value and value not in WILDCARD_HOSTS
+        }
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -854,7 +1069,21 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="paper directories or parent directories containing papers",
     )
-    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help=(
+            "address to bind (default: 127.0.0.1); use 0.0.0.0 to expose "
+            "the workbench on the local network"
+        ),
+    )
+    parser.add_argument(
+        "--allowed-host",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="additional trusted hostname for network access; may be repeated",
+    )
     parser.add_argument("--port", type=int, default=35007)
     parser.add_argument(
         "--manuscripts",
@@ -880,11 +1109,6 @@ def main(argv: list[str] | None = None) -> int:
     codex_cli.configure_utf8_stdio()
     parser = build_parser()
     args = parser.parse_args(argv)
-    if args.host not in {"127.0.0.1", "localhost", "::1"}:
-        return codex_cli.report_error(
-            parser,
-            PlanError("the workbench currently binds only to the local machine"),
-        )
     if Observer is None:
         return codex_cli.report_error(
             parser,
@@ -903,13 +1127,25 @@ def main(argv: list[str] | None = None) -> int:
             max_workers=args.max_workers,
         )
         app.start_watching()
-        server = WorkbenchHTTPServer((args.host, args.port), app)
+        server = WorkbenchHTTPServer(
+            (args.host, args.port),
+            app,
+            allowed_hostnames=args.allowed_host,
+        )
     except (OSError, common.CodexError) as exc:
         return codex_cli.report_error(parser, exc)
     host, port = server.server_address[:2]
-    url_host = "localhost" if host in {"127.0.0.1", "::1"} else host
+    url_host = "localhost" if host in LOOPBACK_HOSTS | WILDCARD_HOSTS else host
+    if ":" in url_host and not url_host.startswith("["):
+        url_host = f"[{url_host}]"
     url = f"http://{url_host}:{port}/"
     print(f"Loose Ends workbench: {url}", flush=True)
+    if server.network_enabled:
+        print(
+            f"Network access enabled on {args.host}:{port}; anyone who can "
+            "reach this port can view project data and start tasks.",
+            flush=True,
+        )
     if not args.no_open:
         try:
             human_review.open_in_browser(url)

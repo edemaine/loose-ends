@@ -731,6 +731,9 @@ The workbench opens at `http://localhost:35007/` by default. It watches paper
 and manuscript files with native `watchdog` events, refreshes the selected view
 after external or managed changes, and provides actions for analysis, triage,
 literature search, solving, independent review, paper writing, and revision.
+Initial discovery runs in the background with live phase and row progress.
+Manuscript details link back to the source paper and open-problem titles recorded
+by their input selectors and attempts.
 
 Every task has two launch steps. The first dialog collects optional human
 directions, maximum rounds, review policy, model settings, authors, and other
@@ -747,8 +750,13 @@ action can operate on that output without accidentally duplicating it.
 
 Use `--max-workers N` to control concurrent CLI invocations, `--no-open` to
 avoid opening a browser, `--port` to select another local port, or
-`--state-dir` to place the private task database and logs elsewhere. For
-security, the server currently accepts only local loopback bindings.
+`--state-dir` to place the private task database and logs elsewhere. The
+default binding is local-only. To use the workbench from another machine on a
+trusted network, pass `--host 0.0.0.0` and browse to this machine's IP address.
+IP-address access and the machine's own hostnames are accepted; use repeatable
+`--allowed-host NAME` for an additional trusted DNS name. Network clients can
+view project data and launch CLI tasks, so do not expose the port to an
+untrusted network or the public internet.
 
 All Codex-backed commands share the analyzer's `--model`,
 `--reasoning-effort`, `--fast`, `--codex`, Cygwin path conversion, Windows ACL

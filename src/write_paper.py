@@ -122,7 +122,7 @@ def _stored_manifest_path(path: Path) -> str:
         return str(resolved)
 
 
-def _resolve_manifest_path(value: str) -> Path:
+def resolve_manifest_path(value: str) -> Path:
     """Resolve project-relative, Windows, or Cygwin paths on either host."""
     windows_path = PureWindowsPath(value)
     if windows_path.is_absolute():
@@ -143,6 +143,10 @@ def _resolve_manifest_path(value: str) -> Path:
     if not path.is_absolute():
         path = PROJECT_ROOT / path
     return path.resolve()
+
+
+# Kept as an alias for internal callers and compatibility with older imports.
+_resolve_manifest_path = resolve_manifest_path
 
 
 def _read_text(path: Path, description: str) -> str:

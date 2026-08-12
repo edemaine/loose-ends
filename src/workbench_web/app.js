@@ -98,6 +98,47 @@ function showNotice(message, error = false) {
   notice.className = `notice${error ? " error-box" : ""}`;
 }
 
+function catalogProgressNode(large = false) {
+  const progress = state.catalog.progress || {};
+  const wrapper = node("div", `catalog-progress${large ? " large" : ""}`);
+  const line = node("div", "progress-line");
+  line.append(node("strong", "", progress.label || "Loading the research catalog…"));
+  if (Number.isFinite(progress.current) && Number.isFinite(progress.total)) {
+    line.append(node("span", "", `${progress.current.toLocaleString()} / ${progress.total.toLocaleString()}`));
+  }
+  const track = node("div", "progress-track");
+  const fill = node("div", "progress-fill");
+  if (Number.isFinite(progress.current) && progress.total > 0) {
+    fill.style.width = `${Math.min(100, 100 * progress.current / progress.total)}%`;
+  } else {
+    fill.classList.add("indeterminate");
+  }
+  track.append(fill);
+  wrapper.append(line, track);
+  return wrapper;
+}
+
+function renderCatalogLoading() {
+  notice.hidden = false;
+  notice.className = "notice loading-notice";
+  notice.replaceChildren(catalogProgressNode());
+}
+
+function renderInitialLoading() {
+  sidebar.replaceChildren();
+  const side = node("div", "loading-shell");
+  side.append(node("div", "loading-pulse"), node("div", "loading-pulse short"));
+  sidebar.append(side);
+  const shell = node("section", "initial-loading panel");
+  shell.append(
+    node("div", "eyebrow", "Preparing workbench"),
+    node("h1", "", "Loading your research catalog"),
+    node("p", "", "The server is scanning papers, open problems, reviews, and manuscripts. You can leave this page open; it will update automatically."),
+    catalogProgressNode(true),
+  );
+  main.replaceChildren(shell);
+}
+
 function target(kind, path, label) {
   return { kind, path, label };
 }
@@ -200,8 +241,13 @@ function render() {
   const active = state.jobs.filter(job => ["queued", "running"].includes(job.status)).length;
   activityCount.textContent = active ? String(active) : "";
   if (state.catalog.error) showNotice(`Catalog update delayed: ${state.catalog.error}`, true);
-  else if (state.catalog.loading) showNotice("Loading the research catalog…");
+  else if (state.catalog.loading) renderCatalogLoading();
   else showNotice("");
+  if (state.catalog.loading && !state.catalog.version) {
+    renderInitialLoading();
+    renderSelectionBar();
+    return;
+  }
   if (state.tab === "research") renderResearch();
   else if (state.tab === "papers") renderPapers();
   else if (state.tab === "manuscripts") renderManuscripts();
@@ -505,6 +551,54 @@ function renderManuscripts() {
     actions.append(open);
   } else shell.append(actions);
   if (draft.summary) shell.append(summaryPanel("Paper critic", draft.summary));
+  const sources = draft.sources || { papers: [], problems: [] };
+  if (sources.papers.length || sources.problems.length) {
+    const sourcesHeading = node("div", "section-title");
+    sourcesHeading.append(node("h2", "", "Based on"));
+    const sourceGrid = node("div", "source-grid");
+    if (sources.papers.length) {
+      const panel = node("section", "panel source-panel");
+      panel.append(node("h2", "", `Source paper${sources.papers.length === 1 ? "" : "s"}`));
+      const list = node("ul", "source-list");
+      sources.papers.forEach(source => {
+        const item = node("li");
+        const link = node("button", "source-link", source.title);
+        link.type = "button";
+        link.addEventListener("click", () => {
+          state.selectedPaper = source.path;
+          setTab("papers");
+        });
+        item.append(link);
+        list.append(item);
+      });
+      panel.append(list);
+      sourceGrid.append(panel);
+    }
+    if (sources.problems.length) {
+      const panel = node("section", "panel source-panel");
+      panel.append(node("h2", "", `Open problem${sources.problems.length === 1 ? "" : "s"}`));
+      const list = node("ul", "source-list");
+      sources.problems.forEach(source => {
+        const item = node("li");
+        const label = node("button", "source-link", `${source.id}: ${source.title}`);
+        label.type = "button";
+        label.addEventListener("click", () => {
+          const review = state.catalog.reviews.find(value =>
+            value.paperDirectory === source.paperPath && value.problemId === source.id
+          );
+          if (review) {
+            state.selectedReview = review.itemKey;
+            setTab("research");
+          }
+        });
+        item.append(label, node("small", "", source.paperTitle));
+        list.append(item);
+      });
+      panel.append(list);
+      sourceGrid.append(panel);
+    }
+    shell.append(sourcesHeading, sourceGrid);
+  }
   const heading = node("div", "section-title");
   heading.append(node("h2", "", "Latest draft files"));
   shell.append(heading, fileGrid(draft.files));
@@ -916,7 +1010,14 @@ function connectEvents() {
   events.addEventListener("update", event => {
     try {
       const value = JSON.parse(event.data);
-      if (value.type.startsWith("catalog.")) refreshCatalog().catch(error => showNotice(error.message, true));
+      if (value.type === "catalog.progress") {
+        state.catalog.loading = true;
+        state.catalog.progress = value;
+        if (state.catalog.version) renderCatalogLoading();
+        else render();
+      } else if (value.type.startsWith("catalog.")) {
+        refreshCatalog().catch(error => showNotice(error.message, true));
+      }
       if (value.type === "tasks.changed") {
         refreshJobs().then(() => {
           if (state.tab === "activity" && state.selectedJob) loadJob(state.selectedJob);

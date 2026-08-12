@@ -11,7 +11,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import open_problem_common as common
 from watchdog.observers import Observer
-from workbench import CatalogManager, ChangeHandler, EventHub
+from workbench import (
+    CatalogManager,
+    ChangeHandler,
+    EventHub,
+    _request_hostname_allowed,
+    _same_request_origin,
+    build_parser,
+)
+import workbench
 from workbench_store import WorkbenchStore
 from workbench_tasks import PlanError, build_plan, probe_outputs
 import workbench_worker
@@ -64,6 +72,106 @@ def fake_plan(argv: list[str], *, probe: dict | None = None) -> dict:
 
 
 class WorkbenchPlanningTests(unittest.TestCase):
+    def test_network_bind_and_request_host_security(self):
+        args = build_parser().parse_args(
+            ["--host", "0.0.0.0", "--allowed-host", "research.local", "."]
+        )
+        self.assertEqual(args.host, "0.0.0.0")
+        self.assertEqual(args.allowed_host, ["research.local"])
+        self.assertTrue(
+            _request_hostname_allowed(
+                "192.168.1.20",
+                network_enabled=True,
+                allowed_hostnames=set(),
+            )
+        )
+        self.assertTrue(
+            _request_hostname_allowed(
+                "research.local",
+                network_enabled=True,
+                allowed_hostnames={"research.local"},
+            )
+        )
+        self.assertFalse(
+            _request_hostname_allowed(
+                "attacker.example",
+                network_enabled=True,
+                allowed_hostnames=set(),
+            )
+        )
+        self.assertFalse(
+            _request_hostname_allowed(
+                "192.168.1.20",
+                network_enabled=False,
+                allowed_hostnames=set(),
+            )
+        )
+        self.assertTrue(
+            _same_request_origin(
+                "192.168.1.20:35007",
+                "http://192.168.1.20:35007",
+            )
+        )
+        self.assertFalse(
+            _same_request_origin(
+                "192.168.1.20:35007",
+                "http://attacker.example:35007",
+            )
+        )
+        self.assertFalse(
+            _same_request_origin(
+                "192.168.1.20:35007",
+                "http://192.168.1.20:35008",
+            )
+        )
+
+    def test_review_inventory_reports_row_progress(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            make_paper(root)
+            progress = []
+
+            records = workbench._review_inventory(
+                [root],
+                progress=lambda current, total: progress.append((current, total)),
+            )
+
+            self.assertEqual(len(records), 1)
+            self.assertEqual(progress, [(0, 1), (1, 1)])
+
+    def test_manuscript_sources_include_legacy_paper_and_problem_titles(self):
+        with TemporaryDirectory() as temporary:
+            paper = make_paper(Path(temporary))
+            manifest = {
+                "input_attempts": [
+                    {
+                        "paper_directory": str(paper),
+                        "problem_id": "OP-001",
+                    }
+                ]
+            }
+
+            sources = workbench._manuscript_sources(
+                manifest,
+                [{"path": str(paper), "title": "Test Paper"}],
+                [
+                    {
+                        "paperDirectory": str(paper),
+                        "problemId": "OP-001",
+                        "problemTitle": "Test conjecture",
+                    }
+                ],
+            )
+
+            self.assertEqual(
+                [source["title"] for source in sources["papers"]],
+                ["Test Paper"],
+            )
+            self.assertEqual(
+                [source["title"] for source in sources["problems"]],
+                ["Test conjecture"],
+            )
+
     def test_solver_plan_preserves_prompt_round_and_critic_settings(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -240,6 +348,8 @@ class WorkbenchWatchTests(unittest.TestCase):
                 self.assertTrue(manager.snapshot()["loading"])
                 scan_allowed.set()
                 self.assertTrue(manager.wait_until_ready(2))
+                self.assertFalse(manager.snapshot()["loading"])
+                manager.refresh()
                 self.assertFalse(manager.snapshot()["loading"])
             finally:
                 scan_allowed.set()

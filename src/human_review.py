@@ -14,7 +14,7 @@ import pydoc
 import re
 import subprocess
 import sys
-from typing import Iterable, Sequence
+from typing import Callable, Iterable, Sequence
 import webbrowser
 
 import codex_cli
@@ -297,6 +297,7 @@ def build_review_catalog(
     problems: Sequence[common.ProblemRef] | None = None,
     attempt_names: set[str] | None = None,
     latest_per_problem: bool = False,
+    progress: Callable[[int, int], None] | None = None,
 ) -> list[dict]:
     data: list[dict] = []
     problem_statements: dict[tuple[Path, str], str] = {}
@@ -400,6 +401,9 @@ def build_review_catalog(
                 latest_rows[key] = row
         rows = list(latest_rows.values())
 
+    total_rows = len(rows)
+    if progress is not None:
+        progress(0, total_rows)
     for index, (problem, attempt, item) in enumerate(rows):
         paper = problem.paper_directory
         problem_key = (paper, problem.id)
@@ -582,6 +586,8 @@ def build_review_catalog(
                 ),
             }
         )
+        if progress is not None:
+            progress(index + 1, total_rows)
     return data
 
 
