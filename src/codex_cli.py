@@ -29,6 +29,7 @@ CODEX_STOP_GRACE_SECONDS = 10.0
 WINDOWS_SANDBOX_ACL_FAILURE = "helper_unknown_error: apply deny-read acls"
 _CODEX_LAUNCH_LOCK = threading.Lock()
 _WINDOWS_SANDBOX_PROBE_LOCK = threading.Lock()
+_WINDOWS_ACL_NORMALIZE_LOCK = threading.Lock()
 _next_codex_launch_at = 0.0
 _windows_sandbox_probe_error: str | None = None
 _windows_sandbox_probe_succeeded = False
@@ -396,6 +397,52 @@ def _windows_sandbox_probe_command(codex: str, workspace: Path) -> list[str]:
     ]
 
 
+def _windows_sandbox_acl_state_path() -> Path:
+    codex_home = os.environ.get("CODEX_HOME")
+    if codex_home:
+        path = Path(codex_home).expanduser()
+    else:
+        path = Path.home() / ".codex"
+    return path / ".sandbox" / "deny_read_acl_state.json"
+
+
+def windows_sandbox_acl_state_problem() -> str | None:
+    """Describe a corrupt elevated-sandbox ACL state file, if present."""
+    if not is_windows_host():
+        return None
+    path = _windows_sandbox_acl_state_path()
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        # A missing state file is valid: Codex creates it during setup.
+        return None
+    except OSError as exc:
+        return f"could not read Codex sandbox ACL state {path}: {exc}"
+    try:
+        state = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        if raw and not raw.strip(b"\0 \t\r\n"):
+            reason = "the file contains only NUL bytes"
+        elif not raw:
+            reason = "the file is empty"
+        else:
+            reason = f"invalid JSON ({exc})"
+        return (
+            f"Codex sandbox ACL state is corrupt at {path}: {reason}. "
+            "Move that file aside and retry; Codex will regenerate it."
+        )
+    if not isinstance(state, dict) or not isinstance(
+        state.get("principals"),
+        dict,
+    ):
+        return (
+            f"Codex sandbox ACL state is corrupt at {path}: unexpected "
+            "JSON structure. Move that file aside and retry; Codex will "
+            "regenerate it."
+        )
+    return None
+
+
 def require_secure_windows_sandbox(codex: str, workspace: Path) -> None:
     """Fail before model use when the elevated Windows helper is broken."""
     global _windows_sandbox_probe_error
@@ -407,6 +454,13 @@ def require_secure_windows_sandbox(codex: str, workspace: Path) -> None:
             raise CodexError(_windows_sandbox_probe_error)
         if _windows_sandbox_probe_succeeded:
             return
+        state_problem = windows_sandbox_acl_state_problem()
+        if state_problem is not None:
+            _windows_sandbox_probe_error = (
+                "secure elevated Windows sandbox preflight failed before "
+                f"the agent was started: {state_problem}"
+            )
+            raise CodexError(_windows_sandbox_probe_error)
         command = _windows_sandbox_probe_command(codex, workspace)
         try:
             completed = subprocess.run(
@@ -427,10 +481,18 @@ def require_secure_windows_sandbox(codex: str, workspace: Path) -> None:
             detail = (completed.stderr or completed.stdout).strip()
             if not detail:
                 detail = f"exit status {completed.returncode}"
+        state_problem = windows_sandbox_acl_state_problem()
+        if state_problem is not None:
+            recovery = state_problem
+        else:
+            recovery = (
+                "Stop other active Codex CLI batches and retry; if none are "
+                "active, inspect ~/.codex/.sandbox/setup_error.json and the "
+                "current sandbox log before restarting Codex or Windows."
+            )
         _windows_sandbox_probe_error = (
             "secure elevated Windows sandbox preflight failed before the "
-            f"agent was started: {detail}. Stop other active Codex CLI "
-            "batches and retry; if none are active, restart Codex or Windows."
+            f"agent was started: {detail}. {recovery}"
         )
         raise CodexError(_windows_sandbox_probe_error)
 
@@ -447,13 +509,21 @@ def note_windows_sandbox_failure(log_path: Path) -> None:
         return
     if WINDOWS_SANDBOX_ACL_FAILURE not in log:
         return
+    state_problem = windows_sandbox_acl_state_problem()
     with _WINDOWS_SANDBOX_PROBE_LOCK:
         _windows_sandbox_probe_succeeded = False
+        if state_problem is not None:
+            recovery = state_problem
+        else:
+            recovery = (
+                "Stop other Codex CLI batches and inspect "
+                "~/.codex/.sandbox/setup_error.json plus the current "
+                "sandbox log."
+            )
         _windows_sandbox_probe_error = (
             "the elevated Windows sandbox helper failed while applying "
             "deny-read ACLs. Further agents were not launched to avoid "
-            "wasting credits; stop other Codex CLI batches and retry, or "
-            "restart Codex or Windows if no batch is active."
+            f"wasting credits. {recovery}"
         )
 
 
@@ -549,31 +619,37 @@ def workspace_is_user_accessible(workspace: Path) -> bool:
 
 def normalize_workspace_access(workspace: Path, codex: str) -> None:
     """Remove sandbox-created deny ACLs, then grant recursive user access."""
-    if not is_windows_host() or workspace_is_user_accessible(workspace):
+    if not is_windows_host():
         return
-    identity = windows_identity()
-    command_prefix = [
-        codex,
-        "sandbox",
-        "-P",
-        ":workspace",
-        "-C",
-        path_for_codex(workspace),
-        windows_icacls_for_sandbox(),
-        ".",
-    ]
-    for action in (
-        ["/remove:d", identity, "/T", "/C"],
-        ["/grant", f"{identity}:(OI)(CI)(F)", "/T", "/C"],
-    ):
-        _run_local_command(
-            [*command_prefix, *action],
-            f"could not normalize sandbox-owned files in {workspace}",
-        )
-    if not workspace_is_user_accessible(workspace):
-        raise CodexError(
-            f"Windows ACL repair did not make {workspace} accessible"
-        )
+    # Codex's elevated helper maintains shared ACL state under CODEX_HOME.
+    # Serialize repair turns so concurrent solver/reviewer completions cannot
+    # race while that state is being refreshed.
+    with _WINDOWS_ACL_NORMALIZE_LOCK:
+        if workspace_is_user_accessible(workspace):
+            return
+        identity = windows_identity()
+        command_prefix = [
+            codex,
+            "sandbox",
+            "-P",
+            ":workspace",
+            "-C",
+            path_for_codex(workspace),
+            windows_icacls_for_sandbox(),
+            ".",
+        ]
+        for action in (
+            ["/remove:d", identity, "/T", "/C"],
+            ["/grant", f"{identity}:(OI)(CI)(F)", "/T", "/C"],
+        ):
+            _run_local_command(
+                [*command_prefix, *action],
+                f"could not normalize sandbox-owned files in {workspace}",
+            )
+        if not workspace_is_user_accessible(workspace):
+            raise CodexError(
+                f"Windows ACL repair did not make {workspace} accessible"
+            )
 
 
 def wait_for_codex_launch_slot(interval: float) -> None:

@@ -1499,10 +1499,16 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 prior_history_digest=common.attempt_history_digest(problem),
             )
 
-            with patch.object(
-                codex_cli,
-                "run_structured_codex",
-            ) as run:
+            with (
+                patch.object(
+                    codex_cli,
+                    "run_structured_codex",
+                ) as run,
+                patch.object(
+                    codex_cli,
+                    "normalize_workspace_access",
+                ) as normalize,
+            ):
                 outcome = solve_open_problems.solve_work(
                     work,
                     codex="codex",
@@ -1515,6 +1521,7 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 )
 
             run.assert_not_called()
+            normalize.assert_called_once_with(workspace, "codex")
             self.assertIn("recovered", outcome.message)
             self.assertTrue(workspace.is_dir())
             result = common.read_json(

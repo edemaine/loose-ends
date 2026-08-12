@@ -14,6 +14,42 @@ import codex_cli
 
 
 class CodexCliTests(unittest.TestCase):
+    def test_reports_nul_filled_windows_sandbox_acl_state_before_launch(self):
+        with TemporaryDirectory() as temporary:
+            state = Path(temporary) / "deny_read_acl_state.json"
+            state.write_bytes(b"\0" * 22)
+            with (
+                patch.object(codex_cli, "is_windows_host", return_value=True),
+                patch.object(
+                    codex_cli,
+                    "_windows_sandbox_acl_state_path",
+                    return_value=state,
+                ),
+                patch.object(
+                    codex_cli,
+                    "_windows_sandbox_probe_error",
+                    None,
+                ),
+                patch.object(
+                    codex_cli,
+                    "_windows_sandbox_probe_succeeded",
+                    False,
+                ),
+                patch.object(subprocess, "run") as run,
+            ):
+                with self.assertRaisesRegex(
+                    codex_cli.CodexError,
+                    "contains only NUL bytes",
+                ) as caught:
+                    codex_cli.require_secure_windows_sandbox(
+                        "codex",
+                        Path("."),
+                    )
+
+            run.assert_not_called()
+            self.assertIn(str(state), str(caught.exception))
+            self.assertIn("Move that file aside", str(caught.exception))
+
     def test_secure_windows_sandbox_preflight_fails_once_and_is_cached(self):
         completed = subprocess.CompletedProcess(
             ["codex", "sandbox"],

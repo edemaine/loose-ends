@@ -538,6 +538,7 @@ def _recovery_workspace_matches(
 def recover_solver_work(
     work: SolveWork,
     *,
+    codex: str,
     codex_version: str,
     config_digest: str,
     options: codex_cli.ModelOptions,
@@ -567,6 +568,7 @@ def recover_solver_work(
         if not matches:
             continue
         assert record is not None
+        codex_cli.normalize_workspace_access(workspace, codex)
         recover_missing_attempt_markdown(work, workspace)
         if not (workspace / "attempt.md").is_file():
             continue
@@ -627,6 +629,7 @@ def solve_work(
     work.problem.directory.mkdir(parents=True, exist_ok=True)
     recovered = recover_solver_work(
         work,
+        codex=codex,
         codex_version=codex_version,
         config_digest=config_digest,
         options=options,
