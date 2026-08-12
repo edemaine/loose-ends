@@ -14,6 +14,7 @@ const state = {
   selectedProblem: "",
   researchFilters: reviewModel.createDefaultFilters(),
   researchFiltersOpen: false,
+  sidebarScroll: { research: 0, papers: 0, manuscripts: 0, activity: 0 },
   paperSort: "alphabetical",
   selectedPaper: "",
   selectedManuscript: "",
@@ -97,20 +98,27 @@ function historyPayload(scrollY = window.scrollY) {
   return { looseEndsWorkbench: true, scrollY };
 }
 
+function scrollPositionKey(url) {
+  const value = new URL(url, location.origin);
+  if (value.pathname === viewPaths.research) value.searchParams.delete("detail");
+  return `${value.pathname}${value.search}${value.hash}`;
+}
+
 function rememberCurrentScroll({ updateHistory = true } = {}) {
   if (!renderedUrl) return;
   const scrollY = window.scrollY;
-  pageScrollPositions.set(renderedUrl, scrollY);
+  pageScrollPositions.set(scrollPositionKey(renderedUrl), scrollY);
   if (updateHistory && history.state?.looseEndsWorkbench) {
     history.replaceState(historyPayload(scrollY), "", renderedUrl);
   }
 }
 
 function restorePageScroll(url, preferredScroll) {
+  const positionKey = scrollPositionKey(url);
   const scrollY = Number.isFinite(preferredScroll)
     ? preferredScroll
-    : pageScrollPositions.get(url) ?? 0;
-  pageScrollPositions.set(url, scrollY);
+    : pageScrollPositions.get(positionKey) ?? 0;
+  pageScrollPositions.set(positionKey, scrollY);
   requestAnimationFrame(() => window.scrollTo({ top: scrollY, left: 0, behavior: "auto" }));
 }
 
@@ -119,7 +127,9 @@ function syncNavigation({ replace = false, preserveScroll = false } = {}) {
   rememberCurrentScroll();
   render();
   const url = currentUrl();
-  const scrollY = preserveScroll ? window.scrollY : pageScrollPositions.get(url) ?? 0;
+  const scrollY = preserveScroll
+    ? window.scrollY
+    : pageScrollPositions.get(scrollPositionKey(url)) ?? 0;
   const method = replace || url === renderedUrl ? "replaceState" : "pushState";
   history[method](historyPayload(scrollY), "", url);
   renderedUrl = url;
@@ -160,7 +170,9 @@ function applyLocation({ scrollY } = {}) {
   }
   render();
   const canonicalUrl = currentUrl();
-  const restoredScroll = Number.isFinite(scrollY) ? scrollY : pageScrollPositions.get(canonicalUrl) ?? 0;
+  const restoredScroll = Number.isFinite(scrollY)
+    ? scrollY
+    : pageScrollPositions.get(scrollPositionKey(canonicalUrl)) ?? 0;
   history.replaceState(historyPayload(restoredScroll), "", canonicalUrl);
   renderedUrl = canonicalUrl;
   restorePageScroll(canonicalUrl, restoredScroll);
@@ -484,6 +496,7 @@ document.querySelectorAll("[data-tab]").forEach(value => {
 });
 
 function render() {
+  rememberSidebarScroll();
   const renderedResearchFilters = sidebar.querySelector(".research-filters");
   if (renderedResearchFilters) {
     state.researchFiltersOpen = renderedResearchFilters.open;
@@ -506,7 +519,26 @@ function render() {
   else if (state.tab === "papers") renderPapers();
   else if (state.tab === "manuscripts") renderManuscripts();
   else renderActivity();
+  restoreSidebarScroll(state.tab);
   renderSelectionBar();
+}
+
+function rememberSidebarScroll() {
+  const renderedTab = sidebar.dataset.tab;
+  if (!(renderedTab in state.sidebarScroll)) return;
+  const scrollingElement = renderedTab === "research"
+    ? sidebar.querySelector(".problem-scroll")
+    : sidebar;
+  if (scrollingElement) state.sidebarScroll[renderedTab] = scrollingElement.scrollTop;
+}
+
+function restoreSidebarScroll(tab) {
+  sidebar.dataset.tab = tab;
+  if (tab === "research") sidebar.scrollTop = 0;
+  const scrollingElement = tab === "research"
+    ? sidebar.querySelector(".problem-scroll")
+    : sidebar;
+  if (scrollingElement) scrollingElement.scrollTop = state.sidebarScroll[tab] || 0;
 }
 
 function sidebarSearch(placeholder) {
@@ -1592,9 +1624,11 @@ async function refreshJobs({ preserveActivityDetail = false } = {}) {
     preserveActivityDetail &&
     state.tab === "activity"
   ) {
+    rememberSidebarScroll();
     const active = state.jobs.filter(job => ["queued", "running"].includes(job.status)).length;
     activityCount.textContent = active ? String(active) : "";
     renderActivity({ preserveDetail: true });
+    restoreSidebarScroll("activity");
     const url = currentUrl();
     history.replaceState(historyPayload(window.scrollY), "", url);
     renderedUrl = url;
