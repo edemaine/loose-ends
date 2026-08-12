@@ -493,6 +493,25 @@ class AnalyzePaperTests(unittest.TestCase):
 
 
 class MainOutputTests(unittest.TestCase):
+    def test_dry_run_reports_stale_paper_without_resolving_codex(self):
+        with (
+            TemporaryDirectory() as temporary,
+            patch.object(analyze_papers, "analysis_is_current", return_value=False),
+            patch.object(analyze_papers, "resolve_codex_executable") as resolve,
+            patch.object(analyze_papers, "analyze_paper") as analyze,
+        ):
+            paper = make_paper(Path(temporary))
+            output = StringIO()
+
+            with redirect_stdout(output):
+                returncode = analyze_papers.main([str(paper), "--dry-run"])
+
+        self.assertEqual(returncode, 0)
+        self.assertIn(f"Would analyze: {paper}", output.getvalue())
+        self.assertIn("1 would run; 0 current", output.getvalue())
+        resolve.assert_not_called()
+        analyze.assert_not_called()
+
     def test_summary_includes_result_and_open_problem_totals(self):
         with (
             TemporaryDirectory() as temporary,

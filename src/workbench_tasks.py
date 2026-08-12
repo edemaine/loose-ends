@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 from pathlib import Path
 import re
@@ -31,6 +32,9 @@ PROBLEM_RE = analyze_papers.OPEN_PROBLEM_ID_RE
 ATTEMPT_RE = common.ATTEMPT_DIRECTORY_RE
 DRAFT_RE = re.compile(r"^draft-([0-9]{3,})$")
 MAX_PROMPT_LENGTH = 16_000
+DRY_RUN_TIMEOUT_SECONDS = 30
+MAX_DRY_RUN_OUTPUT = 100_000
+MAX_DRY_RUN_WORKERS = 4
 
 
 class PlanError(codex_cli.CodexError):
@@ -41,6 +45,101 @@ def command_display(argv: list[str]) -> str:
     if os.name == "nt":
         return subprocess.list2cmdline(argv)
     return shlex.join(argv)
+
+
+def _preview_text(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
+def _limit_preview_output(output: str) -> tuple[str, bool]:
+    if len(output) <= MAX_DRY_RUN_OUTPUT:
+        return output, False
+    first = MAX_DRY_RUN_OUTPUT * 3 // 5
+    last = MAX_DRY_RUN_OUTPUT - first
+    return (
+        output[:first]
+        + "\n\n… dry-run output truncated by the workbench …\n\n"
+        + output[-last:],
+        True,
+    )
+
+
+def _dry_run_preview(unit: dict) -> dict:
+    argv = [*unit["argv"], "--dry-run"]
+    preview = {
+        "command": command_display(argv),
+        "status": "ok",
+        "exitCode": None,
+        "output": "",
+        "truncated": False,
+    }
+    try:
+        completed = subprocess.run(
+            argv,
+            cwd=unit["cwd"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=DRY_RUN_TIMEOUT_SECONDS,
+            check=False,
+            **codex_cli.windowless_popen_options(new_process_group=False),
+        )
+        preview["exitCode"] = completed.returncode
+        if completed.returncode != 0:
+            preview["status"] = "failed"
+        stdout = _preview_text(completed.stdout).rstrip()
+        stderr = _preview_text(completed.stderr).rstrip()
+    except subprocess.TimeoutExpired as exc:
+        preview["status"] = "timeout"
+        stdout = _preview_text(exc.stdout).rstrip()
+        stderr = _preview_text(exc.stderr).rstrip()
+        stderr = "\n".join(
+            value
+            for value in (
+                stderr,
+                f"Dry run exceeded the {DRY_RUN_TIMEOUT_SECONDS}-second limit.",
+            )
+            if value
+        )
+    except OSError as exc:
+        preview["status"] = "error"
+        stdout = ""
+        stderr = f"Could not start the dry run: {exc}"
+
+    pieces = []
+    if stdout:
+        pieces.append(stdout)
+    if stderr:
+        pieces.append(f"Standard error:\n{stderr}")
+    output = "\n\n".join(pieces)
+    if not output:
+        output = "The dry run completed without producing output."
+    preview["output"], preview["truncated"] = _limit_preview_output(output)
+    return preview
+
+
+def populate_dry_run_previews(plan: dict) -> dict:
+    """Run each planned command in preview mode and attach captured output."""
+    units = plan.get("units", [])
+    if not units:
+        return plan
+    with ThreadPoolExecutor(
+        max_workers=min(MAX_DRY_RUN_WORKERS, len(units))
+    ) as executor:
+        futures = {
+            executor.submit(_dry_run_preview, unit): index
+            for index, unit in enumerate(units)
+        }
+        for future in as_completed(futures):
+            units[futures[future]]["dryRun"] = future.result()
+    return plan
 
 
 def _under(path: Path, roots: Iterable[Path]) -> bool:

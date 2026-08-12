@@ -274,6 +274,11 @@ button { color: inherit; }
 .confirm-block { margin-top: 15px; }
 .confirm-block h3 { margin: 0 0 7px; color: var(--heading); font-size: 13px; }
 .command { max-height: 170px; overflow: auto; border: 1px solid var(--line); border-radius: 9px; background: var(--paper); padding: 11px; white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.5 ui-monospace, Consolas, monospace; }
+.dry-run-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 10px; }
+.dry-run-output { max-height: 260px; margin-bottom: 0; background: var(--surface); }
+.dry-run-output.dry-run-error { border-color: var(--red); background: var(--red-soft); }
+.dry-run-status { border-radius: 999px; padding: 2px 7px; background: var(--accent-soft); color: var(--accent); font-size: 10px; font-weight: 800; }
+.dry-run-status.failed, .dry-run-status.timeout, .dry-run-status.error { background: var(--red-soft); color: var(--red); }
 .warning { border-left: 4px solid var(--amber); border-radius: 6px; background: var(--amber-soft); padding: 10px 12px; color: #724b0d; }
 .error-box { border-left: 4px solid var(--red); border-radius: 6px; background: var(--red-soft); padding: 10px 12px; color: #7b2d26; }
 .loading { color: var(--muted); padding: 20px; text-align: center; }

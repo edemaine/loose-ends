@@ -1356,6 +1356,9 @@ async function reviewTask() {
   const task = state.dialog;
   saveDialogOptions();
   dialogFooter.querySelectorAll("button").forEach(value => value.disabled = true);
+  const reviewButton = dialogFooter.querySelector(".primary");
+  if (reviewButton) reviewButton.textContent = "Running dry-run previews…";
+  dialog.setAttribute("aria-busy", "true");
   try {
     task.plan = await api("/api/plans", {
       method: "POST",
@@ -1364,6 +1367,8 @@ async function reviewTask() {
     renderTaskConfirmation();
   } catch (error) {
     renderTaskConfiguration(error.message);
+  } finally {
+    dialog.removeAttribute("aria-busy");
   }
 }
 
@@ -1388,7 +1393,26 @@ function renderTaskConfirmation() {
   plan.units.forEach((unit, index) => {
     const block = node("section", "confirm-block");
     block.append(node("h3", "", `${index + 1}. ${unit.label}`));
+    block.append(node("div", "eyebrow", "Command"));
     block.append(node("pre", "command", unit.command));
+    const preview = unit.dryRun;
+    const previewHeading = node("div", "dry-run-heading");
+    previewHeading.append(node("span", "eyebrow", "Dry-run preview"));
+    if (preview) {
+      const statusLabels = {
+        ok: "Succeeded",
+        failed: `Exited ${preview.exitCode}`,
+        timeout: "Timed out",
+        error: "Could not start",
+      };
+      previewHeading.append(node("span", `dry-run-status ${preview.status}`, statusLabels[preview.status] || humanize(preview.status)));
+    }
+    block.append(previewHeading);
+    block.append(node(
+      "pre",
+      `command dry-run-output${preview && preview.status !== "ok" ? " dry-run-error" : ""}`,
+      preview?.output || "No dry-run preview was returned.",
+    ));
     dialogBody.append(block);
   });
   dialogFooter.replaceChildren(

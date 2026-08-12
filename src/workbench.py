@@ -29,7 +29,12 @@ import open_problem_common as common
 import review_solutions
 import write_paper
 from workbench_store import ACTIVE_STATUSES, WorkbenchStore
-from workbench_tasks import PlanError, build_plan, probe_outputs
+from workbench_tasks import (
+    PlanError,
+    build_plan,
+    populate_dry_run_previews,
+    probe_outputs,
+)
 
 try:
     from watchdog.events import FileSystemEvent, FileSystemEventHandler
@@ -911,6 +916,7 @@ class WorkbenchApplication:
             manuscripts=self.manuscripts,
             catalog_version=self.catalog.version,
         )
+        populate_dry_run_previews(plan)
         with self.plan_lock:
             self.plans[plan["id"]] = {
                 "created": time.time(),

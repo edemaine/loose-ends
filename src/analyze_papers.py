@@ -662,6 +662,11 @@ def build_parser() -> argparse.ArgumentParser:
             "complete, without starting new model turns"
         ),
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="validate and report the analysis plan without starting Codex",
+    )
     codex_cli.add_model_arguments(parser)
     parser.add_argument(
         "--codex",
@@ -699,14 +704,82 @@ def main(argv: list[str] | None = None) -> int:
         )
         schema_text = schema_path.read_text(encoding="utf-8")
         json.loads(schema_text)
-        codex = resolve_codex_executable(args.codex)
-        codex_version = read_codex_version(codex)
     except (
         AnalysisError,
         OSError,
         UnicodeError,
         json.JSONDecodeError,
     ) as exc:
+        return codex_cli.report_error(parser, exc)
+
+    if args.dry_run:
+        failures: list[tuple[Path, str]] = []
+        selected = 0
+        current = 0
+        if args.recover_complete:
+            for paper in papers:
+                try:
+                    workspace = find_complete_run(paper / ANALYSIS_DIRECTORY)
+                except OSError as exc:
+                    failures.append((paper, str(exc)))
+                    print(f"Failed: {paper}: {exc}", file=sys.stderr)
+                    continue
+                if workspace is None:
+                    print(f"Would skip recovery: {paper} (no complete preserved run)")
+                    continue
+                selected += 1
+                print(f"Would recover: {paper} from {workspace.name}")
+            print(
+                f"Selected {len(papers)} paper(s): {selected} recoverable; "
+                f"{len(papers) - selected - len(failures)} without a complete run"
+                + (f"; {len(failures)} failed." if failures else ".")
+            )
+            return 1 if failures else 0
+
+        config_digest = analysis_config_digest(
+            prompt_template,
+            schema_text,
+            args.model,
+            args.reasoning_effort,
+            args.fast,
+        )
+        for paper in papers:
+            try:
+                paper_digest = source_digest(paper)
+                is_current = not args.force and analysis_is_current(
+                    paper / ANALYSIS_DIRECTORY,
+                    paper_digest=paper_digest,
+                    config_digest=config_digest,
+                )
+                if is_current:
+                    results, open_problems = analysis_counts(
+                        paper / ANALYSIS_DIRECTORY
+                    )
+            except (AnalysisError, OSError, UnicodeError) as exc:
+                failures.append((paper, str(exc)))
+                print(f"Failed: {paper}: {exc}", file=sys.stderr)
+                continue
+            if is_current:
+                current += 1
+                print(
+                    f"Current: {paper} "
+                    f"({format_analysis_counts(results, open_problems)})"
+                )
+            else:
+                selected += 1
+                reason = "forced" if args.force else "missing or stale"
+                print(f"Would analyze: {paper} ({reason})")
+        print(
+            f"Selected {len(papers)} paper(s): {selected} would run; "
+            f"{current} current"
+            + (f"; {len(failures)} failed." if failures else ".")
+        )
+        return 1 if failures else 0
+
+    try:
+        codex = resolve_codex_executable(args.codex)
+        codex_version = read_codex_version(codex)
+    except (AnalysisError, OSError) as exc:
         return codex_cli.report_error(parser, exc)
 
     if args.recover_complete:

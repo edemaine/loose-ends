@@ -24,7 +24,12 @@ from workbench import (
 )
 import workbench
 from workbench_store import WorkbenchStore
-from workbench_tasks import PlanError, build_plan, probe_outputs
+from workbench_tasks import (
+    PlanError,
+    build_plan,
+    populate_dry_run_previews,
+    probe_outputs,
+)
 import workbench_worker
 
 
@@ -117,6 +122,8 @@ class WorkbenchPlanningTests(unittest.TestCase):
         self.assertIn("jobDetails: new Map()", app)
         self.assertIn("preserveActivityDetail", app)
         self.assertIn("refreshVisibleRunLogs", app)
+        self.assertIn("Running dry-run previews", app)
+        self.assertIn("preview?.output", app)
         self.assertIn("function filtersFromSearchParams", model)
         self.assertIn("function identityToSearchParams", model)
         self.assertIn("function queueSummary", model)
@@ -416,6 +423,42 @@ class WorkbenchPlanningTests(unittest.TestCase):
                     manuscripts=root / "manuscripts",
                     catalog_version=1,
                 )
+
+    @patch("workbench_tasks.subprocess.run")
+    def test_plan_preview_runs_exact_command_in_dry_run_mode(self, run):
+        run.return_value = Mock(
+            returncode=0,
+            stdout="Would solve: OP-001\nSelected 1 problem.\n",
+            stderr="",
+        )
+        plan = fake_plan([sys.executable, "tool.py", "OP-001"])
+
+        returned = populate_dry_run_previews(plan)
+
+        self.assertIs(returned, plan)
+        self.assertEqual(
+            run.call_args.args[0],
+            [sys.executable, "tool.py", "OP-001", "--dry-run"],
+        )
+        self.assertEqual(plan["units"][0]["argv"][-1], "OP-001")
+        self.assertEqual(plan["units"][0]["dryRun"]["status"], "ok")
+        self.assertIn("Would solve", plan["units"][0]["dryRun"]["output"])
+
+    @patch("workbench_tasks.subprocess.run")
+    def test_plan_preview_preserves_failed_dry_run_output(self, run):
+        run.return_value = Mock(
+            returncode=2,
+            stdout="",
+            stderr="invalid target\n",
+        )
+        plan = fake_plan([sys.executable, "tool.py", "missing"])
+
+        populate_dry_run_previews(plan)
+
+        preview = plan["units"][0]["dryRun"]
+        self.assertEqual(preview["status"], "failed")
+        self.assertEqual(preview["exitCode"], 2)
+        self.assertIn("Standard error:\ninvalid target", preview["output"])
 
 
 class WorkbenchStoreTests(unittest.TestCase):
