@@ -23,6 +23,12 @@ import review_solutions
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+REVIEW_MODEL_PATH = (
+    Path(__file__).resolve().parent / "workbench_web" / "review_model.js"
+)
+REVIEW_TOKENS_PATH = (
+    Path(__file__).resolve().parent / "workbench_web" / "review_tokens.css"
+)
 DEFAULT_PRIORITY = "high,medium"
 PRIORITY_RANK = {
     "high": 0,
@@ -244,13 +250,28 @@ def open_in_browser(target: Path | str) -> bool:
     return webbrowser.open(url)
 
 
-def _project_display_path(path: Path) -> str:
+@lru_cache(maxsize=1)
+def _review_model_script() -> str:
+    """Load the browser review model shared with the live workbench."""
+    return REVIEW_MODEL_PATH.read_text(encoding="utf-8")
+
+
+@lru_cache(maxsize=1)
+def _review_tokens_css() -> str:
+    """Load visual tokens shared by the report and live workbench."""
+    return REVIEW_TOKENS_PATH.read_text(encoding="utf-8")
+
+
+def project_display_path(path: Path) -> str:
     """Format a path relative to this project, with portable separators."""
     resolved = path if path.is_absolute() else path.resolve()
     try:
         return resolved.relative_to(PROJECT_ROOT).as_posix()
     except ValueError:
         return resolved.as_posix()
+
+
+_project_display_path = project_display_path
 
 
 def _read_optional_text(path: Path) -> str:
@@ -460,6 +481,7 @@ def build_review_catalog(
                     f"{attempt.name if attempt is not None else ''}"
                 ),
                 "problemKey": f"{paper}::{problem.id}",
+                "paperUrlKey": project_display_path(paper),
                 "paperTitle": problem.paper_title,
                 "paperAuthors": list(problem.paper_authors),
                 "paperDirectory": str(paper),
@@ -537,6 +559,10 @@ def build_review_catalog(
                     if include_contents and triage is not None
                     else ""
                 ),
+                "hasTriageReport": (
+                    triage is not None
+                    and (problem.directory / common.TRIAGE_MARKDOWN).is_file()
+                ),
                 "literatureStatus": (
                     literature.get("resolution_status", "")
                     if literature is not None
@@ -559,6 +585,10 @@ def build_review_catalog(
                     if include_contents and literature is not None
                     else ""
                 ),
+                "hasLiteratureReport": (
+                    literature is not None
+                    and (problem.directory / common.LITERATURE_MARKDOWN).is_file()
+                ),
                 "claimReviews": review_result.get(
                     "claim_reviews", []
                 ),
@@ -570,6 +600,7 @@ def build_review_catalog(
                 ),
                 "warnings": review_result.get("warnings", []),
                 "files": files,
+                "fileCount": len(files),
                 "critique": (
                     _read_optional_text(
                         attempt.directory / "critique.md"
@@ -657,6 +688,8 @@ def render_human_review_html(
             )
         }
     )
+    review_model_script = _review_model_script().replace("</", "<\\/")
+    review_tokens_css = _review_tokens_css().replace("</", "<\\/")
     return """<!doctype html>
 <html lang="en">
 <head>
@@ -677,30 +710,8 @@ def render_human_review_html(
   <script
     src="https://cdn.jsdelivr.net/npm/@mdit/plugin-katex@1.0.1/dist/cdn.umd.js"
     crossorigin="anonymous"></script>
+  <style>""" + review_tokens_css + """</style>
   <style>
-    :root {
-      color-scheme: light;
-      --ink: #182326;
-      --muted: #607074;
-      --paper: #f8f5ed;
-      --panel: #fffdf7;
-      --surface: #fff;
-      --document: #fffefb;
-      --rail-bg: rgba(255, 253, 247, 0.86);
-      --glow: #dcece6;
-      --line: #d8d3c5;
-      --navy: #173f4f;
-      --teal: #28786f;
-      --high: #b53a2f;
-      --high-bg: #f8e5df;
-      --medium: #96620d;
-      --medium-bg: #fbefcd;
-      --low: #4d6671;
-      --low-bg: #e8eff1;
-      --known: #285f7a;
-      --known-bg: #dcecf4;
-      --shadow: 0 16px 45px rgba(30, 51, 54, 0.11);
-    }
     * { box-sizing: border-box; }
     html, body { min-height: 100%; }
     body {
@@ -939,12 +950,12 @@ def render_human_review_html(
     .badge.unattempted { color: var(--low); background: var(--low-bg); }
     .badge.unreviewed { color: var(--medium); background: var(--medium-bg); }
     .badge.solution {
-      color: #256046;
-      background: #dcefe4;
+      color: var(--success);
+      background: var(--success-soft);
     }
     .badge.counterexample {
-      color: #744192;
-      background: #eee2f5;
+      color: var(--counterexample);
+      background: var(--counterexample-soft);
     }
     .badge.known {
       color: var(--known);
@@ -1161,31 +1172,6 @@ def render_human_review_html(
     }
     .stale { color: var(--high); font-weight: 750; }
     [hidden] { display: none !important; }
-    @media (prefers-color-scheme: dark) {
-      :root {
-        color-scheme: dark;
-        --ink: #e4ecec;
-        --muted: #9aadb1;
-        --paper: #0d1518;
-        --panel: #172226;
-        --surface: #131f23;
-        --document: #10191c;
-        --rail-bg: rgba(15, 24, 27, 0.9);
-        --glow: #173934;
-        --line: #304147;
-        --navy: #d3e9ed;
-        --teal: #73c9bc;
-        --high: #ff9587;
-        --high-bg: #472520;
-        --medium: #f0c46f;
-        --medium-bg: #40341c;
-        --low: #abc5cd;
-        --low-bg: #25353a;
-        --known: #8ac7e1;
-        --known-bg: #213c48;
-        --shadow: 0 18px 50px rgba(0, 0, 0, 0.28);
-      }
-    }
     @media (max-width: 1200px) {
       .summary-grid { grid-template-columns: 1fr; }
     }
@@ -1215,98 +1201,35 @@ def render_human_review_html(
             autocomplete="off">
         </label>
         <label class="control">Attempt status
-          <select id="attempt-status-filter">
-            <option value="all">All open problems</option>
-            <option value="unattempted">Unattempted</option>
-            <option value="unreviewed">Attempted, awaiting review</option>
-            <option value="reviewed">Reviewed</option>
-          </select>
+          <select id="attempt-status-filter"></select>
         </label>
         <label class="control">Claim type
-          <select id="claim-filter">
-            <option value="all">Any claim type</option>
-            <option value="resolution">Any resolution claim</option>
-            <option value="solution">Solution</option>
-            <option value="counterexample">Counterexample</option>
-            <option value="partial_result">Partial result</option>
-            <option value="obstruction">Obstruction</option>
-            <option value="none">No result</option>
-          </select>
+          <select id="claim-filter"></select>
         </label>
         <details class="advanced-filters">
           <summary>Advanced review filters</summary>
           <div class="advanced-filter-grid">
         <label class="control">Correctness
-          <select id="correctness-filter">
-            <option value="all">Any correctness</option>
-            <option value="credible">Plausible or well supported</option>
-            <option value="no_major_error">Minor gaps or better</option>
-            <option value="well_supported">Well supported</option>
-            <option value="plausible">Plausible</option>
-            <option value="minor_gaps">Minor gaps</option>
-            <option value="major_gaps">Major gaps</option>
-            <option value="incorrect">Incorrect</option>
-            <option value="not_applicable">Not applicable</option>
-            <option value="legacy">Legacy review</option>
-          </select>
+          <select id="correctness-filter"></select>
         </label>
         <label class="control">Coverage
-          <select id="coverage-filter">
-            <option value="all">Any coverage</option>
-            <option value="complete_any">Any complete coverage</option>
-            <option value="substantial">Near complete or complete</option>
-            <option value="complete">Complete</option>
-            <option value="complete_under_stated_interpretation">
-              Complete under stated interpretation
-            </option>
-            <option value="near_complete">Near complete</option>
-            <option value="partial">Partial</option>
-            <option value="special_case">Special case</option>
-            <option value="auxiliary">Auxiliary</option>
-            <option value="none">None</option>
-            <option value="legacy">Legacy review</option>
-          </select>
+          <select id="coverage-filter"></select>
         </label>
         <label class="control">Importance
-          <select id="importance-filter">
-            <option value="all">Any importance</option>
-            <option value="major_or_resolution">Major or resolution</option>
-            <option value="resolution">Resolution</option>
-            <option value="major">Major</option>
-            <option value="moderate">Moderate</option>
-            <option value="minor">Minor</option>
-            <option value="none">None</option>
-            <option value="legacy">Legacy review</option>
-          </select>
+          <select id="importance-filter"></select>
         </label>
         <label class="control">Verification confidence
-          <select id="confidence-filter">
-            <option value="all">Any confidence</option>
-            <option value="high">High</option>
-            <option value="medium">Medium</option>
-            <option value="low">Low</option>
-            <option value="legacy">Legacy review</option>
-          </select>
+          <select id="confidence-filter"></select>
         </label>
           </div>
         </details>
         <label class="control">Literature status
-          <select id="literature-filter">
-            <option value="all">Any literature status</option>
-            <option value="exclude-resolved">
-              Exclude known full resolutions
-            </option>
-            <option value="resolved">Known full resolution</option>
-            <option value="partially_resolved">Partially resolved</option>
-            <option value="no_resolution_found">No resolution found</option>
-            <option value="uncertain">Uncertain</option>
-            <option value="missing">No literature review</option>
-          </select>
+          <select id="literature-filter"></select>
         </label>
         <div class="filters" aria-label="Human priority filters">
-          <label class="filter"><input id="filter-high" type="checkbox" checked>
+          <label class="filter" id="filter-high-wrap"><input id="filter-high" type="checkbox" checked>
             High</label>
-          <label class="filter"><input id="filter-medium" type="checkbox" checked>
+          <label class="filter" id="filter-medium-wrap"><input id="filter-medium" type="checkbox" checked>
             Medium</label>
           <label class="filter" id="filter-low-wrap" hidden>
             <input id="filter-low" type="checkbox" checked> Low</label>
@@ -1338,6 +1261,7 @@ def render_human_review_html(
   <script id="review-data" type="application/json">""" + payload + """</script>
   <script id="review-settings" type="application/json">""" + settings_payload + """
   </script>
+  <script>""" + review_model_script + """</script>
   <script>
     const allItems = JSON.parse(
       document.getElementById("review-data").textContent
@@ -1362,6 +1286,25 @@ def render_human_review_html(
     const importanceFilter = document.getElementById("importance-filter");
     const confidenceFilter = document.getElementById("confidence-filter");
     const literatureFilter = document.getElementById("literature-filter");
+    function populateFilter(select, options) {
+      options.forEach(([value, label]) => {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = label;
+        select.append(option);
+      });
+    }
+    [
+      [attemptStatusFilter, "attemptStatus"],
+      [claimFilter, "claim"],
+      [correctnessFilter, "correctness"],
+      [coverageFilter, "coverage"],
+      [importanceFilter, "importance"],
+      [confidenceFilter, "confidence"],
+      [literatureFilter, "literature"]
+    ].forEach(([select, key]) => {
+      populateFilter(select, LooseEndsReviewModel.filterOptions[key]);
+    });
     const high = document.getElementById("filter-high");
     const medium = document.getElementById("filter-medium");
     const low = document.getElementById("filter-low");
@@ -1378,31 +1321,10 @@ def render_human_review_html(
     const empty = document.getElementById("empty");
     const queueCount = document.getElementById("queue-count");
     let markdownRenderer = null;
-    if (
-      typeof window.markdownit === "function" &&
-      typeof window.mdItPluginKatex?.katex === "function" &&
-      typeof window.katex?.renderToString === "function"
-    ) {
-      markdownRenderer = window.markdownit({
-        html: false,
-        linkify: true,
-        typographer: false
-      }).use(window.mdItPluginKatex.katex, {
-        delimiters: "all",
-        throwOnError: false,
-        logger: () => "ignore"
-      });
-      const defaultLinkOpen =
-        markdownRenderer.renderer.rules.link_open ||
-        ((tokens, index, options, env, self) =>
-          self.renderToken(tokens, index, options));
-      markdownRenderer.renderer.rules.link_open = (
-        tokens, index, options, env, self
-      ) => {
-        tokens[index].attrSet("target", "_blank");
-        tokens[index].attrSet("rel", "noopener");
-        return defaultLinkOpen(tokens, index, options, env, self);
-      };
+    try {
+      markdownRenderer = LooseEndsReviewModel.createMarkdownRenderer(window);
+    } catch (error) {
+      console.warn("Markdown rendering unavailable", error);
     }
 
     function node(tag, className = "", text = "") {
@@ -1412,187 +1334,54 @@ def render_human_review_html(
       return element;
     }
 
-    function matchesClaimType(item) {
-      const kind = item.claimedResultType;
-      switch (claimFilter.value) {
-        case "resolution":
-          return kind === "solution" || kind === "counterexample";
-        case "solution":
-        case "counterexample":
-        case "partial_result":
-        case "obstruction":
-        case "none":
-          return kind === claimFilter.value;
-        default:
-          return true;
-      }
-    }
-
-    function matchesAttemptStatus(item) {
-      return attemptStatusFilter.value === "all" ||
-        attemptStatusFilter.value === item.attemptStatus;
-    }
-
-    function matchesDimension(select, value) {
-      return select.value === "all" || select.value === value;
-    }
-
-    function matchesCorrectness(item) {
-      if (correctnessFilter.value === "credible") {
-        return ["plausible", "well_supported"].includes(item.correctness);
-      }
-      if (correctnessFilter.value === "no_major_error") {
-        return ["minor_gaps", "plausible", "well_supported"].includes(
-          item.correctness
-        );
-      }
-      return matchesDimension(correctnessFilter, item.correctness);
-    }
-
-    function matchesCoverage(item) {
-      const complete = [
-        "complete_under_stated_interpretation", "complete"
-      ];
-      if (coverageFilter.value === "complete_any") {
-        return complete.includes(item.reviewedCoverage);
-      }
-      if (coverageFilter.value === "substantial") {
-        return ["near_complete", ...complete].includes(item.reviewedCoverage);
-      }
-      return matchesDimension(coverageFilter, item.reviewedCoverage);
-    }
-
-    function matchesImportance(item) {
-      if (importanceFilter.value === "major_or_resolution") {
-        return ["major", "resolution"].includes(item.importance);
-      }
-      return matchesDimension(importanceFilter, item.importance);
-    }
-
-    function matchesLiteratureStatus(item) {
-      switch (literatureFilter.value) {
-        case "exclude-resolved":
-          return item.literatureStatus !== "resolved";
-        case "missing":
-          return !item.literatureStatus;
-        case "resolved":
-        case "partially_resolved":
-        case "no_resolution_found":
-        case "uncertain":
-          return item.literatureStatus === literatureFilter.value;
-        default:
-          return true;
-      }
+    function activeReviewFilters() {
+      return {
+        attemptStatus: attemptStatusFilter.value,
+        claim: claimFilter.value,
+        correctness: correctnessFilter.value,
+        coverage: coverageFilter.value,
+        importance: importanceFilter.value,
+        confidence: confidenceFilter.value,
+        literature: literatureFilter.value,
+        priorities: new Set(
+          Object.entries(priorityFilters)
+            .filter(([, input]) => input.checked)
+            .map(([level]) => level)
+        ),
+        current: current.checked,
+        stale: stale.checked
+      };
     }
 
     function filteredItems() {
-      const query = search.value.trim().toLowerCase();
-      return allItems.filter(item => {
-        if (!matchesAttemptStatus(item)) return false;
-        if (item.attemptStatus === "reviewed") {
-          if (priorityFilters[item.priority] &&
-              !priorityFilters[item.priority].checked) return false;
-          if (item.current && !current.checked) return false;
-          if (!item.current && !stale.checked) return false;
-        } else if (
-          correctnessFilter.value !== "all" ||
-          coverageFilter.value !== "all" ||
-          importanceFilter.value !== "all" ||
-          confidenceFilter.value !== "all"
-        ) {
-          return false;
-        }
-        if (!matchesClaimType(item)) return false;
-        if (!matchesCorrectness(item)) return false;
-        if (!matchesCoverage(item)) return false;
-        if (!matchesImportance(item)) return false;
-        if (!matchesDimension(
-          confidenceFilter, item.verificationConfidence
-        )) return false;
-        if (!matchesLiteratureStatus(item)) return false;
-        if (!query) return true;
-        const haystack = [
-          item.paperTitle, item.paperDirectory, item.paperAuthors,
-          item.problemId, item.problemTitle,
-          item.problemStatement,
-          item.attemptName, item.criticSummary, item.solverSummary,
-          item.attemptStatus, item.triageClassification, item.triageSummary,
-          item.claimedResultType, item.correctness, item.reviewedCoverage,
-          item.importance, item.verificationConfidence,
-          item.literatureStatus, item.literatureSummary, item.legacyVerdict
-        ].join(" ").toLowerCase();
-        return haystack.includes(query);
-      });
+      return LooseEndsReviewModel.filterItems(
+        allItems,
+        activeReviewFilters(),
+        search.value
+      );
     }
 
-    function compareProblems(left, right) {
-      return left.paperTitle.localeCompare(
-        right.paperTitle, undefined, { sensitivity: "base", numeric: true }
-      ) || left.paperDirectory.localeCompare(right.paperDirectory) ||
-        left.problemId.localeCompare(
-          right.problemId, undefined, { numeric: true }
-        );
-    }
-
-    function latestProblems(items) {
-      const latest = new Map();
-      items.forEach(item => {
-        const previous = latest.get(item.problemKey);
-        if (!previous || item.attemptNumber > previous.attemptNumber) {
-          latest.set(item.problemKey, item);
-        }
-      });
-      return [...latest.values()].sort(compareProblems);
-    }
-
-    function attemptsForProblem(items, problemKey) {
-      return items
-        .filter(item => item.problemKey === problemKey)
-        .sort((left, right) =>
-          right.attemptNumber - left.attemptNumber ||
-          right.id.localeCompare(left.id)
-        );
-    }
-
-    function humanize(value) {
-      return String(value || "unknown").replaceAll("_", " ");
-    }
-
-    function statusLabel(value) {
-      return value === "unreviewed"
-        ? "attempted, awaiting review"
-        : humanize(value);
-    }
+    const {
+      attemptsForProblem,
+      detailBadges,
+      detailTabs,
+      groupProblemsByPaper,
+      humanize,
+      latestProblems,
+      queueSummary,
+      statusLabel,
+      summaryCards
+    } = LooseEndsReviewModel;
 
     function appendAttemptTags(parent, item, { includeKnown = false } = {}) {
       const tags = node("div", "attempt-tags");
-      const values = [];
-      if (includeKnown && item.literatureStatus === "resolved") {
-        values.push(["known", "known"]);
-      }
-      if (item.claimedResultType) {
-        values.push(["claim", item.claimedResultType]);
-      }
-      if (item.attemptStatus === "reviewed") {
-        values.push(
-          ["correctness", item.correctness],
-          ["coverage", item.reviewedCoverage],
-          ["importance", item.importance]
-        );
-      } else {
-        values.push(["status", statusLabel(item.attemptStatus)]);
-      }
-      values.forEach(([dimension, value]) => {
+      LooseEndsReviewModel.attemptTags(item, { includeKnown }).forEach(value => {
         const tag = node(
           "span",
-          `attempt-tag${
-            dimension === "claim" ? " claim" :
-            dimension === "status" ? " status" :
-            dimension === "known" ? " known" : ""
-          }`,
-          humanize(value)
+          `attempt-tag${value.className ? ` ${value.className}` : ""}`,
+          value.label
         );
-        tag.title = `${dimension}: ${humanize(value)}`;
+        tag.title = value.title;
         tags.append(tag);
       });
       parent.append(tags);
@@ -1631,21 +1420,53 @@ def render_human_review_html(
     }
 
     function itemUrl(itemId) {
-      const parameters = new URLSearchParams(location.search);
+      const parameters = new URLSearchParams();
       const query = search.value.trim();
       if (query) {
         parameters.set("q", query);
-      } else {
-        parameters.delete("q");
+      }
+      LooseEndsReviewModel.filtersToSearchParams(
+        parameters,
+        activeReviewFilters(),
+        settings.initialPriorities
+      );
+      const item = allItems.find(value => value.id === itemId);
+      LooseEndsReviewModel.identityToSearchParams(parameters, item);
+      if (item && state.tab && state.tab !== "attempt") {
+        parameters.set("detail", state.tab);
       }
       const encodedParameters = parameters.toString();
-      const encodedItem = itemId ? `#${encodeURIComponent(itemId)}` : "";
       return `${location.pathname}` +
-        `${encodedParameters ? `?${encodedParameters}` : ""}${encodedItem}`;
+        `${encodedParameters ? `?${encodedParameters}` : ""}`;
     }
 
-    function queryFromLocation() {
-      return new URLSearchParams(location.search).get("q") || "";
+    function applyControlsFromLocation() {
+      const parameters = new URLSearchParams(location.search);
+      search.value = parameters.get("q") || "";
+      const filters = LooseEndsReviewModel.filtersFromSearchParams(
+        parameters,
+        settings.initialPriorities
+      );
+      attemptStatusFilter.value = filters.attemptStatus;
+      claimFilter.value = filters.claim;
+      correctnessFilter.value = filters.correctness;
+      coverageFilter.value = filters.coverage;
+      importanceFilter.value = filters.importance;
+      confidenceFilter.value = filters.confidence;
+      literatureFilter.value = filters.literature;
+      Object.entries(priorityFilters).forEach(([level, input]) => {
+        input.checked = filters.priorities.has(level);
+      });
+      current.checked = filters.current;
+      stale.checked = filters.stale;
+    }
+
+    function requestedItemFromLocation() {
+      const parameters = new URLSearchParams(location.search);
+      const identity = LooseEndsReviewModel.identityFromSearchParams(parameters);
+      const legacyId = decodeURIComponent(location.hash.slice(1));
+      return LooseEndsReviewModel.findReviewItem(allItems, identity) ||
+        allItems.find(item => item.id === legacyId);
     }
 
     function rememberCurrentScroll({ updateHistory = true } = {}) {
@@ -1703,18 +1524,8 @@ def render_human_review_html(
       if (!problems.some(item => item.problemKey === state.selectedProblem)) {
         state.selectedProblem = problems[0]?.problemKey || "";
       }
-      const groups = new Map();
-      problems.forEach(item => {
-        if (!groups.has(item.paperDirectory)) {
-          groups.set(item.paperDirectory, {
-            paperTitle: item.paperTitle,
-            problems: []
-          });
-        }
-        groups.get(item.paperDirectory).problems.push(item);
-      });
       problemList.replaceChildren();
-      groups.forEach(group => {
+      groupProblemsByPaper(items).forEach(group => {
         const section = node("section", "paper-group");
         section.append(node("div", "paper-title", group.paperTitle));
         group.problems.forEach(item => {
@@ -1786,58 +1597,29 @@ def render_human_review_html(
     function renderReview(item) {
       review.replaceChildren();
       const top = node("div", "topline");
-      if (item.attemptStatus === "reviewed") {
-        top.append(
-          node("span", `badge ${item.priority}`, item.priority),
-          node(
-            "span",
-            "verdict",
-            `${humanize(item.claimedResultType)} · ${item.attemptName}`
-          ),
-          node("span", "badge", humanize(item.correctness)),
-          node(
-            "span", "badge", `coverage: ${humanize(item.reviewedCoverage)}`
-          ),
-          node("span", "badge", `importance: ${item.importance}`),
-          node(
-            "span", "badge",
-            `verification: ${item.verificationConfidence}`
-          )
-        );
-      } else {
-        top.append(
-          node(
-            "span",
-            `badge ${item.attemptStatus}`,
-            statusLabel(item.attemptStatus)
-          ),
-          node(
-            "span",
-            "verdict",
-            item.attemptName || "No solver attempt"
-          )
-        );
-        if (item.claimedResultType) {
-          top.append(
-            node("span", "badge", humanize(item.claimedResultType))
-          );
+      detailBadges(item).forEach(value => {
+        if (value.dimension === "warning") {
+          top.append(node("span", "stale", value.label.toUpperCase()));
+        } else {
+          const className = value.dimension === "priority"
+            ? `badge ${value.value}`
+            : value.dimension === "status"
+              ? `badge ${value.value}`
+              : value.dimension === "literature"
+                ? "badge literature"
+                : "badge";
+          top.append(node("span", className, humanize(value.label)));
         }
-      }
-      if (item.literatureStatus) {
-        top.append(
-          node(
-            "span",
-            "badge literature",
-            `literature: ${item.literatureStatus.replaceAll("_", " ")}`
-          )
-        );
-      }
-      if (item.attemptStatus === "reviewed" && !item.current) {
-        top.append(node("span", "stale", "STALE REVIEW"));
-      }
-      if (item.reviewSchema === "legacy") {
-        top.append(node("span", "stale", "LEGACY ASSESSMENT"));
-      }
+      });
+      top.append(
+        node(
+          "span",
+          "verdict",
+          item.attemptStatus === "reviewed"
+            ? `${humanize(item.claimedResultType)} · ${item.attemptName}`
+            : item.attemptName || "No solver attempt"
+        )
+      );
       review.append(top);
       review.append(node("h1", "", item.paperTitle));
       review.append(
@@ -1869,58 +1651,17 @@ def render_human_review_html(
       review.append(problemStatement);
 
       const summaries = node("div", "summary-grid");
-      if (item.triageSummary) {
-        const triage = node("section", "summary");
-        triage.append(
-          node(
-            "h2",
-            "",
-            `Triage · ${item.triageClassification || "unclassified"}` +
-              `${item.triageCurrent ? "" : " · stale"}`
-          ),
-          markdownBody(item.triageSummary, "No triage summary.")
+      summaryCards(item).forEach(card => {
+        const summary = node(
+          "section",
+          `summary${card.key === "literature" ? " literature-summary" : ""}`
         );
-        summaries.append(triage);
-      }
-      if (item.literatureSummary) {
-        const literature = node("section", "summary literature-summary");
-        literature.append(
-          node(
-            "h2",
-            "",
-            `Literature · ${item.literatureStatus} · ` +
-              `${item.literatureConfidence} confidence`
-          ),
-          markdownBody(item.literatureSummary, "No literature summary.")
+        summary.append(
+          node("h2", "", card.title),
+          markdownBody(card.value, card.missing || "No summary available.")
         );
-        summaries.append(literature);
-      }
-      if (item.attemptStatus !== "unattempted") {
-        const solver = node("section", "summary");
-        solver.append(
-          node(
-            "h2",
-            "",
-            `Solver claim · ${item.claimedResultType}`
-          ),
-          markdownBody(item.solverSummary, "No solver summary.")
-        );
-        summaries.append(solver);
-      }
-      if (item.attemptStatus === "reviewed") {
-        const critic = node("section", "summary");
-        critic.append(
-          node(
-            "h2",
-            "",
-            item.reviewSchema === "legacy"
-              ? `Critic · legacy ${item.legacyVerdict}`
-              : `Critic · ${item.correctness} · ${item.reviewedCoverage}`
-          ),
-          markdownBody(item.criticSummary, "No critic summary.")
-        );
-        summaries.append(critic);
-      }
+        summaries.append(summary);
+      });
       if (summaries.childElementCount) review.append(summaries);
 
       if (Array.isArray(item.claimReviews) && item.claimReviews.length) {
@@ -1951,20 +1692,7 @@ def render_human_review_html(
         literature: item.literatureReport,
         files: item.files
       };
-      const tabEntries = [];
-      if (item.attemptStatus !== "unattempted") {
-        tabEntries.push(["attempt", "Solution attempt"]);
-      }
-      if (item.attemptStatus === "reviewed") {
-        tabEntries.push(["critique", "Critique"]);
-      }
-      if (item.triageReport) {
-        tabEntries.push(["triage", "Triage"]);
-      }
-      if (item.literatureReport) {
-        tabEntries.push(["literature", "Literature"]);
-      }
-      tabEntries.push(["files", `Files (${item.files.length})`]);
+      const tabEntries = detailTabs(item);
       if (!tabEntries.some(([key]) => key === state.tab)) {
         state.tab = tabEntries[0][0];
       }
@@ -1977,7 +1705,7 @@ def render_human_review_html(
           rememberCurrentScroll();
           state.tab = key;
           renderReview(item);
-          history.replaceState(
+          history.pushState(
             historyPayload(window.scrollY),
             "",
             itemUrl(state.selectedItem)
@@ -1994,7 +1722,7 @@ def render_human_review_html(
           const link = node("a", "file");
           link.href = file.uri;
           link.target = "_blank";
-          link.rel = "noopener";
+          link.rel = "noopener noreferrer";
           link.append(
             node("strong", "", `${file.artifact ? "Artifact · " : ""}${file.label}`),
             node("span", "", file.path)
@@ -2013,62 +1741,7 @@ def render_human_review_html(
 
     function render() {
       const items = filteredItems();
-      const levels = ["high", "medium", "low", "none"];
-      const countText = levels
-        .map(level => [
-          level,
-          items.filter(item => item.priority === level).length
-        ])
-        .filter(([, count]) => count)
-        .map(([level, count]) => `${count} ${level}`)
-        .join(" · ");
-      const focusLabels = {
-        resolution: "resolution claims",
-        solution: "solution claims",
-        counterexample: "counterexample claims",
-        partial_result: "partial results",
-        obstruction: "obstructions",
-        none: "no result claim"
-      };
-      const literatureLabels = {
-        "exclude-resolved": "excluding known full resolutions",
-        resolved: "known full resolutions",
-        partially_resolved: "partially resolved in literature",
-        no_resolution_found: "no literature resolution found",
-        uncertain: "uncertain literature status",
-        missing: "no literature review"
-      };
-      const problemCount = new Set(
-        items.map(item => item.problemKey)
-      ).size;
-      const statusCount = ["unattempted", "unreviewed", "reviewed"]
-        .map(status => [
-          status,
-          new Set(
-            items
-              .filter(item => item.attemptStatus === status)
-              .map(item => item.problemKey)
-          ).size
-        ])
-        .filter(([, count]) => count)
-        .map(([status, count]) => `${count} ${statusLabel(status)}`)
-        .join(" · ");
-      const countParts = [
-        `${problemCount} problem${problemCount === 1 ? "" : "s"} shown`
-      ];
-      if (statusCount) countParts.push(statusCount);
-      if (countText) countParts.push(countText);
-      const staleCount = items.filter(
-        item => item.attemptStatus === "reviewed" && !item.current
-      ).length;
-      if (staleCount) countParts.push(`${staleCount} stale`);
-      if (focusLabels[claimFilter.value]) {
-        countParts.push(focusLabels[claimFilter.value]);
-      }
-      if (literatureLabels[literatureFilter.value]) {
-        countParts.push(literatureLabels[literatureFilter.value]);
-      }
-      queueCount.textContent = countParts.join(" · ");
+      queueCount.textContent = queueSummary(items, activeReviewFilters());
       renderProblemControls(items);
       const selected = items.find(item => item.id === state.selectedItem);
       empty.hidden = Boolean(selected);
@@ -2119,17 +1792,12 @@ def render_human_review_html(
 
     window.addEventListener("popstate", event => {
       rememberCurrentScroll({ updateHistory: false });
-      search.value = queryFromLocation();
-      const requested = event.state?.humanReview
-        ? event.state.selectedItem
-        : decodeURIComponent(location.hash.slice(1));
-      const requestedItem = allItems.find(item => item.id === requested);
-      if (!requestedItem) return;
-      state.selectedProblem = requestedItem.problemKey;
-      state.selectedItem = requestedItem.id;
-      state.tab = event.state?.humanReview
-        ? event.state.tab || "attempt"
-        : "attempt";
+      applyControlsFromLocation();
+      const requestedItem = requestedItemFromLocation();
+      state.selectedProblem = requestedItem?.problemKey || "";
+      state.selectedItem = requestedItem?.id || "";
+      state.tab = new URLSearchParams(location.search).get("detail") ||
+        (event.state?.humanReview ? event.state.tab : "attempt") || "attempt";
       render();
       renderedItemId = state.selectedItem;
       const storedScroll =
@@ -2141,27 +1809,22 @@ def render_human_review_html(
       restorePageScroll(renderedItemId, storedScroll);
     });
 
-    search.value = queryFromLocation();
-    const requested = decodeURIComponent(location.hash.slice(1));
-    const requestedItem = allItems.find(item => item.id === requested);
+    applyControlsFromLocation();
+    const requestedItem = requestedItemFromLocation();
     if (requestedItem) {
       state.selectedProblem = requestedItem.problemKey;
       state.selectedItem = requestedItem.id;
     }
-    ["low", "none"].forEach(level => {
+    state.tab = new URLSearchParams(location.search).get("detail") || "attempt";
+    const availableFilters = LooseEndsReviewModel.availableFilters(allItems);
+    ["high", "medium", "low", "none"].forEach(level => {
       document.getElementById(`filter-${level}-wrap`).hidden =
-        !allItems.some(
-          item => item.attemptStatus === "reviewed" && item.priority === level
-        );
+        !availableFilters.priorities.has(level);
     });
     document.getElementById("filter-current-wrap").hidden =
-      !allItems.some(
-        item => item.attemptStatus === "reviewed" && item.current
-      );
+      !availableFilters.current;
     document.getElementById("filter-stale-wrap").hidden =
-      !allItems.some(
-        item => item.attemptStatus === "reviewed" && !item.current
-      );
+      !availableFilters.stale;
     render();
     renderedItemId = state.selectedItem;
     const initialScroll =

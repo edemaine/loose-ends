@@ -701,8 +701,13 @@ the complete literature report when available, and links to the paper analysis,
 structured records, and artifacts. The browser loads
 Markdown-it and its KaTeX plugin to render Markdown and math in one parsing
 pass, supporting `\(...\)`, `\[...\]`, `$...$`, and `$$...$$` delimiters.
-The search box is stored as the `q` URL parameter, so searches survive reloads
-and are restored together with problem selection by browser Back and Forward.
+Navigation is encoded in the URL: `q` stores search, review filters use named
+parameters such as `status`, `claim`, `priority`, and `freshness`, and the
+selected review uses the stable `paper`, `problem`, and optional `attempt`
+identity. `detail` selects the evidence tab. URLs therefore survive catalog
+reordering and reloads, while browser Back and Forward restore selection,
+filters, tabs, and scroll position. Old positional `#review-N` links are still
+accepted and are replaced with the stable form when opened.
 Papers are alphabetical by title, problems are numeric by ID, and attempts are
 newest first. Each problem card shows its attempt status and total number of
 attempts. Reviewed cards additionally show claim type, correctness, coverage,
@@ -734,6 +739,15 @@ literature search, solving, independent review, paper writing, and revision.
 Initial discovery runs in the background with live phase and row progress.
 Manuscript details link back to the source paper and open-problem titles recorded
 by their input selectors and attempts.
+
+The four top-level views have reloadable paths: `/research`, `/papers`,
+`/manuscripts`, and `/activity`. Their query strings capture the complete
+navigation state: `q` for search; the same review/filter parameters as the
+human-review dashboard; `paper` for a source paper; `manuscript` plus optional
+`draft` for a manuscript; and `job` for managed task output. Normal navigation
+creates history entries, while search and filter edits replace the current
+entry, so Back and Forward move between meaningful selections without replaying
+each keystroke.
 
 Every task has two launch steps. The first dialog collects optional human
 directions, maximum rounds, review policy, model settings, authors, and other

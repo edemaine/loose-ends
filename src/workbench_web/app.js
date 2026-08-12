@@ -1,5 +1,8 @@
 "use strict";
 
+const reviewModel = window.LooseEndsReviewModel;
+if (!reviewModel) throw new Error("Shared review model failed to load");
+
 const state = {
   csrf: "",
   catalog: { papers: [], reviews: [], manuscripts: [], counts: {} },
@@ -7,10 +10,13 @@ const state = {
   tab: "research",
   search: "",
   selectedReview: "",
+  selectedProblem: "",
+  researchFilters: reviewModel.createDefaultFilters(),
   selectedPaper: "",
   selectedManuscript: "",
+  selectedDraft: "",
   selectedJob: "",
-  detailTab: "problem",
+  detailTab: "attempt",
   detailCache: new Map(),
   selection: new Map(),
   dialog: null,
@@ -28,23 +34,126 @@ const dialogFooter = document.getElementById("dialog-footer");
 const dialogTitle = document.getElementById("dialog-title");
 const dialogEyebrow = document.getElementById("dialog-eyebrow");
 
+const viewPaths = Object.freeze({
+  research: "/research",
+  papers: "/papers",
+  manuscripts: "/manuscripts",
+  activity: "/activity",
+});
+const initialPriorities = ["high", "medium"];
+const pageScrollPositions = new Map();
+let renderedUrl = "";
+let scrollUpdateFrame = null;
+let navigationReady = false;
+
+if ("scrollRestoration" in history) history.scrollRestoration = "manual";
+
 let markdownRenderer = null;
 try {
-  if (typeof window.markdownit === "function") {
-    markdownRenderer = window.markdownit({ html: false, linkify: true, breaks: false });
-    if (window.mdItPluginKatex?.katex && window.katex?.renderToString) {
-      markdownRenderer.use(window.mdItPluginKatex.katex, { throwOnError: false });
-    }
-    const originalLink = markdownRenderer.renderer.rules.link_open ||
-      ((tokens, index, options, env, self) => self.renderToken(tokens, index, options));
-    markdownRenderer.renderer.rules.link_open = (tokens, index, options, env, self) => {
-      tokens[index].attrSet("target", "_blank");
-      tokens[index].attrSet("rel", "noreferrer");
-      return originalLink(tokens, index, options, env, self);
-    };
-  }
+  markdownRenderer = reviewModel.createMarkdownRenderer(window);
 } catch (error) {
   console.warn("Markdown rendering unavailable", error);
+}
+
+function tabFromPath(pathname) {
+  return Object.entries(viewPaths).find(([, path]) => path === pathname)?.[0] || "research";
+}
+
+function currentUrl() {
+  const parameters = new URLSearchParams();
+  if (state.search.trim()) parameters.set("q", state.search.trim());
+  if (state.tab === "research") {
+    reviewModel.filtersToSearchParams(parameters, state.researchFilters, initialPriorities);
+    const item = state.catalog.reviews.find(value => value.itemKey === state.selectedReview);
+    reviewModel.identityToSearchParams(parameters, item);
+    if (item && state.detailTab && state.detailTab !== "attempt") parameters.set("detail", state.detailTab);
+  } else if (state.tab === "papers") {
+    const paper = state.catalog.papers.find(value => value.key === state.selectedPaper);
+    if (paper) parameters.set("paper", paper.urlKey || paper.path);
+  } else if (state.tab === "manuscripts") {
+    const manuscript = state.catalog.manuscripts.find(value => value.key === state.selectedManuscript);
+    if (manuscript) {
+      parameters.set("manuscript", manuscript.urlKey || manuscript.path);
+      const draft = manuscript.drafts.find(value => value.key === state.selectedDraft);
+      if (draft && draft.key !== manuscript.latest.key) parameters.set("draft", draft.name);
+    }
+  } else if (state.tab === "activity" && state.selectedJob) {
+    parameters.set("job", state.selectedJob);
+  }
+  const query = parameters.toString();
+  return `${viewPaths[state.tab]}${query ? `?${query}` : ""}`;
+}
+
+function historyPayload(scrollY = window.scrollY) {
+  return { looseEndsWorkbench: true, scrollY };
+}
+
+function rememberCurrentScroll({ updateHistory = true } = {}) {
+  if (!renderedUrl) return;
+  const scrollY = window.scrollY;
+  pageScrollPositions.set(renderedUrl, scrollY);
+  if (updateHistory && history.state?.looseEndsWorkbench) {
+    history.replaceState(historyPayload(scrollY), "", renderedUrl);
+  }
+}
+
+function restorePageScroll(url, preferredScroll) {
+  const scrollY = Number.isFinite(preferredScroll)
+    ? preferredScroll
+    : pageScrollPositions.get(url) ?? 0;
+  pageScrollPositions.set(url, scrollY);
+  requestAnimationFrame(() => window.scrollTo({ top: scrollY, left: 0, behavior: "auto" }));
+}
+
+function syncNavigation({ replace = false, preserveScroll = false } = {}) {
+  if (!navigationReady) return;
+  rememberCurrentScroll();
+  render();
+  const url = currentUrl();
+  const scrollY = preserveScroll ? window.scrollY : pageScrollPositions.get(url) ?? 0;
+  const method = replace || url === renderedUrl ? "replaceState" : "pushState";
+  history[method](historyPayload(scrollY), "", url);
+  renderedUrl = url;
+  restorePageScroll(url, scrollY);
+}
+
+function applyLocation({ scrollY } = {}) {
+  const parameters = new URLSearchParams(location.search);
+  state.tab = tabFromPath(location.pathname);
+  state.search = parameters.get("q") || "";
+  if (state.tab === "research") {
+    state.researchFilters = reviewModel.filtersFromSearchParams(parameters, initialPriorities);
+    const identity = reviewModel.identityFromSearchParams(parameters);
+    const legacy = decodeURIComponent(location.hash.slice(1));
+    const requested = reviewModel.findReviewItem(state.catalog.reviews, identity) ||
+      state.catalog.reviews.find(item => item.id === legacy || item.itemKey === legacy);
+    state.selectedReview = requested?.itemKey || "";
+    state.selectedProblem = requested?.problemKey || "";
+    state.detailTab = parameters.get("detail") || "attempt";
+  } else if (state.tab === "papers") {
+    const requested = parameters.get("paper");
+    state.selectedPaper = state.catalog.papers.find(
+      item => item.urlKey === requested || item.path === requested,
+    )?.key || "";
+  } else if (state.tab === "manuscripts") {
+    const requested = parameters.get("manuscript");
+    const manuscript = state.catalog.manuscripts.find(
+      item => item.urlKey === requested || item.path === requested,
+    );
+    state.selectedManuscript = manuscript?.key || "";
+    const requestedDraft = parameters.get("draft");
+    state.selectedDraft = manuscript?.drafts.find(
+      draft => draft.name === requestedDraft || draft.urlKey === requestedDraft,
+    )?.key || manuscript?.latest.key || "";
+  } else {
+    state.selectedJob = parameters.get("job") || "";
+  }
+  render();
+  const canonicalUrl = currentUrl();
+  const restoredScroll = Number.isFinite(scrollY) ? scrollY : pageScrollPositions.get(canonicalUrl) ?? 0;
+  history.replaceState(historyPayload(restoredScroll), "", canonicalUrl);
+  renderedUrl = canonicalUrl;
+  restorePageScroll(canonicalUrl, restoredScroll);
 }
 
 function node(tag, className = "", text = "") {
@@ -62,11 +171,11 @@ function button(label, handler, className = "button") {
 }
 
 function badge(value, extra = "") {
-  return node("span", `badge ${extra || value || "neutral"}`, humanize(value || "none"));
+  return node("span", `badge ${extra || value || "neutral"}`, reviewModel.titleize(value || "none"));
 }
 
 function humanize(value) {
-  return String(value || "").replaceAll("_", " ").replace(/\b\w/g, letter => letter.toUpperCase());
+  return reviewModel.titleize(value, "");
 }
 
 function formatTime(value) {
@@ -227,10 +336,8 @@ function problemsForPapers(papers) {
 
 function setTab(tab) {
   state.tab = tab;
-  document.querySelectorAll("[data-tab]").forEach(value => {
-    value.classList.toggle("active", value.dataset.tab === tab);
-  });
-  render();
+  state.search = "";
+  syncNavigation();
 }
 
 document.querySelectorAll("[data-tab]").forEach(value => {
@@ -238,6 +345,9 @@ document.querySelectorAll("[data-tab]").forEach(value => {
 });
 
 function render() {
+  document.querySelectorAll("[data-tab]").forEach(value => {
+    value.classList.toggle("active", value.dataset.tab === state.tab);
+  });
   const active = state.jobs.filter(job => ["queued", "running"].includes(job.status)).length;
   activityCount.textContent = active ? String(active) : "";
   if (state.catalog.error) showNotice(`Catalog update delayed: ${state.catalog.error}`, true);
@@ -248,6 +358,7 @@ function render() {
     renderSelectionBar();
     return;
   }
+  sidebar.classList.toggle("research-sidebar", state.tab === "research");
   if (state.tab === "research") renderResearch();
   else if (state.tab === "papers") renderPapers();
   else if (state.tab === "manuscripts") renderManuscripts();
@@ -262,7 +373,7 @@ function sidebarSearch(placeholder) {
   input.value = state.search;
   input.addEventListener("input", () => {
     state.search = input.value;
-    render();
+    syncNavigation({ replace: true, preserveScroll: true });
     const replacement = sidebar.querySelector("input.search");
     replacement?.focus();
     replacement?.setSelectionRange(state.search.length, state.search.length);
@@ -270,7 +381,17 @@ function sidebarSearch(placeholder) {
   return input;
 }
 
-function appendSideCard(parent, { title, meta, active, selectedTarget, onClick }) {
+function attemptTagsNode(item, options = {}) {
+  const tags = node("span", "attempt-tags");
+  reviewModel.attemptTags(item, options).forEach(value => {
+    const tag = node("span", `attempt-tag${value.className ? ` ${value.className}` : ""}`, value.label);
+    tag.title = value.title;
+    tags.append(tag);
+  });
+  return tags;
+}
+
+function appendSideCard(parent, { title, meta, tags, active, selectedTarget, onClick }) {
   const card = node("div", `side-card${active ? " active" : ""}`);
   card.role = "button";
   card.tabIndex = 0;
@@ -281,7 +402,9 @@ function appendSideCard(parent, { title, meta, active, selectedTarget, onClick }
   titleNode.title = title;
   const metaNode = node("small", "", meta);
   metaNode.title = meta;
-  copy.append(titleNode, metaNode);
+  copy.append(titleNode);
+  if (tags) copy.append(tags);
+  copy.append(metaNode);
   card.append(copy);
   card.addEventListener("click", onClick);
   card.addEventListener("keydown", event => {
@@ -294,44 +417,156 @@ function appendSideCard(parent, { title, meta, active, selectedTarget, onClick }
 }
 
 function filteredReviews() {
-  const query = state.search.trim().toLowerCase();
-  if (!query) return state.catalog.reviews;
-  return state.catalog.reviews.filter(item => [
-    item.paperTitle, item.problemId, item.problemTitle, item.attemptName,
-    item.solverSummary, item.criticSummary, item.triageSummary,
-  ].join(" ").toLowerCase().includes(query));
+  return reviewModel.filterItems(
+    state.catalog.reviews,
+    state.researchFilters,
+    state.search,
+  );
+}
+
+function filterControl(label, key, options) {
+  const wrapper = node("label", "filter-control");
+  wrapper.append(node("span", "", label));
+  const select = node("select");
+  options.forEach(([value, text]) => {
+    const option = node("option", "", text);
+    option.value = value;
+    option.selected = state.researchFilters[key] === value;
+    select.append(option);
+  });
+  select.addEventListener("change", () => {
+    state.researchFilters[key] = select.value;
+    state.selectedProblem = "";
+    state.selectedReview = "";
+    syncNavigation({ replace: true });
+  });
+  wrapper.append(select);
+  return wrapper;
+}
+
+function filterToggle(label, checked, handler) {
+  const wrapper = node("label", "filter-toggle");
+  const input = node("input");
+  input.type = "checkbox";
+  input.checked = checked;
+  input.addEventListener("change", () => {
+    handler(input.checked);
+    state.selectedProblem = "";
+    state.selectedReview = "";
+    syncNavigation({ replace: true });
+  });
+  wrapper.append(input, document.createTextNode(label));
+  return wrapper;
+}
+
+function renderResearchFilters() {
+  const details = node("details", "research-filters");
+  const summary = node("summary");
+  summary.append(node("span", "", "Problem filters"));
+  summary.append(node("small", "", "status · merit · literature"));
+  details.append(summary);
+  const controls = node("div", "research-filter-grid");
+  controls.append(
+    filterControl("Attempt status", "attemptStatus", reviewModel.filterOptions.attemptStatus),
+    filterControl("Claim type", "claim", reviewModel.filterOptions.claim),
+    filterControl("Correctness", "correctness", reviewModel.filterOptions.correctness),
+    filterControl("Coverage", "coverage", reviewModel.filterOptions.coverage),
+    filterControl("Importance", "importance", reviewModel.filterOptions.importance),
+    filterControl("Verification", "confidence", reviewModel.filterOptions.confidence),
+    filterControl("Literature", "literature", reviewModel.filterOptions.literature),
+  );
+  const toggles = node("div", "filter-toggles");
+  const available = reviewModel.availableFilters(state.catalog.reviews);
+  reviewModel.priorityLevels.forEach(priority => {
+    if (!available.priorities.has(priority)) return;
+    toggles.append(filterToggle(reviewModel.titleize(priority), state.researchFilters.priorities.has(priority), checked => {
+      if (checked) state.researchFilters.priorities.add(priority);
+      else state.researchFilters.priorities.delete(priority);
+    }));
+  });
+  if (available.current) {
+    toggles.append(filterToggle("Current", state.researchFilters.current, checked => { state.researchFilters.current = checked; }));
+  }
+  if (available.stale) {
+    toggles.append(filterToggle("Stale", state.researchFilters.stale, checked => { state.researchFilters.stale = checked; }));
+  }
+  const footer = node("div", "filter-footer");
+  footer.append(node("span", "", "Human priority and review freshness"));
+  footer.append(button("Reset", () => {
+    state.researchFilters = reviewModel.createDefaultFilters();
+    state.selectedProblem = "";
+    state.selectedReview = "";
+    syncNavigation({ replace: true });
+  }, "filter-reset"));
+  controls.append(toggles, footer);
+  details.append(controls);
+  return details;
 }
 
 function renderResearch() {
-  sidebar.replaceChildren(sidebarSearch("Search problems and attempts…"));
+  sidebar.replaceChildren();
+  const controls = node("div", "research-controls");
+  controls.append(sidebarSearch("Search open problems…"), renderResearchFilters());
+  sidebar.append(controls);
   const reviews = filteredReviews();
-  const groups = new Map();
-  reviews.forEach(item => {
-    if (!groups.has(item.paperTitle)) groups.set(item.paperTitle, []);
-    groups.get(item.paperTitle).push(item);
-  });
-  for (const [paper, items] of groups) {
-    sidebar.append(node("div", "sidebar-heading", paper));
+  const problems = reviewModel.latestProblems(reviews);
+  const requested = state.catalog.reviews.find(item => item.itemKey === state.selectedReview);
+  if (requested) state.selectedProblem = requested.problemKey;
+  if (!problems.some(item => item.problemKey === state.selectedProblem)) {
+    state.selectedProblem = problems[0]?.problemKey || "";
+  }
+  const listScroll = node("div", "problem-scroll");
+  listScroll.append(node("div", "sidebar-heading queue-summary", reviewModel.queueSummary(reviews, state.researchFilters)));
+  for (const group of reviewModel.groupProblemsByPaper(reviews)) {
+    listScroll.append(node("div", "sidebar-heading paper-heading", group.paperTitle));
     const list = node("div", "side-list");
-    items.forEach(item => {
-      const selectable = item.attemptDirectory ? attemptTarget(item) : problemTarget(item);
+    group.problems.forEach(item => {
       appendSideCard(list, {
         title: `${item.problemId} · ${item.problemTitle}`,
-        meta: item.attemptName ? `${item.attemptName} · ${humanize(item.attemptStatus)}` : "Unattempted",
-        active: state.selectedReview === item.itemKey,
-        selectedTarget: selectable,
+        meta: item.attemptName
+          ? `${reviewModel.statusLabel(item.attemptStatus)} · ${item.totalAttemptCount} total attempt${item.totalAttemptCount === 1 ? "" : "s"}`
+          : "Unattempted",
+        tags: attemptTagsNode(item, { includeKnown: true }),
+        active: state.selectedProblem === item.problemKey,
+        selectedTarget: problemTarget(item),
         onClick: () => {
-          state.selectedReview = item.itemKey;
-          state.detailTab = item.attemptDirectory ? "attempt" : "problem";
-          renderResearch();
+          state.selectedProblem = item.problemKey;
+          state.selectedReview = reviewModel.attemptsForProblem(reviews, item.problemKey)[0]?.itemKey || item.itemKey;
+          state.detailTab = "attempt";
+          syncNavigation();
         },
       });
     });
-    sidebar.append(list);
+    listScroll.append(list);
   }
-  if (!state.selectedReview || !reviews.some(item => item.itemKey === state.selectedReview)) {
-    state.selectedReview = reviews[0]?.itemKey || "";
+  sidebar.append(listScroll);
+
+  const attempts = reviewModel.attemptsForProblem(reviews, state.selectedProblem);
+  if (!attempts.some(item => item.itemKey === state.selectedReview)) {
+    state.selectedReview = attempts[0]?.itemKey || "";
   }
+  const attemptSwitcher = node("div", "attempt-switcher");
+  attemptSwitcher.append(node("div", "sidebar-heading", `Attempts${attempts.length ? ` · ${attempts.length}` : ""}`));
+  const attemptList = node("div", "attempt-list");
+  attempts.forEach(item => {
+    appendSideCard(attemptList, {
+      title: item.attemptName || "No attempts yet",
+      meta: item.attemptDirectory
+        ? reviewModel.statusLabel(item.attemptStatus)
+        : "Open problem",
+      tags: attemptTagsNode(item),
+      active: state.selectedReview === item.itemKey,
+      selectedTarget: item.attemptDirectory ? attemptTarget(item) : null,
+      onClick: () => {
+        state.selectedReview = item.itemKey;
+        state.detailTab = "attempt";
+        syncNavigation();
+      },
+    });
+  });
+  attemptSwitcher.append(attemptList);
+  sidebar.append(attemptSwitcher);
+
   const summary = state.catalog.reviews.find(item => item.itemKey === state.selectedReview);
   if (!summary) {
     main.replaceChildren(document.getElementById("empty-template").content.cloneNode(true));
@@ -367,6 +602,10 @@ function addAction(parent, label, action, targets, primary = false) {
 
 function renderReviewDetail(item) {
   const shell = node("div", "main-inner");
+  const selectedSummary = state.catalog.reviews.find(value => value.itemKey === item.itemKey);
+  if (selectedSummary && item !== selectedSummary) {
+    item = { ...selectedSummary, ...item };
+  }
   const hero = node("section", "hero");
   const copy = node("div");
   copy.append(node("div", "eyebrow", `${item.paperTitle} · ${item.problemId}`));
@@ -374,13 +613,18 @@ function renderReviewDetail(item) {
   copy.append(node("p", "", item.paperAuthors?.join(", ") || "Authors unavailable"));
   const badges = node("div", "badges");
   badges.append(badge(item.explicitness, "neutral"));
-  badges.append(badge(item.attemptStatus));
-  if (item.claimedResultType) badges.append(badge(item.claimedResultType));
-  if (item.priority) badges.append(badge(`${item.priority} priority`, item.priority === "high" ? "error" : "warn"));
-  if (item.current === false) badges.append(badge("stale review", "error"));
+  reviewModel.detailBadges(item).forEach(value => {
+    let className = value.value;
+    if (value.dimension === "priority") className = value.value === "high" ? "error" : value.value === "medium" ? "warn" : "neutral";
+    else if (value.dimension === "warning") className = "error";
+    else if (["coverage", "importance", "confidence", "literature"].includes(value.dimension)) className = "neutral";
+    badges.append(node("span", `badge ${className || "neutral"}`, value.label));
+  });
   copy.append(badges);
   hero.append(copy);
   shell.append(hero);
+
+  if (item.attemptDisplayPath) shell.append(node("code", "attempt-path", item.attemptDisplayPath));
 
   const actions = node("div", "actions");
   const problem = problemTarget(item);
@@ -394,51 +638,72 @@ function renderReviewDetail(item) {
   }
   shell.append(actions);
 
+  const problemStatement = node("section", "problem-statement panel");
+  problemStatement.append(
+    node("h2", "", "Open problem statement"),
+    markdown(item.problemStatement, "Loading problem statement…"),
+  );
+  shell.append(problemStatement);
+
   const summaries = node("div", "summary-grid");
-  if (item.triageSummary) summaries.append(summaryPanel("Triage", item.triageSummary));
-  if (item.literatureSummary) summaries.append(summaryPanel("Literature", item.literatureSummary));
-  if (item.solverSummary) summaries.append(summaryPanel("Solver", item.solverSummary));
-  if (item.criticSummary) summaries.append(summaryPanel("Independent review", item.criticSummary));
+  reviewModel.summaryCards(item).forEach(card => {
+    summaries.append(summaryPanel(card.title, card.value, card.missing));
+  });
   if (summaries.children.length) shell.append(summaries);
 
-  if (item.blockingGaps?.length || item.recommendedNextSteps?.length) {
+  if (item.claimReviews?.length) {
     const section = node("section", "section panel");
-    section.append(node("h2", "", "Research follow-up"));
-    const list = node("ul");
-    [...(item.blockingGaps || []), ...(item.recommendedNextSteps || [])].forEach(value => list.append(node("li", "", value)));
+    section.append(node("h2", "", "Claim assessments"));
+    const list = node("ul", "claim-list");
+    item.claimReviews.forEach(claim => {
+      const row = node("li");
+      row.append(
+        node("strong", "", `${claim.claim_id || "?"} — ${claim.assessment || "unknown"}: `),
+        document.createTextNode(claim.explanation || ""),
+      );
+      list.append(row);
+    });
     section.append(list);
     shell.append(section);
   }
+  appendStringList(shell, "Blocking gaps", item.blockingGaps);
+  appendStringList(shell, "Recommended next steps", item.recommendedNextSteps);
+  appendStringList(shell, "Warnings", item.warnings);
 
-  const tabs = [
-    ["problem", "Problem"],
-    ...(item.attemptDirectory ? [["attempt", "Attempt"], ["critique", "Critique"]] : []),
-    ["literature", "Literature"],
-    ["files", "Files"],
-  ];
+  const tabs = reviewModel.detailTabs(item);
   if (!tabs.some(([key]) => key === state.detailTab)) state.detailTab = tabs[0][0];
   const tabbar = node("div", "detail-tabs");
   tabs.forEach(([key, label]) => {
     tabbar.append(button(label, () => {
       state.detailTab = key;
-      renderReviewDetail(item);
+      syncNavigation();
     }, `detail-tab${state.detailTab === key ? " active" : ""}`));
   });
   shell.append(tabbar);
   const section = node("section", "section");
-  if (state.detailTab === "problem") section.append(markdown(item.problemStatement, "Loading problem statement…"));
-  else if (state.detailTab === "attempt") section.append(markdown(item.solverAttempt, "Loading solver attempt…"));
+  if (state.detailTab === "attempt") section.append(markdown(item.solverAttempt, "Loading solver attempt…"));
   else if (state.detailTab === "critique") section.append(markdown(item.critique, "No critique is installed."));
+  else if (state.detailTab === "triage") section.append(markdown(item.triageReport, "Loading triage report…"));
   else if (state.detailTab === "literature") section.append(markdown(item.literatureReport, "No literature report is installed."));
   else section.append(fileGrid(item.files || []));
   shell.append(section);
   main.replaceChildren(shell);
 }
 
-function summaryPanel(title, value) {
+function appendStringList(parent, title, values) {
+  if (!Array.isArray(values) || !values.length) return;
+  const section = node("section", "section panel");
+  section.append(node("h2", "", title));
+  const list = node("ul", "plain-list");
+  values.forEach(value => list.append(node("li", "", String(value))));
+  section.append(list);
+  parent.append(section);
+}
+
+function summaryPanel(title, value, missing = "No summary available.") {
   const panel = node("section", "panel");
   panel.append(node("h2", "", title));
-  panel.append(node("p", "", value));
+  panel.append(markdown(value, missing));
   return panel;
 }
 
@@ -451,7 +716,7 @@ function fileGrid(files) {
     const link = node("a", "file-link");
     link.href = fileUrl(path);
     link.target = "_blank";
-    link.rel = "noreferrer";
+    link.rel = "noopener noreferrer";
     link.append(node("strong", "", label));
     link.append(node("small", "", path));
     grid.append(link);
@@ -469,7 +734,7 @@ function renderPapers() {
     meta: paper.analyzed ? `${paper.problemCount} open problems` : "Not analyzed",
     active: state.selectedPaper === paper.key,
     selectedTarget: paperTarget(paper),
-    onClick: () => { state.selectedPaper = paper.key; renderPapers(); },
+    onClick: () => { state.selectedPaper = paper.key; syncNavigation(); },
   }));
   sidebar.append(node("div", "sidebar-heading", `${papers.length} papers`), list);
   if (!state.selectedPaper || !papers.some(paper => paper.key === state.selectedPaper)) state.selectedPaper = papers[0]?.key || "";
@@ -522,7 +787,11 @@ function renderManuscripts() {
     title: value.latest.title,
     meta: `${value.drafts.length} draft${value.drafts.length === 1 ? "" : "s"} · ${humanize(value.latest.verdict)}`,
     active: state.selectedManuscript === value.key,
-    onClick: () => { state.selectedManuscript = value.key; renderManuscripts(); },
+    onClick: () => {
+      state.selectedManuscript = value.key;
+      state.selectedDraft = value.latest.key;
+      syncNavigation();
+    },
   }));
   sidebar.append(node("div", "sidebar-heading", `${manuscripts.length} manuscripts`), list);
   if (!state.selectedManuscript || !manuscripts.some(value => value.key === state.selectedManuscript)) state.selectedManuscript = manuscripts[0]?.key || "";
@@ -531,7 +800,10 @@ function renderManuscripts() {
     main.replaceChildren(document.getElementById("empty-template").content.cloneNode(true));
     return;
   }
-  const draft = manuscript.latest;
+  if (!manuscript.drafts.some(value => value.key === state.selectedDraft)) {
+    state.selectedDraft = manuscript.latest.key;
+  }
+  const draft = manuscript.drafts.find(value => value.key === state.selectedDraft) || manuscript.latest;
   const shell = node("div", "main-inner");
   const hero = node("section", "hero");
   const copy = node("div");
@@ -591,6 +863,7 @@ function renderManuscripts() {
           );
           if (review) {
             state.selectedReview = review.itemKey;
+            state.selectedProblem = review.problemKey;
             setTab("research");
           }
         });
@@ -609,9 +882,14 @@ function renderManuscripts() {
   historyHeading.append(node("h2", "", "Draft history"));
   const history = node("div", "card-grid");
   [...manuscript.drafts].reverse().forEach(value => {
-    const card = node("div", "entity-card");
+    const card = node("button", `entity-card draft-card${value.key === draft.key ? " active" : ""}`);
+    card.type = "button";
     card.append(node("strong", "", value.name));
     card.append(node("small", "", `${humanize(value.status)} · ${humanize(value.verdict)}`));
+    card.addEventListener("click", () => {
+      state.selectedDraft = value.key;
+      syncNavigation();
+    });
     history.append(card);
   });
   shell.append(historyHeading, history);
@@ -629,8 +907,7 @@ function renderActivity() {
     active: state.selectedJob === job.id,
     onClick: () => {
       state.selectedJob = job.id;
-      renderActivity();
-      loadJob(job.id);
+      syncNavigation();
     },
   }));
   sidebar.append(node("div", "sidebar-heading", `${jobs.length} tasks`), list);
@@ -728,12 +1005,14 @@ function openOutput(path) {
   const review = state.catalog.reviews.find(item => item.attemptDirectory === path);
   if (review) {
     state.selectedReview = review.itemKey;
+    state.selectedProblem = review.problemKey;
     setTab("research");
     return;
   }
   const problem = state.catalog.reviews.find(item => `${item.paperDirectory}/${item.problemId}`.replaceAll("\\", "/") === path.replaceAll("\\", "/"));
   if (problem) {
     state.selectedReview = problem.itemKey;
+    state.selectedProblem = problem.problemKey;
     setTab("research");
     return;
   }
@@ -747,6 +1026,7 @@ function openOutput(path) {
   for (const manuscript of state.catalog.manuscripts) {
     if (manuscript.drafts.some(draft => draft.path === path)) {
       state.selectedManuscript = manuscript.key;
+      state.selectedDraft = manuscript.drafts.find(draft => draft.path === path)?.key || manuscript.latest.key;
       setTab("manuscripts");
       return;
     }
@@ -990,13 +1270,14 @@ async function confirmTask() {
 async function refreshCatalog() {
   state.catalog = await api("/api/catalog");
   state.detailCache.clear();
-  render();
+  if (navigationReady) syncNavigation({ replace: true, preserveScroll: true });
+  else render();
 }
 
 async function refreshJobs() {
   const value = await api("/api/jobs");
   state.jobs = value.jobs;
-  if (state.tab === "activity") renderActivity();
+  if (navigationReady) syncNavigation({ replace: true, preserveScroll: true });
   else render();
 }
 
@@ -1038,11 +1319,30 @@ async function start() {
     state.csrf = value.csrf;
     state.catalog = value.catalog;
     state.jobs = value.jobs;
-    render();
+    navigationReady = true;
+    applyLocation({
+      scrollY: history.state?.looseEndsWorkbench ? history.state.scrollY : 0,
+    });
     connectEvents();
   } catch (error) {
     main.replaceChildren(node("div", "error-box", `Could not start workbench: ${error.message}`));
   }
 }
+
+window.addEventListener("scroll", () => {
+  if (scrollUpdateFrame !== null) return;
+  scrollUpdateFrame = requestAnimationFrame(() => {
+    scrollUpdateFrame = null;
+    rememberCurrentScroll();
+  });
+}, { passive: true });
+
+window.addEventListener("popstate", event => {
+  if (!navigationReady) return;
+  rememberCurrentScroll({ updateHistory: false });
+  applyLocation({
+    scrollY: event.state?.looseEndsWorkbench ? event.state.scrollY : undefined,
+  });
+});
 
 start();

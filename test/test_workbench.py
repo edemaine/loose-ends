@@ -72,6 +72,46 @@ def fake_plan(argv: list[str], *, probe: dict | None = None) -> dict:
 
 
 class WorkbenchPlanningTests(unittest.TestCase):
+    def test_spa_routes_and_shared_assets_are_served(self):
+        class RecordingHandler(workbench.WorkbenchHandler):
+            def _host_is_allowed(self):
+                return True
+
+            def _send_asset(self, name):
+                self.sent_asset = name
+
+            def send_error_json(self, status, message):
+                self.error = (status, message)
+
+        for path in ("/", "/research", "/papers", "/manuscripts", "/activity"):
+            handler = object.__new__(RecordingHandler)
+            handler.path = f"{path}?q=test"
+            handler.do_GET()
+            self.assertEqual(handler.sent_asset, "index.html")
+
+        handler = object.__new__(RecordingHandler)
+        handler.path = "/review_tokens.css"
+        handler.do_GET()
+        self.assertEqual(handler.sent_asset, "review_tokens.css")
+
+    def test_workbench_assets_use_stable_history_routes_and_shared_model(self):
+        app = (PROJECT_ROOT / "src" / "workbench_web" / "app.js").read_text(
+            encoding="utf-8"
+        )
+        model = (
+            PROJECT_ROOT / "src" / "workbench_web" / "review_model.js"
+        ).read_text(encoding="utf-8")
+        self.assertIn('research: "/research"', app)
+        self.assertIn('window.addEventListener("popstate"', app)
+        self.assertIn('history[method](historyPayload(scrollY), "", url)', app)
+        self.assertIn("identityFromSearchParams(parameters)", app)
+        self.assertIn("groupProblemsByPaper(reviews)", app)
+        self.assertIn("reviewModel.summaryCards(item)", app)
+        self.assertIn("reviewModel.createMarkdownRenderer(window)", app)
+        self.assertIn("function filtersFromSearchParams", model)
+        self.assertIn("function identityToSearchParams", model)
+        self.assertIn("function queueSummary", model)
+
     def test_network_bind_and_request_host_security(self):
         args = build_parser().parse_args(
             ["--host", "0.0.0.0", "--allowed-host", "research.local", "."]
@@ -128,7 +168,7 @@ class WorkbenchPlanningTests(unittest.TestCase):
     def test_review_inventory_reports_row_progress(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
-            make_paper(root)
+            paper = make_paper(root)
             progress = []
 
             records = workbench._review_inventory(
@@ -138,6 +178,7 @@ class WorkbenchPlanningTests(unittest.TestCase):
 
             self.assertEqual(len(records), 1)
             self.assertEqual(progress, [(0, 1), (1, 1)])
+            self.assertEqual(records[0]["paperUrlKey"], paper.as_posix())
 
     def test_manuscript_sources_include_legacy_paper_and_problem_titles(self):
         with TemporaryDirectory() as temporary:

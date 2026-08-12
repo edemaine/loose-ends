@@ -1191,6 +1191,7 @@ class OpenProblemPipelineTests(unittest.TestCase):
             self.assertNotIn("HIGH BODY", compact)
 
             dashboard = human_review.render_human_review_html(items)
+            self.assertIn(human_review._review_model_script(), dashboard)
             dashboard_data = human_review._html_data(
                 items,
                 include_contents=True,
@@ -1242,12 +1243,14 @@ class OpenProblemPipelineTests(unittest.TestCase):
             self.assertIn('id="literature-filter"', dashboard)
             self.assertIn('id="filter-current"', dashboard)
             self.assertIn('id="filter-stale"', dashboard)
+            self.assertIn("LooseEndsReviewModel.filterItems", dashboard)
+            self.assertIn("LooseEndsReviewModel.filterOptions", dashboard)
             self.assertIn(
-                '<option value="resolution">Any resolution claim</option>',
+                '["resolution", "Any resolution claim"]',
                 dashboard,
             )
             self.assertIn(
-                '<option value="partial_result">Partial result</option>',
+                '["partial_result", "Partial result"]',
                 dashboard,
             )
             self.assertIn(
@@ -1255,34 +1258,34 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 dashboard,
             )
             self.assertIn(
-                'return item.literatureStatus !== "resolved";',
+                'filters.literature === "exclude-resolved"',
                 dashboard,
             )
             self.assertIn(
-                "if (!item.current && !stale.checked) return false;",
+                "if (!item.current && !filters.stale) return false;",
                 dashboard,
             )
             self.assertIn(
-                'kind === "solution" || kind === "counterexample"',
+                '["solution", "counterexample"].includes(item.claimedResultType)',
                 dashboard,
             )
             self.assertIn(
-                'function matchesCorrectness(item)',
+                'filters.correctness === "credible"',
                 dashboard,
             )
             self.assertIn(
-                'function matchesCoverage(item)',
+                'filters.coverage === "complete_any"',
                 dashboard,
             )
             self.assertIn(
-                '<option value="major_or_resolution">Major or resolution</option>',
+                '["major_or_resolution", "Major or resolution"]',
                 dashboard,
             )
             self.assertIn("HIGH BODY", dashboard)
             self.assertIn('"problemStatement": "Construct it."', dashboard)
             self.assertIn("Open problem statement", dashboard)
             self.assertIn(
-                "markdownBody(item.criticSummary, \"No critic summary.\")",
+                "summaryCards(item).forEach(card =>",
                 dashboard,
             )
             self.assertIn(
@@ -1298,10 +1301,18 @@ class OpenProblemPipelineTests(unittest.TestCase):
             self.assertIn("restorePageScroll(renderedItemId", dashboard)
             self.assertIn('parameters.set("q", query)', dashboard)
             self.assertIn(
-                'new URLSearchParams(location.search).get("q")',
+                'parameters.get("q") || ""',
                 dashboard,
             )
-            self.assertIn("search.value = queryFromLocation()", dashboard)
+            self.assertIn("applyControlsFromLocation()", dashboard)
+            self.assertIn("identityFromSearchParams(parameters)", dashboard)
+            self.assertIn("identityToSearchParams(parameters, item)", dashboard)
+            self.assertIn("filtersFromSearchParams(", dashboard)
+            self.assertIn("filtersToSearchParams(", dashboard)
+            self.assertIn(
+                human_review.REVIEW_TOKENS_PATH.read_text(encoding="utf-8"),
+                dashboard,
+            )
             self.assertIn("katex@0.17.0", dashboard)
             self.assertIn("markdown-it@14.3.0", dashboard)
             self.assertIn("@mdit/plugin-katex@1.0.1", dashboard)
@@ -1360,7 +1371,7 @@ class OpenProblemPipelineTests(unittest.TestCase):
             )
             self.assertIn('id="attempt-status-filter"', coverage_dashboard)
             self.assertIn(
-                '<option value="unattempted">Unattempted</option>',
+                '["unattempted", "Unattempted"]',
                 coverage_dashboard,
             )
             self.assertIn(

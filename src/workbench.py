@@ -78,6 +78,11 @@ def _paper_metadata(paper: Path) -> tuple[str, list[str]]:
     return str(title), [str(author) for author in authors]
 
 
+def _url_key(path: Path) -> str:
+    """Return the same portable project-relative identity used by reviews."""
+    return human_review.project_display_path(path)
+
+
 def _paper_inventory(paths: Iterable[Path]) -> list[dict]:
     papers = analyze_papers.discover_paper_directories(paths)
     records = []
@@ -87,6 +92,7 @@ def _paper_inventory(paths: Iterable[Path]) -> list[dict]:
         records.append(
             {
                 "key": str(paper.resolve()),
+                "urlKey": _url_key(paper),
                 "path": str(paper.resolve()),
                 "name": paper.name,
                 "title": title,
@@ -166,6 +172,7 @@ def _manuscript_sources(
         paper_title = str(paper_record.get("title") or paper.name)
         source_papers[paper_key] = {
             "key": paper_key,
+            "urlKey": _url_key(paper),
             "path": str(paper.resolve()),
             "title": paper_title,
         }
@@ -241,6 +248,7 @@ def _manuscript_inventory(
             drafts.append(
                 {
                     "key": str(draft.resolve()),
+                    "urlKey": _url_key(draft),
                     "path": str(draft.resolve()),
                     "name": draft.name,
                     "number": int(match.group(1)),
@@ -271,6 +279,7 @@ def _manuscript_inventory(
             manuscripts.append(
                 {
                     "key": str(manuscript.resolve()),
+                    "urlKey": _url_key(manuscript),
                     "path": str(manuscript.resolve()),
                     "name": manuscript.name,
                     "latest": drafts[-1],
@@ -876,9 +885,15 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                 self._send_events()
             elif path == "/api/file":
                 self._send_file(parse_qs(parsed.query).get("path", [""])[0])
-            elif path == "/" or path == "/index.html":
+            elif path in {
+                "/", "/index.html", "/research", "/papers",
+                "/manuscripts", "/activity",
+            }:
                 self._send_asset("index.html")
-            elif path in {"/app.js", "/styles.css"}:
+            elif path in {
+                "/app.js", "/review_model.js", "/review_tokens.css",
+                "/styles.css",
+            }:
                 self._send_asset(path.removeprefix("/"))
             else:
                 self.send_error_json(404, "not found")
