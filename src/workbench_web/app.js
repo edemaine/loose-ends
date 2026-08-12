@@ -277,17 +277,67 @@ function toggleSelection(value, checked) {
   const key = targetKey(value);
   if (checked) state.selection.set(key, value);
   else state.selection.delete(key);
+  syncSelectionControls();
   renderSelectionBar();
 }
 
 function selectionCheckbox(value) {
   const input = node("input");
   input.type = "checkbox";
-  input.checked = state.selection.has(targetKey(value));
+  input.dataset.selectionKey = targetKey(value);
+  input.checked = state.selection.has(input.dataset.selectionKey);
   input.setAttribute("aria-label", `Select ${value.label}`);
   input.addEventListener("click", event => event.stopPropagation());
   input.addEventListener("change", () => toggleSelection(value, input.checked));
   return input;
+}
+
+function visibleProblemTargets() {
+  return reviewModel.latestProblems(filteredReviews()).map(problemTarget);
+}
+
+function updateVisibleProblemSelectionControl(input) {
+  if (!input) return;
+  const targets = visibleProblemTargets();
+  const selected = targets.filter(value => state.selection.has(targetKey(value))).length;
+  input.checked = targets.length > 0 && selected === targets.length;
+  input.indeterminate = selected > 0 && selected < targets.length;
+  input.disabled = targets.length === 0;
+  input.setAttribute("aria-label", `${input.checked ? "Clear" : "Select"} all ${targets.length} visible problems`);
+  const label = input.closest("label");
+  label?.classList.toggle("disabled", input.disabled);
+  const copy = label?.querySelector("span");
+  if (copy) copy.textContent = `Select visible (${targets.length.toLocaleString()})`;
+}
+
+function syncSelectionControls() {
+  document.querySelectorAll("input[data-selection-key]").forEach(input => {
+    input.checked = state.selection.has(input.dataset.selectionKey);
+  });
+  updateVisibleProblemSelectionControl(
+    document.querySelector("input[data-select-visible-problems]"),
+  );
+}
+
+function visibleProblemSelectionControl() {
+  const label = node("label", "select-visible");
+  const input = node("input");
+  input.type = "checkbox";
+  input.dataset.selectVisibleProblems = "";
+  input.addEventListener("click", event => event.stopPropagation());
+  input.addEventListener("change", () => {
+    visibleProblemTargets().forEach(value => {
+      const key = targetKey(value);
+      if (input.checked) state.selection.set(key, value);
+      else state.selection.delete(key);
+    });
+    syncSelectionControls();
+    renderSelectionBar();
+  });
+  label.addEventListener("click", event => event.stopPropagation());
+  label.append(input, node("span"));
+  updateVisibleProblemSelectionControl(input);
+  return label;
 }
 
 function renderSelectionBar() {
@@ -464,7 +514,7 @@ function renderResearchFilters() {
   const details = node("details", "research-filters");
   const summary = node("summary");
   summary.append(node("span", "", "Problem filters"));
-  summary.append(node("small", "", "status · merit · literature"));
+  summary.append(visibleProblemSelectionControl());
   details.append(summary);
   const controls = node("div", "research-filter-grid");
   controls.append(

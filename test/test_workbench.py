@@ -111,9 +111,15 @@ class WorkbenchPlanningTests(unittest.TestCase):
         self.assertIn("groupProblemsByPaper(reviews)", app)
         self.assertIn("reviewModel.summaryCards(item)", app)
         self.assertIn("reviewModel.createMarkdownRenderer(window)", app)
+        self.assertIn("function visibleProblemSelectionControl", app)
+        self.assertIn("input.indeterminate", app)
         self.assertIn("function filtersFromSearchParams", model)
         self.assertIn("function identityToSearchParams", model)
         self.assertIn("function queueSummary", model)
+        styles = (
+            PROJECT_ROOT / "src" / "workbench_web" / "styles.css"
+        ).read_text(encoding="utf-8")
+        self.assertIn(".selection-bar[hidden] { display: none; }", styles)
 
     def test_network_bind_and_request_host_security(self):
         args = build_parser().parse_args(
