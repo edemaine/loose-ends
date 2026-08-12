@@ -14,6 +14,22 @@ import codex_cli
 
 
 class CodexCliTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "win32", "Windows process flags")
+    def test_windowless_process_group_hides_console(self):
+        options = codex_cli.windowless_popen_options()
+
+        self.assertTrue(
+            options["creationflags"] & subprocess.CREATE_NO_WINDOW
+        )
+        self.assertTrue(
+            options["creationflags"] & subprocess.CREATE_NEW_PROCESS_GROUP
+        )
+        self.assertTrue(
+            options["startupinfo"].dwFlags
+            & subprocess.STARTF_USESHOWWINDOW
+        )
+        self.assertEqual(options["startupinfo"].wShowWindow, subprocess.SW_HIDE)
+
     def test_reports_nul_filled_windows_sandbox_acl_state_before_launch(self):
         with TemporaryDirectory() as temporary:
             state = Path(temporary) / "deny_read_acl_state.json"

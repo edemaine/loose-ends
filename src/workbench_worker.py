@@ -44,6 +44,7 @@ def _stop_process_tree(process: subprocess.Popen) -> None:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
+            **codex_cli.windowless_popen_options(new_process_group=False),
         )
     else:
         try:
@@ -69,12 +70,7 @@ def run_worker(database: Path, run_id: str) -> int:
     )
     environment = os.environ.copy()
     environment["PYTHONUNBUFFERED"] = "1"
-    creationflags = 0
-    popen_options: dict = {}
-    if os.name == "nt":
-        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
-    else:
-        popen_options["start_new_session"] = True
+    popen_options = codex_cli.windowless_popen_options()
 
     process: subprocess.Popen | None = None
     canceled = False
@@ -93,7 +89,6 @@ def run_worker(database: Path, run_id: str) -> int:
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 text=True,
-                creationflags=creationflags,
                 **popen_options,
             )
             next_heartbeat = time.monotonic()

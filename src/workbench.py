@@ -683,6 +683,36 @@ class ChangeHandler(FileSystemEventHandler):
             self.catalog.schedule()
 
 
+class TaskChangeHandler(FileSystemEventHandler):
+    """Wake the task scheduler when SQLite or its WAL records a commit."""
+
+    def __init__(self, scheduler: "Scheduler", database: Path):
+        self.scheduler = scheduler
+        database_name = database.name.casefold()
+        self.database_names = {
+            database_name,
+            f"{database_name}-wal",
+            f"{database_name}-journal",
+        }
+
+    def on_any_event(self, event: FileSystemEvent) -> None:
+        if getattr(event, "event_type", "") in {
+            "opened",
+            "closed",
+            "closed_no_write",
+        } or getattr(event, "is_directory", False):
+            return
+        paths = [event.src_path]
+        destination = getattr(event, "dest_path", "")
+        if destination:
+            paths.append(destination)
+        for path in paths:
+            name = Path(path).name.casefold()
+            if name in self.database_names:
+                self.scheduler.schedule()
+                return
+
+
 class Scheduler:
     def __init__(
         self,
@@ -697,7 +727,10 @@ class Scheduler:
         self.max_workers = max_workers
         self.state_directory = state_directory
         self.stopping = threading.Event()
+        self.pending = threading.Event()
         self.last_launch = 0.0
+        self.revision = self.store.revision()
+        self.pending.set()
         self.thread = threading.Thread(
             target=self._loop,
             name="workbench-scheduler",
@@ -728,12 +761,7 @@ class Scheduler:
             "stdout": subprocess.DEVNULL,
             "stderr": subprocess.DEVNULL,
         }
-        if os.name == "nt":
-            options["creationflags"] = (
-                subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
-            )
-        else:
-            options["start_new_session"] = True
+        options.update(codex_cli.windowless_popen_options())
         try:
             subprocess.Popen(command, **options)
         except OSError as exc:
@@ -744,38 +772,69 @@ class Scheduler:
                 error=f"could not start worker: {exc}",
             )
         self.last_launch = time.monotonic()
-        self.hub.publish("tasks.changed")
+        self.revision = self.store.revision()
+        self.hub.publish("tasks.changed", revision=self.revision)
+
+    def schedule(self) -> None:
+        self.pending.set()
+
+    def _check(self) -> float | None:
+        stale = self.store.mark_stale_runs(older_than=12)
+        for run_id in stale:
+            run = self.store.get_run(run_id)
+            outputs = probe_outputs(run["probe"])
+            if outputs:
+                self.store.update_run(
+                    run_id,
+                    status="partial",
+                    outputs_json=outputs,
+                    error="worker stopped after installing output",
+                )
+        current_revision = self.store.revision()
+        if current_revision != self.revision:
+            self.revision = current_revision
+            self.hub.publish("tasks.changed", revision=self.revision)
+
+        active_count = self.store.active_count()
+        slots = self.max_workers - active_count
+        if slots > 0:
+            queued = self.store.queued_runs(limit=100)
+            if queued:
+                launch_delay = max(
+                    0.0,
+                    1.05 - (time.monotonic() - self.last_launch),
+                )
+                if launch_delay:
+                    return launch_delay
+                active_resources = self.store.active_resources()
+                for run in queued:
+                    if active_resources.intersection(run["resources"]):
+                        continue
+                    self._launch(run)
+                    return 1.05
+        # An active worker normally wakes us through SQLite WAL events.  This
+        # timeout only detects a worker that died without another commit.
+        if active_count:
+            return 12.0
+        return None
 
     def _loop(self) -> None:
-        revision = self.store.revision()
-        while not self.stopping.wait(0.4):
-            stale = self.store.mark_stale_runs(older_than=12)
-            for run_id in stale:
-                run = self.store.get_run(run_id)
-                outputs = probe_outputs(run["probe"])
-                if outputs:
-                    self.store.update_run(
-                        run_id,
-                        status="partial",
-                        outputs_json=outputs,
-                        error="worker stopped after installing output",
-                    )
-            current_revision = self.store.revision()
-            if current_revision != revision:
-                revision = current_revision
-                self.hub.publish("tasks.changed", revision=revision)
-            slots = self.max_workers - self.store.active_count()
-            if slots <= 0 or time.monotonic() - self.last_launch < 1.05:
-                continue
-            active_resources = self.store.active_resources()
-            for run in self.store.queued_runs(limit=100):
-                if active_resources.intersection(run["resources"]):
-                    continue
-                self._launch(run)
+        wake_after: float | None = None
+        while True:
+            signaled = self.pending.wait(wake_after)
+            if self.stopping.is_set():
                 break
+            if signaled:
+                self.pending.clear()
+                # A SQLite commit can modify the WAL several times.
+                if self.stopping.wait(0.05):
+                    break
+                self.pending.clear()
+            wake_after = self._check()
 
     def close(self) -> None:
         self.stopping.set()
+        self.pending.set()
         self.thread.join(timeout=5)
 
 
@@ -836,6 +895,11 @@ class WorkbenchApplication:
             roots.append(candidate)
         for root in roots:
             observer.schedule(handler, str(root), recursive=True)
+        observer.schedule(
+            TaskChangeHandler(self.scheduler, self.store.database),
+            str(self.state_directory.resolve()),
+            recursive=False,
+        )
         observer.start()
         self.observer = observer
 
@@ -872,6 +936,7 @@ class WorkbenchApplication:
                 "project files changed after this plan was prepared; review it again"
             )
         job = self.store.create_job(saved["request"], saved["plan"])
+        self.scheduler.schedule()
         self.hub.publish("tasks.changed")
         return job
 
@@ -1090,9 +1155,11 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                 self.send_json(self.app.confirm_plan(plan_id), 201)
             elif match := re.fullmatch(r"/api/runs/([0-9a-f-]+)/cancel", parsed.path):
                 self.send_json(self.app.store.request_cancel(match.group(1)))
+                self.app.scheduler.schedule()
                 self.app.hub.publish("tasks.changed")
             elif match := re.fullmatch(r"/api/runs/([0-9a-f-]+)/retry", parsed.path):
                 self.send_json(self.app.store.retry_run(match.group(1)), 201)
+                self.app.scheduler.schedule()
                 self.app.hub.publish("tasks.changed")
             else:
                 self.send_error_json(404, "not found")
@@ -1219,7 +1286,7 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                         f"id: {sequence}\nevent: update\ndata: {payload}\n\n".encode("utf-8")
                     )
                 self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             return
 
 

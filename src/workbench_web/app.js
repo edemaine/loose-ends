@@ -20,6 +20,9 @@ const state = {
   detailTab: "attempt",
   detailCache: new Map(),
   selection: new Map(),
+  jobDetails: new Map(),
+  runLogs: new Map(),
+  runLogLoads: new Map(),
   dialog: null,
 };
 
@@ -947,7 +950,7 @@ function renderManuscripts() {
   main.replaceChildren(shell);
 }
 
-function renderActivity() {
+function renderActivity({ preserveDetail = false } = {}) {
   sidebar.replaceChildren(sidebarSearch("Search tasks…"));
   const query = state.search.trim().toLowerCase();
   const jobs = state.jobs.filter(job => !query || `${job.title} ${job.action} ${job.status}`.toLowerCase().includes(query));
@@ -967,17 +970,59 @@ function renderActivity() {
     main.replaceChildren(document.getElementById("empty-template").content.cloneNode(true));
     return;
   }
-  const cached = state.jobs.find(job => job.id === state.selectedJob);
-  const shell = node("div", "main-inner");
-  shell.append(node("div", "loading", cached ? `Loading ${cached.title}…` : "Loading task…"));
-  main.replaceChildren(shell);
+  const summary = state.jobs.find(job => job.id === state.selectedJob);
+  const cached = state.jobDetails.get(state.selectedJob);
+  const visibleJob = main.querySelector("[data-job-detail]")?.dataset.jobDetail;
+  if (cached) {
+    if (!preserveDetail || visibleJob !== state.selectedJob) renderJobDetail(cached);
+    else refreshVisibleRunLogs();
+  } else {
+    const shell = node("div", "main-inner");
+    shell.append(node("div", "loading", summary ? `Loading ${summary.title}…` : "Loading task…"));
+    main.replaceChildren(shell);
+  }
   loadJob(state.selectedJob);
+}
+
+function jobRenderFingerprint(job) {
+  return JSON.stringify({
+    id: job.id,
+    action: job.action,
+    title: job.title,
+    status: job.status,
+    created_at: job.created_at,
+    finished_at: job.finished_at,
+    runs: job.runs.map(run => ({
+      id: run.id,
+      label: run.label,
+      status: run.status,
+      started_at: run.started_at,
+      finished_at: run.finished_at,
+      exit_code: run.exit_code,
+      error: run.error,
+      outputs: run.outputs,
+      argv: run.argv,
+      cancel_requested: run.cancel_requested,
+    })),
+  });
 }
 
 async function loadJob(id) {
   try {
     const job = await api(`/api/jobs/${id}`);
-    if (state.tab === "activity" && state.selectedJob === id) renderJobDetail(job);
+    const previous = state.jobDetails.get(id);
+    state.jobDetails.set(id, job);
+    if (state.tab !== "activity" || state.selectedJob !== id) return;
+    const visibleJob = main.querySelector("[data-job-detail]")?.dataset.jobDetail;
+    if (
+      !previous ||
+      visibleJob !== id ||
+      jobRenderFingerprint(previous) !== jobRenderFingerprint(job)
+    ) {
+      renderJobDetail(job);
+    } else {
+      refreshVisibleRunLogs();
+    }
   } catch (error) {
     showNotice(error.message, true);
   }
@@ -985,6 +1030,7 @@ async function loadJob(id) {
 
 function renderJobDetail(job) {
   const shell = node("div", "main-inner");
+  shell.dataset.jobDetail = job.id;
   const hero = node("section", "hero");
   const copy = node("div");
   copy.append(node("div", "eyebrow", `${humanize(job.action)} task`));
@@ -1027,15 +1073,67 @@ function renderJobDetail(job) {
     const command = node("div", "confirm-block");
     command.append(node("h3", "", "Command"), node("pre", "command", run.argv.join(" ")));
     section.append(command);
-    const log = node("pre", "console", "Loading output…");
+    const cachedLog = state.runLogs.get(run.id);
+    const log = node("pre", "console", runLogText(cachedLog));
+    log.dataset.runLog = run.id;
     section.append(log);
     shell.append(section);
-    api(`/api/runs/${run.id}/log?offset=0`).then(value => {
-      log.textContent = value.text || "No console output yet.";
-      log.scrollTop = log.scrollHeight;
-    }).catch(error => { log.textContent = error.message; });
   });
   main.replaceChildren(shell);
+  refreshVisibleRunLogs();
+}
+
+function runLogText(value) {
+  if (!value) return "Loading output…";
+  return value.text || "No console output yet.";
+}
+
+function updateRunLogNodes(runId, value) {
+  main.querySelectorAll("[data-run-log]").forEach(log => {
+    if (log.dataset.runLog !== runId) return;
+    log.textContent = runLogText(value);
+    log.scrollTop = log.scrollHeight;
+  });
+}
+
+async function refreshRunLog(runId) {
+  const cached = state.runLogs.get(runId);
+  if (cached?.complete) {
+    updateRunLogNodes(runId, cached);
+    return;
+  }
+  let request = state.runLogLoads.get(runId);
+  if (!request) {
+    const offset = cached?.nextOffset || 0;
+    request = api(`/api/runs/${runId}/log?${new URLSearchParams({ offset: String(offset) })}`)
+      .then(value => {
+        const previous = state.runLogs.get(runId) || { text: "", nextOffset: 0 };
+        const result = {
+          text: previous.text + (value.text || ""),
+          nextOffset: value.nextOffset,
+          complete: value.complete,
+        };
+        state.runLogs.set(runId, result);
+        return result;
+      })
+      .finally(() => state.runLogLoads.delete(runId));
+    state.runLogLoads.set(runId, request);
+  }
+  try {
+    updateRunLogNodes(runId, await request);
+  } catch (error) {
+    if (!state.runLogs.has(runId)) {
+      updateRunLogNodes(runId, { text: error.message, complete: false });
+    } else {
+      showNotice(error.message, true);
+    }
+  }
+}
+
+function refreshVisibleRunLogs() {
+  main.querySelectorAll("[data-run-log]").forEach(log => {
+    refreshRunLog(log.dataset.runLog);
+  });
 }
 
 async function mutateRun(runId, action) {
@@ -1045,8 +1143,7 @@ async function mutateRun(runId, action) {
   if (!window.confirm(message)) return;
   try {
     await api(`/api/runs/${runId}/${action}`, { method: "POST", body: {} });
-    await refreshJobs();
-    if (state.selectedJob) loadJob(state.selectedJob);
+    await refreshJobs({ preserveActivityDetail: true });
   } catch (error) {
     showNotice(error.message, true);
   }
@@ -1325,11 +1422,25 @@ async function refreshCatalog() {
   else render();
 }
 
-async function refreshJobs() {
+async function refreshJobs({ preserveActivityDetail = false } = {}) {
   const value = await api("/api/jobs");
   state.jobs = value.jobs;
-  if (navigationReady) syncNavigation({ replace: true, preserveScroll: true });
-  else render();
+  if (
+    navigationReady &&
+    preserveActivityDetail &&
+    state.tab === "activity"
+  ) {
+    const active = state.jobs.filter(job => ["queued", "running"].includes(job.status)).length;
+    activityCount.textContent = active ? String(active) : "";
+    renderActivity({ preserveDetail: true });
+    const url = currentUrl();
+    history.replaceState(historyPayload(window.scrollY), "", url);
+    renderedUrl = url;
+  } else if (navigationReady) {
+    syncNavigation({ replace: true, preserveScroll: true });
+  } else {
+    render();
+  }
 }
 
 function connectEvents() {
@@ -1356,9 +1467,8 @@ function connectEvents() {
         refreshCatalog().catch(error => showNotice(error.message, true));
       }
       if (value.type === "tasks.changed") {
-        refreshJobs().then(() => {
-          if (state.tab === "activity" && state.selectedJob) loadJob(state.selectedJob);
-        }).catch(error => showNotice(error.message, true));
+        refreshJobs({ preserveActivityDetail: true })
+          .catch(error => showNotice(error.message, true));
       }
     } catch (error) {
       console.warn("Invalid live event", error);

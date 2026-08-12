@@ -62,6 +62,25 @@ def configure_utf8_stdio() -> None:
             reconfigure(encoding="utf-8", errors="backslashreplace")
 
 
+def windowless_popen_options(
+    *,
+    new_process_group: bool = True,
+) -> dict[str, object]:
+    """Return isolated subprocess options without a visible Windows console."""
+    if os.name != "nt":
+        return {"start_new_session": True} if new_process_group else {}
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = subprocess.SW_HIDE
+    creationflags = subprocess.CREATE_NO_WINDOW
+    if new_process_group:
+        creationflags |= subprocess.CREATE_NEW_PROCESS_GROUP
+    return {
+        "creationflags": creationflags,
+        "startupinfo": startupinfo,
+    }
+
+
 def report_error(parser: argparse.ArgumentParser, error: BaseException) -> int:
     """Report a post-parse failure without printing irrelevant CLI usage."""
     print(f"{parser.prog}: error: {error}", file=sys.stderr)
@@ -806,10 +825,7 @@ def _run_codex_process(
         "stderr": log,
         "text": True,
     }
-    if os.name == "nt":
-        popen_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-    else:
-        popen_options["start_new_session"] = True
+    popen_options.update(windowless_popen_options())
     process = subprocess.Popen(command, **popen_options)
     started_at = time.monotonic()
     completed_at: float | None = None

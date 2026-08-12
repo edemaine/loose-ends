@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import subprocess
 import sys
 from tempfile import TemporaryDirectory
 import threading
@@ -113,6 +114,9 @@ class WorkbenchPlanningTests(unittest.TestCase):
         self.assertIn("reviewModel.createMarkdownRenderer(window)", app)
         self.assertIn("function visibleProblemSelectionControl", app)
         self.assertIn("input.indeterminate", app)
+        self.assertIn("jobDetails: new Map()", app)
+        self.assertIn("preserveActivityDetail", app)
+        self.assertIn("refreshVisibleRunLogs", app)
         self.assertIn("function filtersFromSearchParams", model)
         self.assertIn("function identityToSearchParams", model)
         self.assertIn("function queueSummary", model)
@@ -521,6 +525,129 @@ class WorkbenchWatchTests(unittest.TestCase):
         )
 
         catalog.schedule.assert_called_once_with()
+
+    def test_task_watchdog_wakes_only_for_sqlite_files(self):
+        scheduler = Mock()
+        database = PROJECT_ROOT / ".loose-ends" / "workbench.sqlite3"
+        handler = workbench.TaskChangeHandler(scheduler, database)
+
+        handler.on_any_event(
+            SimpleNamespace(
+                event_type="modified",
+                is_directory=False,
+                src_path=str(database) + "-wal",
+            )
+        )
+        handler.on_any_event(
+            SimpleNamespace(
+                event_type="modified",
+                is_directory=False,
+                src_path=str(database.parent / "console.log"),
+            )
+        )
+
+        scheduler.schedule.assert_called_once_with()
+
+    def test_idle_scheduler_waits_until_explicitly_woken(self):
+        store = Mock()
+        store.revision.return_value = 0.0
+        store.mark_stale_runs.return_value = []
+        store.active_count.return_value = 0
+        store.queued_runs.return_value = []
+        scheduler = workbench.Scheduler(
+            store,
+            Mock(),
+            max_workers=1,
+            state_directory=PROJECT_ROOT / ".loose-ends",
+        )
+        try:
+            deadline = time.time() + 2
+            while (
+                store.mark_stale_runs.call_count == 0
+                and time.time() < deadline
+            ):
+                time.sleep(0.01)
+            checks = store.mark_stale_runs.call_count
+            self.assertGreater(checks, 0)
+            time.sleep(0.55)
+            self.assertEqual(store.mark_stale_runs.call_count, checks)
+
+            scheduler.schedule()
+            deadline = time.time() + 2
+            while (
+                store.mark_stale_runs.call_count == checks
+                and time.time() < deadline
+            ):
+                time.sleep(0.01)
+            self.assertGreater(store.mark_stale_runs.call_count, checks)
+        finally:
+            scheduler.close()
+
+    def test_sqlite_wal_change_wakes_scheduler(self):
+        with TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            store = WorkbenchStore(state / "workbench.sqlite3", state)
+            job = store.create_job(
+                {"action": "solve"},
+                fake_plan([sys.executable, "-c", "pass"]),
+            )
+            run = job["runs"][0]
+            store.mark_starting(run["id"])
+            store.update_run(
+                run["id"],
+                status="running",
+                heartbeat_at=time.time(),
+            )
+            hub = EventHub()
+            scheduler = workbench.Scheduler(
+                store,
+                hub,
+                max_workers=1,
+                state_directory=state,
+            )
+            observer = Observer()
+            observer.schedule(
+                workbench.TaskChangeHandler(scheduler, store.database),
+                str(state),
+                recursive=False,
+            )
+            observer.start()
+            try:
+                time.sleep(0.15)
+                sequence = hub.current_sequence()
+                store.update_run(run["id"], heartbeat_at=time.time())
+                deadline = time.time() + 5
+                while (
+                    hub.current_sequence() == sequence
+                    and time.time() < deadline
+                ):
+                    time.sleep(0.05)
+                self.assertGreater(hub.current_sequence(), sequence)
+            finally:
+                observer.stop()
+                observer.join(5)
+                scheduler.close()
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows process flags")
+    def test_scheduler_launches_worker_without_a_console_window(self):
+        scheduler = object.__new__(workbench.Scheduler)
+        scheduler.store = Mock()
+        scheduler.store.mark_starting.return_value = True
+        scheduler.hub = Mock()
+        scheduler.state_directory = PROJECT_ROOT / ".loose-ends"
+        scheduler.last_launch = 0.0
+
+        with patch.object(workbench.subprocess, "Popen") as popen:
+            scheduler._launch({"id": "test-run"})
+
+        options = popen.call_args.kwargs
+        self.assertTrue(
+            options["creationflags"] & subprocess.CREATE_NO_WINDOW
+        )
+        self.assertTrue(
+            options["startupinfo"].dwFlags
+            & subprocess.STARTF_USESHOWWINDOW
+        )
 
     def test_initial_catalog_scan_does_not_block_server_startup(self):
         scan_allowed = threading.Event()
