@@ -584,11 +584,18 @@ function sidebarSearch(placeholder) {
   input.placeholder = placeholder;
   input.value = state.search;
   input.addEventListener("input", () => {
+    const selectionStart = input.selectionStart ?? input.value.length;
+    const selectionEnd = input.selectionEnd ?? selectionStart;
+    const selectionDirection = input.selectionDirection || "none";
     state.search = input.value;
     syncNavigation({ replace: true, preserveScroll: true });
     const replacement = sidebar.querySelector("input.search");
-    replacement?.focus();
-    replacement?.setSelectionRange(state.search.length, state.search.length);
+    replacement?.focus({ preventScroll: true });
+    replacement?.setSelectionRange(
+      selectionStart,
+      selectionEnd,
+      selectionDirection,
+    );
   });
   return input;
 }
