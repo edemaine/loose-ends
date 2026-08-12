@@ -163,6 +163,7 @@ class WorkbenchPlanningTests(unittest.TestCase):
         self.assertIn("reviewModel.sortPapers(", app)
         self.assertIn('node("div", "paper-list-controls")', app)
         self.assertIn("reviewModel.paperTitleWithYear(", app)
+        self.assertIn("`${paperTitle} · ${item.problemId}/${item.attemptName}`", app)
         self.assertIn("researchFiltersOpen: false", app)
         self.assertIn("sidebarScroll: { research: 0, papers: 0, manuscripts: 0, activity: 0 }", app)
         self.assertIn('sidebar.querySelector(".research-filters")', app)

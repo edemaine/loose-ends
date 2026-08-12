@@ -399,7 +399,15 @@ function problemTarget(item) {
 }
 
 function attemptTarget(item) {
-  return target("attempt", item.attemptDirectory, `${item.problemId}/${item.attemptName}`);
+  const paperTitle = reviewModel.paperTitleWithYear(
+    item.paperTitle,
+    item.paperPublished,
+  ) || item.paperDirectory;
+  return target(
+    "attempt",
+    item.attemptDirectory,
+    `${paperTitle} · ${item.problemId}/${item.attemptName}`,
+  );
 }
 
 function draftTarget(draft) {
