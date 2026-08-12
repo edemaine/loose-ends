@@ -38,7 +38,10 @@
       "items": {
         "type": "object",
         "properties": {
-          "claim_id": {"type": "string"},
+          "claim_id": {
+            "type": "string",
+            "pattern": "^C-[0-9]{3,}$"
+          },
           "assessment": {
             "type": "string",
             "enum": [

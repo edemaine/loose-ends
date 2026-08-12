@@ -183,8 +183,23 @@ def render_prompt(
         / attempt.problem.id
         / attempt.name
     )
+    claims = attempt.solver_result.get("checkable_claims")
+    claim_ids = (
+        [
+            claim["id"]
+            for claim in claims
+            if isinstance(claim, dict)
+            and isinstance(claim.get("id"), str)
+        ]
+        if isinstance(claims, list)
+        else []
+    )
     return (
         template.replace("{{PROBLEM_ID}}", attempt.problem.id)
+        .replace(
+            "{{CLAIM_IDS}}",
+            ", ".join(f"`{claim_id}`" for claim_id in claim_ids),
+        )
         .replace(
             "{{ATTEMPT_DIRECTORY}}",
             codex_cli.path_for_codex(staged_attempt),
@@ -200,6 +215,8 @@ def validate_review_result(
     result_path: Path,
     workspace: Path,
     attempt: AttemptRef,
+    *,
+    require_markdown: bool = True,
 ) -> dict:
     result = common.read_json(result_path, description="review response")
     if result.get("correctness") not in CORRECTNESS_LEVELS:
@@ -243,11 +260,16 @@ def validate_review_result(
     if not isinstance(reviews, list):
         raise common.CodexError("review response has no claim_reviews array")
     reviewed_ids: set[str] = set()
+    accepted_reviews: list[dict] = []
+    ignored_ids: list[str] = []
     for review in reviews:
         if not isinstance(review, dict):
             raise common.CodexError("a claim review is not an object")
         claim_id = review.get("claim_id")
-        if claim_id not in expected_ids or claim_id in reviewed_ids:
+        if claim_id not in expected_ids:
+            ignored_ids.append(repr(claim_id))
+            continue
+        if claim_id in reviewed_ids:
             raise common.CodexError(
                 f"review response has invalid or duplicate claim {claim_id!r}"
             )
@@ -267,10 +289,17 @@ def validate_review_result(
             raise common.CodexError(
                 f"review response has no explanation for {claim_id}"
             )
+        accepted_reviews.append(review)
     if reviewed_ids != expected_ids:
         missing = expected_ids.difference(reviewed_ids)
         raise common.CodexError(
             "review response omitted claims: " + ", ".join(sorted(missing))
+        )
+    if ignored_ids:
+        result["claim_reviews"] = accepted_reviews
+        result["warnings"].append(
+            "Driver ignored claim review(s) whose IDs were not present in "
+            "the solver attempt: " + ", ".join(ignored_ids) + "."
         )
     claimed = common.claimed_result_type(attempt.solver_result)
     if claimed == "none" and (
@@ -289,11 +318,91 @@ def validate_review_result(
             "resolution importance requires complete coverage"
         )
     result["human_priority"] = derive_human_priority(result)
-    common.validate_markdown(
-        workspace / "critique.md",
-        description="review critique",
-    )
+    if require_markdown:
+        common.validate_markdown(
+            workspace / "critique.md",
+            description="review critique",
+        )
     return result
+
+
+def _recovered_critique_markdown(attempt: AttemptRef, result: dict) -> str:
+    """Render a completed structured review when critique.md is missing."""
+    lines = [
+        f"# Review of {attempt.problem.id}/{attempt.name}",
+        "",
+        "> **Driver recovery notice.** The critic completed its structured "
+        "review but did not create `critique.md`. This document was generated "
+        "from that structured response.",
+        "",
+        "## Assessment",
+        "",
+        f"- Correctness: `{result['correctness']}`",
+        f"- Coverage: `{result['reviewed_coverage']}`",
+        f"- Importance: `{result['importance']}`",
+        f"- Verification confidence: `{result['verification_confidence']}`",
+        "",
+        result["summary"].strip(),
+        "",
+        "## Claim-by-claim verification",
+        "",
+    ]
+    for review in result["claim_reviews"]:
+        lines.extend(
+            [
+                f"### {review['claim_id']} — {review['assessment']}",
+                "",
+                review["explanation"].strip(),
+                "",
+            ]
+        )
+    for heading, field in (
+        ("Blocking gaps", "blocking_gaps"),
+        ("Recommended next steps", "recommended_next_steps"),
+        ("Warnings", "warnings"),
+    ):
+        lines.extend([f"## {heading}", ""])
+        values = result[field]
+        if values:
+            lines.extend(f"- {value}" for value in values)
+        else:
+            lines.append("None reported.")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def recover_missing_critique(
+    attempt: AttemptRef,
+    workspace: Path,
+) -> bool:
+    """Recover critique.md from a completed, valid structured review."""
+    critique_path = workspace / "critique.md"
+    if critique_path.is_file():
+        return False
+    result_path = workspace / "agent-result.json"
+    if not codex_cli.structured_turn_is_complete(
+        workspace / "events.jsonl",
+        result_path,
+    ):
+        return False
+    result = validate_review_result(
+        result_path,
+        workspace,
+        attempt,
+        require_markdown=False,
+    )
+    warning = (
+        "Driver recovery: critique.md was synthesized from the completed "
+        "structured review."
+    )
+    if warning not in result["warnings"]:
+        result["warnings"].append(warning)
+    common.write_json(result_path, result)
+    critique_path.write_text(
+        _recovered_critique_markdown(attempt, result),
+        encoding="utf-8",
+    )
+    return True
 
 
 def _install_review(
@@ -425,11 +534,13 @@ def recover_review(
             (workspace / name).is_file()
             for name in (
                 "agent-result.json",
-                "critique.md",
                 "events.jsonl",
                 "run.log",
             )
         ):
+            continue
+        recover_missing_critique(attempt, workspace)
+        if not (workspace / "critique.md").is_file():
             continue
         result = validate_review_result(
             workspace / "agent-result.json",
@@ -527,6 +638,7 @@ def review_attempt(
             timeout_seconds=timeout_seconds,
             completion_grace_seconds=COMPLETION_GRACE_SECONDS,
         )
+        recover_missing_critique(attempt, workspace)
         result = validate_review_result(result_path, workspace, attempt)
         _install_review(
             attempt,

@@ -226,6 +226,82 @@ class OpenProblemPipelineTests(unittest.TestCase):
             )
             self.assertTrue(workspace.is_dir())
 
+    def test_review_recovers_missing_critique_and_ignores_unknown_claim(self):
+        with TemporaryDirectory() as temporary:
+            paper = make_analyzed_paper(Path(temporary))
+            problem = common.discover_problem_refs(
+                [paper], problem_ids={"OP-001"}
+            )[0]
+            problem.directory.mkdir(parents=True)
+            directory = problem.directory / "attempt-001"
+            directory.mkdir()
+            solver_result = {
+                "claimed_result_type": "partial_result",
+                "checkable_claims": [{"id": "C-001"}],
+            }
+            common.write_json(directory / "solver-result.json", solver_result)
+            attempt = review_solutions.AttemptRef(
+                problem,
+                directory,
+                solver_result,
+            )
+            workspace = problem.directory / ".review-run-finished"
+            workspace.mkdir()
+            common.write_json(
+                workspace / "agent-result.json",
+                {
+                    "correctness": "well_supported",
+                    "reviewed_coverage": "special_case",
+                    "importance": "moderate",
+                    "verification_confidence": "high",
+                    "summary": "The special case is valid.",
+                    "claim_reviews": [
+                        {
+                            "claim_id": "C-001",
+                            "assessment": "supported",
+                            "explanation": "Independently checked.",
+                        },
+                        {
+                            "claim_id": "EXT-001",
+                            "assessment": "supported",
+                            "explanation": "An external source agrees.",
+                        },
+                    ],
+                    "blocking_gaps": ["The general case remains."],
+                    "recommended_next_steps": ["Generalize it."],
+                    "warnings": [],
+                },
+            )
+            write_run_files(workspace)
+
+            self.assertTrue(
+                review_solutions.recover_missing_critique(
+                    attempt,
+                    workspace,
+                )
+            )
+            result = common.read_json(workspace / "agent-result.json")
+            self.assertEqual(
+                [review["claim_id"] for review in result["claim_reviews"]],
+                ["C-001"],
+            )
+            self.assertTrue(
+                any("EXT-001" in warning for warning in result["warnings"])
+            )
+            critique = (workspace / "critique.md").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("Driver recovery notice", critique)
+            self.assertIn("C-001", critique)
+            self.assertNotIn("external source agrees", critique.lower())
+
+            rendered = review_solutions.render_prompt(
+                "Claims: {{CLAIM_IDS}}",
+                attempt=attempt,
+                context_directory=workspace / "inputs",
+            )
+            self.assertEqual(rendered, "Claims: `C-001`")
+
     def setUp(self):
         patcher = patch.object(codex_cli, "grant_sandbox_read_access")
         patcher.start()

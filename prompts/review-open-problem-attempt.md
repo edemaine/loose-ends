@@ -28,10 +28,16 @@ that the attempt invokes, but uncertainty about prior art must never lower
 correctness, coverage, importance, verification confidence, or the derived
 human priority. Literature provenance is handled by `literature_review.py`.
 
-For every structured claim ID in the target attempt, return one claim review.
-Try to falsify the claim before accepting it. Re-run small computations or
-inspect artifacts when practical. Do not silently repair the solver's argument:
-clearly separate what it actually establishes from a possible repair.
+The target attempt's complete claim-ID list is:
+
+{{CLAIM_IDS}}
+
+Return exactly one claim review for each ID in that list, in that order. Do not
+invent IDs for external sources, auxiliary observations, or your own claims;
+put such material in the prose critique or warnings instead. Try to falsify
+each claim before accepting it. Re-run small computations or inspect artifacts
+when practical. Do not silently repair the solver's argument: clearly separate
+what it actually establishes from a possible repair.
 
 Classify the attempt on four independent axes:
 
