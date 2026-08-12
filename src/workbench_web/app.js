@@ -277,8 +277,11 @@ function appendSideCard(parent, { title, meta, active, selectedTarget, onClick }
   if (selectedTarget) card.append(selectionCheckbox(selectedTarget));
   else card.append(node("span"));
   const copy = node("span");
-  copy.append(node("strong", "", title));
-  copy.append(node("small", "", meta));
+  const titleNode = node("strong", "", title);
+  titleNode.title = title;
+  const metaNode = node("small", "", meta);
+  metaNode.title = meta;
+  copy.append(titleNode, metaNode);
   card.append(copy);
   card.addEventListener("click", onClick);
   card.addEventListener("keydown", event => {
