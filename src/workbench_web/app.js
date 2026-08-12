@@ -186,6 +186,85 @@ function formatTime(value) {
   return value ? new Date(value * 1000).toLocaleString() : "—";
 }
 
+function formatDuration(startedAt, finishedAt) {
+  if (!Number.isFinite(startedAt) || !Number.isFinite(finishedAt)) return "";
+  let seconds = Math.max(0, Math.round(finishedAt - startedAt));
+  if (seconds < 1) return "<1s";
+  const days = Math.floor(seconds / 86400);
+  seconds %= 86400;
+  const hours = Math.floor(seconds / 3600);
+  seconds %= 3600;
+  const minutes = Math.floor(seconds / 60);
+  seconds %= 60;
+  const pieces = [];
+  if (days) pieces.push(`${days}d`);
+  if (hours) pieces.push(`${hours}h`);
+  if (minutes) pieces.push(`${minutes}m`);
+  if (seconds || !pieces.length) pieces.push(`${seconds}s`);
+  return pieces.join(" ");
+}
+
+function taskStatus(status) {
+  const values = {
+    queued: ["Queued", "queued", false],
+    starting: ["Starting", "running", true],
+    running: ["Running", "running", true],
+    cancel_requested: ["Stopping", "running", true],
+    succeeded: ["Finished", "succeeded", false],
+    partial: ["Partial", "partial", false],
+    failed: ["Failed", "failed", false],
+    canceled: ["Canceled", "canceled", false],
+    interrupted: ["Interrupted", "interrupted", false],
+  };
+  const [label, tone, active] = values[status] || [humanize(status), "neutral", false];
+  return { label, tone, active };
+}
+
+function taskStatusBadge(status) {
+  const value = taskStatus(status);
+  return node("span", `badge ${value.tone}`, value.label);
+}
+
+function runTiming(run) {
+  const status = taskStatus(run.status);
+  const row = node("div", "run-timing");
+  row.append(node(
+    "span",
+    "",
+    run.started_at
+      ? `Started ${formatTime(run.started_at)}`
+      : `Created ${formatTime(run.created_at)}`,
+  ));
+  row.append(node("span", "run-timing-separator", "·"), taskStatusBadge(run.status));
+  if (run.finished_at) {
+    row.append(node("span", "", `at ${formatTime(run.finished_at)}`));
+    const duration = formatDuration(run.started_at, run.finished_at);
+    if (duration) row.append(node("span", "run-timing-separator", "·"), node("span", "", `Runtime ${duration}`));
+    if (run.exit_code != null && run.exit_code !== 0) {
+      row.append(node("span", "run-timing-separator", "·"), node("span", "", `Exit code ${run.exit_code}`));
+    }
+  }
+  return row;
+}
+
+function runConsoleStatus(run) {
+  const status = taskStatus(run.status);
+  const footer = node("div", `console-status ${status.tone}${status.active ? " active" : ""}`);
+  footer.setAttribute("role", "status");
+  footer.setAttribute("aria-live", "polite");
+  footer.append(node("span", "console-status-dot"), node("strong", "", status.label));
+  if (run.finished_at) {
+    const duration = formatDuration(run.started_at, run.finished_at);
+    footer.append(node("span", "console-status-detail", `${formatTime(run.finished_at)}${duration ? ` · ${duration}` : ""}`));
+  }
+  if (status.active) {
+    const cursor = node("span", "console-cursor");
+    cursor.setAttribute("aria-hidden", "true");
+    footer.append(cursor);
+  }
+  return footer;
+}
+
 function fileUrl(path) {
   return `/api/file?${new URLSearchParams({ path })}`;
 }
@@ -957,7 +1036,7 @@ function renderActivity({ preserveDetail = false } = {}) {
   const list = node("div", "side-list");
   jobs.forEach(job => appendSideCard(list, {
     title: job.title,
-    meta: `${humanize(job.status)} · ${formatTime(job.created_at)}`,
+    meta: `${taskStatus(job.status).label} · ${formatTime(job.created_at)}`,
     active: state.selectedJob === job.id,
     onClick: () => {
       state.selectedJob = job.id;
@@ -1037,7 +1116,7 @@ function renderJobDetail(job) {
   copy.append(node("h1", "", job.title));
   copy.append(node("p", "", `Created ${formatTime(job.created_at)}`));
   const badges = node("div", "badges");
-  badges.append(badge(job.status));
+  badges.append(taskStatusBadge(job.status));
   copy.append(badges);
   hero.append(copy);
   shell.append(hero);
@@ -1045,10 +1124,9 @@ function renderJobDetail(job) {
     const section = node("section", "section panel");
     const heading = node("div", "section-title");
     const title = node("h2", "", `${index + 1}. ${run.label}`);
-    heading.append(title, badge(run.status));
+    heading.append(title);
     section.append(heading);
-    const meta = node("p", "", `Started ${formatTime(run.started_at)} · Exit ${run.exit_code ?? "—"}`);
-    section.append(meta);
+    section.append(runTiming(run));
     const actions = node("div", "actions");
     if (["queued", "starting", "running", "cancel_requested"].includes(run.status)) {
       actions.append(button("Cancel", () => mutateRun(run.id, "cancel"), "button danger"));
@@ -1076,7 +1154,9 @@ function renderJobDetail(job) {
     const cachedLog = state.runLogs.get(run.id);
     const log = node("pre", "console", runLogText(cachedLog));
     log.dataset.runLog = run.id;
-    section.append(log);
+    const consoleShell = node("div", "console-shell");
+    consoleShell.append(log, runConsoleStatus(run));
+    section.append(consoleShell);
     shell.append(section);
   });
   main.replaceChildren(shell);

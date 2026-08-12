@@ -124,6 +124,10 @@ class WorkbenchPlanningTests(unittest.TestCase):
         self.assertIn("refreshVisibleRunLogs", app)
         self.assertIn("Running dry-run previews", app)
         self.assertIn("preview?.output", app)
+        self.assertIn("function formatDuration", app)
+        self.assertIn("function runConsoleStatus", app)
+        self.assertIn("row.append(node(\"span\", \"run-timing-separator\", \"·\"), taskStatusBadge(run.status))", app)
+        self.assertNotIn('Exit ${run.exit_code ?? "—"}', app)
         self.assertIn("function filtersFromSearchParams", model)
         self.assertIn("function identityToSearchParams", model)
         self.assertIn("function queueSummary", model)
@@ -131,6 +135,8 @@ class WorkbenchPlanningTests(unittest.TestCase):
             PROJECT_ROOT / "src" / "workbench_web" / "styles.css"
         ).read_text(encoding="utf-8")
         self.assertIn(".selection-bar[hidden] { display: none; }", styles)
+        self.assertIn(".console-cursor", styles)
+        self.assertIn("prefers-reduced-motion: reduce", styles)
 
     def test_network_bind_and_request_host_security(self):
         args = build_parser().parse_args(
