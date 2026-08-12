@@ -61,6 +61,7 @@ IGNORED_PREFIXES = (
     ".triage-install-",
 )
 DRAFT_RE = re.compile(r"^draft-([0-9]{3,})$")
+CATALOG_CACHE_SCHEMA_VERSION = 1
 
 
 def _read_json(path: Path) -> dict:
@@ -68,9 +69,16 @@ def _read_json(path: Path) -> dict:
     return value if isinstance(value, dict) else {}
 
 
-def _paper_metadata(paper: Path) -> tuple[str, list[str]]:
-    analysis = _read_json(paper / "analysis" / "manifest.json")
-    metadata = _read_json(paper / "metadata.json")
+def _paper_metadata(
+    paper: Path,
+    *,
+    analysis: dict | None = None,
+    metadata: dict | None = None,
+) -> tuple[str, list[str]]:
+    if analysis is None:
+        analysis = _read_json(paper / "analysis" / "manifest.json")
+    if metadata is None:
+        metadata = _read_json(paper / "metadata.json")
     title = analysis.get("paper_title") or metadata.get("title") or paper.name
     authors = analysis.get("paper_authors") or metadata.get("authors") or []
     if not isinstance(authors, list):
@@ -87,13 +95,19 @@ def _paper_inventory(paths: Iterable[Path]) -> list[dict]:
     papers = analyze_papers.discover_paper_directories(paths)
     records = []
     for paper in papers:
-        title, authors = _paper_metadata(paper)
         manifest = _read_json(paper / "analysis" / "manifest.json")
+        metadata = _read_json(paper / "metadata.json")
+        title, authors = _paper_metadata(
+            paper,
+            analysis=manifest,
+            metadata=metadata,
+        )
+        resolved = paper.resolve()
         records.append(
             {
-                "key": str(paper.resolve()),
+                "key": str(resolved),
                 "urlKey": _url_key(paper),
-                "path": str(paper.resolve()),
+                "path": str(resolved),
                 "name": paper.name,
                 "title": title,
                 "authors": authors,
@@ -101,7 +115,7 @@ def _paper_inventory(paths: Iterable[Path]) -> list[dict]:
                 "problemCount": len(manifest.get("open_problems", [])),
                 "analysisStatus": manifest.get("status", ""),
                 "files": [
-                    str(path.resolve())
+                    str(path)
                     for path in (
                         paper / "paper.pdf",
                         paper / "metadata.json",
@@ -120,6 +134,7 @@ def _paper_inventory(paths: Iterable[Path]) -> list[dict]:
 def _review_inventory(
     paths: Iterable[Path],
     progress=None,
+    stage_progress=None,
 ) -> list[dict]:
     try:
         problems = common.discover_problem_refs(paths)
@@ -127,17 +142,34 @@ def _review_inventory(
         if "none of the discovered papers has" in str(exc) or "no open problems" in str(exc):
             return []
         raise
+    selection_progress = None
+    freshness_progress = None
+    if stage_progress is not None:
+        selection_progress = lambda current, total: stage_progress(
+            "Checking solution reviews…",
+            current,
+            total,
+        )
+        freshness_progress = lambda current, total: stage_progress(
+            "Checking triage and literature…",
+            current,
+            total,
+        )
     items = human_review.discover_human_reviews(
         problems,
         priority=set(review_solutions.HUMAN_PRIORITY_LEVELS),
         include_stale=True,
         allow_empty=True,
+        progress=selection_progress,
     )
     return human_review.build_review_catalog(
         items,
         include_contents=False,
         problems=problems,
         progress=progress,
+        freshness_progress=freshness_progress,
+        include_browser_uris=False,
+        include_files=False,
     )
 
 
@@ -145,18 +177,23 @@ def _manuscript_sources(
     manifest: dict,
     papers: list[dict],
     reviews: list[dict],
+    *,
+    paper_lookup: dict[str, dict] | None = None,
+    problem_lookup: dict[tuple[str, str], dict] | None = None,
 ) -> dict:
-    paper_lookup = {
-        os.path.normcase(str(Path(item["path"]).resolve())): item
-        for item in papers
-    }
-    problem_lookup = {
-        (
-            os.path.normcase(str(Path(item["paperDirectory"]).resolve())),
-            item["problemId"],
-        ): item
-        for item in reviews
-    }
+    if paper_lookup is None:
+        paper_lookup = {
+            os.path.normcase(str(Path(item["path"]))): item
+            for item in papers
+        }
+    if problem_lookup is None:
+        problem_lookup = {
+            (
+                os.path.normcase(str(Path(item["paperDirectory"]))),
+                item["problemId"],
+            ): item
+            for item in reviews
+        }
     source_papers: dict[str, dict] = {}
     source_problems: dict[tuple[str, str], dict] = {}
 
@@ -167,13 +204,13 @@ def _manuscript_sources(
             paper = write_paper.resolve_manifest_path(paper_value)
         except (OSError, ValueError):
             return
-        paper_key = os.path.normcase(str(paper.resolve()))
+        paper_key = os.path.normcase(str(paper))
         paper_record = paper_lookup.get(paper_key, {})
         paper_title = str(paper_record.get("title") or paper.name)
         source_papers[paper_key] = {
             "key": paper_key,
             "urlKey": _url_key(paper),
-            "path": str(paper.resolve()),
+            "path": str(paper),
             "title": paper_title,
         }
         if not isinstance(problem_id, str) or not problem_id:
@@ -232,9 +269,33 @@ def _manuscript_inventory(
     directory: Path,
     papers: list[dict] | None = None,
     reviews: list[dict] | None = None,
+    progress=None,
 ) -> list[dict]:
     if not directory.is_dir():
         return []
+    papers = papers or []
+    reviews = reviews or []
+    paper_lookup = {
+        os.path.normcase(str(Path(item["path"]))): item
+        for item in papers
+    }
+    problem_lookup = {
+        (
+            os.path.normcase(str(Path(item["paperDirectory"]))),
+            item["problemId"],
+        ): item
+        for item in reviews
+    }
+    draft_total = sum(
+        1
+        for manuscript in directory.iterdir()
+        if manuscript.is_dir()
+        for draft in manuscript.iterdir()
+        if draft.is_dir() and DRAFT_RE.fullmatch(draft.name)
+    )
+    draft_current = 0
+    if progress is not None:
+        progress(draft_current, draft_total)
     manuscripts = []
     for manuscript in sorted(path for path in directory.iterdir() if path.is_dir()):
         drafts = []
@@ -258,8 +319,10 @@ def _manuscript_inventory(
                     "summary": review.get("summary", ""),
                     "sources": _manuscript_sources(
                         manifest,
-                        papers or [],
-                        reviews or [],
+                        papers,
+                        reviews,
+                        paper_lookup=paper_lookup,
+                        problem_lookup=problem_lookup,
                     ),
                     "files": [
                         str(path.resolve())
@@ -274,6 +337,9 @@ def _manuscript_inventory(
                     ],
                 }
             )
+            draft_current += 1
+            if progress is not None:
+                progress(draft_current, draft_total)
         if drafts:
             drafts.sort(key=lambda item: item["number"])
             manuscripts.append(
@@ -304,6 +370,10 @@ class EventHub:
             )
             self.condition.notify_all()
 
+    def current_sequence(self) -> int:
+        with self.condition:
+            return self.sequence
+
     def wait(self, sequence: int, timeout: float = 15) -> tuple[int, dict | None]:
         with self.condition:
             if self.sequence <= sequence:
@@ -325,10 +395,16 @@ class CatalogManager:
         paths: list[Path],
         manuscripts: Path,
         hub: EventHub,
+        cache_path: Path | None = None,
     ):
         self.paths = paths
         self.manuscripts = manuscripts
         self.hub = hub
+        self.cache_path = cache_path
+        self.cache_key = {
+            "paths": sorted(str(path.resolve()) for path in paths),
+            "manuscripts": str(manuscripts.resolve()),
+        }
         self.lock = threading.RLock()
         self.version = 0
         self.error = ""
@@ -347,6 +423,7 @@ class CatalogManager:
             "loading": True,
         }
         self.fingerprint = ""
+        self._load_cache()
         self.pending = threading.Event()
         self.stopping = threading.Event()
         self.ready = threading.Event()
@@ -358,6 +435,52 @@ class CatalogManager:
         self.thread.start()
         self.pending.set()
 
+    def _load_cache(self) -> None:
+        if self.cache_path is None:
+            return
+        cached = common.load_json(self.cache_path)
+        if (
+            cached is None
+            or cached.get("schemaVersion") != CATALOG_CACHE_SCHEMA_VERSION
+            or cached.get("key") != self.cache_key
+            or not isinstance(cached.get("catalog"), dict)
+            or not isinstance(cached.get("fingerprint"), str)
+        ):
+            return
+        catalog = cached["catalog"]
+        if not all(
+            isinstance(catalog.get(name), list)
+            for name in ("papers", "reviews", "manuscripts")
+        ):
+            return
+        self.catalog = catalog
+        self.catalog["loading"] = True
+        self.catalog["error"] = ""
+        self.catalog["progress"] = {
+            "phase": "refreshing",
+            "label": "Checking for file changes…",
+        }
+        self.version = int(catalog.get("version", 0))
+        self.fingerprint = cached["fingerprint"]
+
+    def _save_cache(self) -> None:
+        if self.cache_path is None:
+            return
+        self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.cache_path.with_suffix(
+            self.cache_path.suffix + ".tmp"
+        )
+        common.write_json(
+            temporary,
+            {
+                "schemaVersion": CATALOG_CACHE_SCHEMA_VERSION,
+                "key": self.cache_key,
+                "fingerprint": self.fingerprint,
+                "catalog": self.catalog,
+            },
+        )
+        temporary.replace(self.cache_path)
+
     def refresh(self, *, force: bool = False) -> None:
         try:
             self._set_progress("papers", "Scanning papers…")
@@ -365,6 +488,7 @@ class CatalogManager:
             self._set_progress("problems", "Discovering open problems…")
 
             last_progress = -25
+            last_stage_progress: dict[str, int] = {}
 
             def review_progress(current: int, total: int) -> None:
                 nonlocal last_progress
@@ -377,13 +501,41 @@ class CatalogManager:
                         total=total,
                     )
 
-            reviews = _review_inventory(self.paths, progress=review_progress)
-            self._set_progress("manuscripts", "Reading manuscripts…")
+            def review_stage_progress(
+                label: str,
+                current: int,
+                total: int,
+            ) -> None:
+                previous = last_stage_progress.get(label, -25)
+                if current == 0 or current == total or current - previous >= 25:
+                    last_stage_progress[label] = current
+                    self._set_progress(
+                        "reviews",
+                        label,
+                        current=current,
+                        total=total,
+                    )
+
+            reviews = _review_inventory(
+                self.paths,
+                progress=review_progress,
+                stage_progress=review_stage_progress,
+            )
+            def manuscript_progress(current: int, total: int) -> None:
+                self._set_progress(
+                    "manuscripts",
+                    "Reading manuscripts…",
+                    current=current,
+                    total=total,
+                )
+
             manuscripts = _manuscript_inventory(
                 self.manuscripts,
                 papers,
                 reviews,
+                progress=manuscript_progress,
             )
+            self._set_progress("finalizing", "Preparing catalog…")
             value = {
                 "papers": papers,
                 "reviews": reviews,
@@ -420,6 +572,10 @@ class CatalogManager:
                 value["error"] = ""
                 self.catalog = value
                 self.error = ""
+        try:
+            self._save_cache()
+        except (OSError, UnicodeError):
+            pass
         self.ready.set()
         self.hub.publish("catalog.changed", version=self.version)
 
@@ -485,6 +641,8 @@ class CatalogManager:
                 raise KeyError(key)
             value = dict(item)
         value.update(human_review.load_review_contents(value))
+        value["files"] = human_review.load_review_files(value)
+        value["fileCount"] = len(value["files"])
         return value
 
     def close(self) -> None:
@@ -634,7 +792,12 @@ class WorkbenchApplication:
             state_directory / "workbench.sqlite3",
             state_directory,
         )
-        self.catalog = CatalogManager(paths, manuscripts, self.hub)
+        self.catalog = CatalogManager(
+            paths,
+            manuscripts,
+            self.hub,
+            cache_path=state_directory / "catalog-cache.json",
+        )
         self.scheduler = Scheduler(
             self.store,
             self.hub,
@@ -859,8 +1022,10 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
         path = parsed.path
         try:
             if path == "/api/bootstrap":
+                event_sequence = self.app.hub.current_sequence()
                 self.send_json(
                     {
+                        "eventSequence": event_sequence,
                         "csrf": self.app.csrf,
                         "catalog": self.app.catalog.snapshot(),
                         "jobs": self.app.store.list_jobs(),
@@ -882,7 +1047,7 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
             elif match := re.fullmatch(r"/api/runs/([0-9a-f-]+)/log", path):
                 self._send_log(match.group(1), parsed.query)
             elif path == "/api/events":
-                self._send_events()
+                self._send_events(parsed.query)
             elif path == "/api/file":
                 self._send_file(parse_qs(parsed.query).get("path", [""])[0])
             elif path in {
@@ -1024,14 +1189,18 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
             }
         )
 
-    def _send_events(self) -> None:
+    def _send_events(self, query: str = "") -> None:
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "keep-alive")
         self.end_headers()
+        values = parse_qs(query)
+        initial_sequence = values.get("since", ["0"])[0]
         try:
-            sequence = int(self.headers.get("Last-Event-ID", "0"))
+            sequence = int(
+                self.headers.get("Last-Event-ID", initial_sequence)
+            )
         except ValueError:
             sequence = 0
         try:

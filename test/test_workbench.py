@@ -10,6 +10,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import open_problem_common as common
+import human_review
 from watchdog.observers import Observer
 from workbench import (
     CatalogManager,
@@ -103,6 +104,7 @@ class WorkbenchPlanningTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn('research: "/research"', app)
         self.assertIn('window.addEventListener("popstate"', app)
+        self.assertIn('since: String(state.eventSequence || 0)', app)
         self.assertIn('history[method](historyPayload(scrollY), "", url)', app)
         self.assertIn("identityFromSearchParams(parameters)", app)
         self.assertIn("groupProblemsByPaper(reviews)", app)
@@ -179,6 +181,44 @@ class WorkbenchPlanningTests(unittest.TestCase):
             self.assertEqual(len(records), 1)
             self.assertEqual(progress, [(0, 1), (1, 1)])
             self.assertEqual(records[0]["paperUrlKey"], paper.as_posix())
+            self.assertEqual(records[0]["files"], [])
+            self.assertTrue(human_review.load_review_files(records[0]))
+
+    def test_review_inventory_reports_freshness_stages(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            make_paper(root)
+            stages = []
+
+            workbench._review_inventory(
+                [root],
+                stage_progress=lambda label, current, total: stages.append(
+                    (label, current, total)
+                ),
+            )
+
+            self.assertIn(("Checking solution reviews…", 0, 0), stages)
+            self.assertIn(("Checking triage and literature…", 0, 1), stages)
+            self.assertIn(("Checking triage and literature…", 1, 1), stages)
+
+    def test_file_digest_cache_reuses_unchanged_inputs(self):
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "value.txt"
+            path.write_text("first", encoding="utf-8")
+            files = [("value.txt", path)]
+            before = common._files_digest_from_signature.cache_info()
+
+            first = common.files_digest(files)
+            second = common.files_digest(files)
+            reused = common._files_digest_from_signature.cache_info()
+            path.write_text("second value", encoding="utf-8")
+            changed = common.files_digest(files)
+            after = common._files_digest_from_signature.cache_info()
+
+            self.assertEqual(first, second)
+            self.assertNotEqual(first, changed)
+            self.assertGreater(reused.hits, before.hits)
+            self.assertGreater(after.misses, reused.misses)
 
     def test_manuscript_sources_include_legacy_paper_and_problem_titles(self):
         with TemporaryDirectory() as temporary:
@@ -212,6 +252,92 @@ class WorkbenchPlanningTests(unittest.TestCase):
                 [source["title"] for source in sources["problems"]],
                 ["Test conjecture"],
             )
+
+    def test_manuscript_inventory_reports_draft_progress(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = make_paper(root / "papers")
+            manuscript = root / "manuscripts" / "test"
+            for number in (1, 2):
+                draft = manuscript / f"draft-{number:03d}"
+                draft.mkdir(parents=True)
+                common.write_json(
+                    draft / "manifest.json",
+                    {
+                        "title": "Test manuscript",
+                        "input_selectors": [
+                            {"kind": "paper", "path": str(paper)}
+                        ],
+                    },
+                )
+            papers = [{"path": str(paper), "title": "Test Paper"}]
+            progress = []
+
+            records = workbench._manuscript_inventory(
+                manuscript.parent,
+                papers,
+                [],
+                progress=lambda current, total: progress.append(
+                    (current, total)
+                ),
+            )
+
+            self.assertEqual(len(records), 1)
+            self.assertEqual(progress, [(0, 2), (1, 2), (2, 2)])
+
+    def test_event_hub_exposes_bootstrap_sequence(self):
+        hub = EventHub()
+        self.assertEqual(hub.current_sequence(), 0)
+        hub.publish("catalog.progress", phase="papers")
+        hub.publish("catalog.changed", version=1)
+        self.assertEqual(hub.current_sequence(), 2)
+
+    def test_catalog_cache_makes_restart_immediately_browsable(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = make_paper(root / "papers")
+            manuscripts = root / "manuscripts"
+            cache = root / "state" / "catalog-cache.json"
+            first = CatalogManager(
+                [paper.parent],
+                manuscripts,
+                EventHub(),
+                cache_path=cache,
+            )
+            try:
+                self.assertTrue(first.wait_until_ready(8))
+                self.assertTrue(cache.is_file())
+                version = first.version
+            finally:
+                first.close()
+
+            scan_allowed = threading.Event()
+
+            def slow_paper_inventory(paths):
+                scan_allowed.wait(5)
+                return []
+
+            with patch(
+                "workbench._paper_inventory",
+                side_effect=slow_paper_inventory,
+            ):
+                second = CatalogManager(
+                    [paper.parent],
+                    manuscripts,
+                    EventHub(),
+                    cache_path=cache,
+                )
+                try:
+                    snapshot = second.snapshot()
+                    self.assertEqual(snapshot["version"], version)
+                    self.assertTrue(snapshot["loading"])
+                    self.assertEqual(len(snapshot["papers"]), 1)
+                    self.assertEqual(
+                        snapshot["progress"]["phase"], "refreshing"
+                    )
+                finally:
+                    scan_allowed.set()
+                    second.close()
 
     def test_solver_plan_preserves_prompt_round_and_critic_settings(self):
         with TemporaryDirectory() as temporary:

@@ -141,9 +141,11 @@ def review_is_current(
     attempt: AttemptRef,
     *,
     config_digest: str | None = None,
+    result: dict | None = None,
 ) -> bool:
     manifest = common.load_json(attempt.directory / "review-manifest.json")
-    result = common.load_json(attempt.directory / "review-result.json")
+    if result is None:
+        result = common.load_json(attempt.directory / "review-result.json")
     if manifest is None or result is None:
         return False
     if manifest.get("attempt_digest") != common.solver_attempt_digest(

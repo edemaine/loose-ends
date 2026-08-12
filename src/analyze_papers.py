@@ -74,10 +74,17 @@ def discover_paper_directories(paths: Iterable[Path]) -> list[Path]:
         if not path.is_dir():
             raise AnalysisError(f"not a directory: {path}")
 
-        for candidate in sorted(path.rglob("arXiv-*")):
-            if is_paper_directory(candidate):
+        for directory, child_names, _ in os.walk(path):
+            candidate = Path(directory)
+            if (
+                candidate != path
+                and candidate.name.startswith("arXiv-")
+                and is_paper_directory(candidate)
+            ):
                 resolved = candidate.resolve()
                 papers[os.path.normcase(str(resolved))] = resolved
+                # Paper internals cannot contain another downloaded paper.
+                child_names.clear()
 
     if not papers:
         raise AnalysisError("no downloaded paper directories were found")

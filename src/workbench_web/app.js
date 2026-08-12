@@ -5,6 +5,7 @@ if (!reviewModel) throw new Error("Shared review model failed to load");
 
 const state = {
   csrf: "",
+  eventSequence: 0,
   catalog: { papers: [], reviews: [], manuscripts: [], counts: {} },
   jobs: [],
   tab: "research",
@@ -1282,7 +1283,9 @@ async function refreshJobs() {
 }
 
 function connectEvents() {
-  const events = new EventSource("/api/events");
+  const events = new EventSource(`/api/events?${new URLSearchParams({
+    since: String(state.eventSequence || 0),
+  })}`);
   events.addEventListener("open", () => {
     connection.textContent = "Live";
     connection.className = "connection live";
@@ -1317,6 +1320,7 @@ async function start() {
   try {
     const value = await api("/api/bootstrap");
     state.csrf = value.csrf;
+    state.eventSequence = value.eventSequence || 0;
     state.catalog = value.catalog;
     state.jobs = value.jobs;
     navigationReady = true;

@@ -5,12 +5,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import lru_cache
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import shutil
+import stat
 from typing import Iterable, Sequence
 
 import analyze_papers
@@ -353,15 +355,39 @@ def _hash_file(digest, path: Path, relative: str) -> None:
     digest.update(b"\0")
 
 
-def files_digest(files: Sequence[tuple[str, Path]]) -> str:
+@lru_cache(maxsize=4096)
+def _files_digest_from_signature(
+    signature: tuple[tuple[str, str, int, int] | tuple[str, None, int, int], ...],
+) -> str:
     digest = hashlib.sha256()
-    for relative, path in sorted(files, key=lambda item: item[0]):
-        if not path.is_file():
+    for relative, path_value, _, _ in signature:
+        if path_value is None:
             digest.update(relative.encode("utf-8", errors="surrogateescape"))
             digest.update(b"\0missing\0")
             continue
-        _hash_file(digest, path, relative)
+        _hash_file(digest, Path(path_value), relative)
     return digest.hexdigest()
+
+
+def files_digest(files: Sequence[tuple[str, Path]]) -> str:
+    signature = []
+    for relative, path in sorted(files, key=lambda item: item[0]):
+        try:
+            status = path.stat()
+        except OSError:
+            status = None
+        if status is None or not stat.S_ISREG(status.st_mode):
+            signature.append((relative, None, 0, 0))
+        else:
+            signature.append(
+                (
+                    relative,
+                    str(path),
+                    status.st_mtime_ns,
+                    status.st_size,
+                )
+            )
+    return _files_digest_from_signature(tuple(signature))
 
 
 def stable_value_digest(value: object) -> str:
@@ -379,10 +405,18 @@ def analysis_digest(paper_directory: Path) -> str:
     return files_digest([(name, analysis / name) for name in ANALYSIS_FILES])
 
 
-def problem_digest(problem: ProblemRef) -> str:
+def problem_digest(
+    problem: ProblemRef,
+    *,
+    paper_analysis_digest: str | None = None,
+) -> str:
     return stable_value_digest(
         {
-            "analysis_digest": analysis_digest(problem.paper_directory),
+            "analysis_digest": (
+                paper_analysis_digest
+                if paper_analysis_digest is not None
+                else analysis_digest(problem.paper_directory)
+            ),
             "paper_title": problem.paper_title,
             "paper_authors": problem.paper_authors,
             "problem": problem.problem,
@@ -391,13 +425,15 @@ def problem_digest(problem: ProblemRef) -> str:
 
 
 def attempt_directories(problem: ProblemRef) -> list[Path]:
-    if not problem.directory.is_dir():
-        return []
     attempts: list[tuple[int, Path]] = []
-    for path in problem.directory.iterdir():
-        match = ATTEMPT_DIRECTORY_RE.fullmatch(path.name)
-        if path.is_dir() and match:
-            attempts.append((int(match.group(1)), path))
+    try:
+        with os.scandir(problem.directory) as entries:
+            for entry in entries:
+                match = ATTEMPT_DIRECTORY_RE.fullmatch(entry.name)
+                if match and entry.is_dir():
+                    attempts.append((int(match.group(1)), Path(entry.path)))
+    except FileNotFoundError:
+        return []
     return [path for _, path in sorted(attempts)]
 
 
@@ -410,24 +446,46 @@ def next_attempt_number(problem: ProblemRef) -> int:
     return max(numbers, default=0) + 1
 
 
-def _attempt_history_paths(problem: ProblemRef) -> list[tuple[str, Path]]:
+def _attempt_history_paths(
+    problem: ProblemRef,
+    *,
+    attempts: Sequence[Path] | None = None,
+) -> list[tuple[str, Path]]:
     files: list[tuple[str, Path]] = []
-    for attempt in attempt_directories(problem):
+    for attempt in attempts if attempts is not None else attempt_directories(problem):
+        try:
+            with os.scandir(attempt) as entries:
+                entry_lookup = {
+                    entry.name: entry
+                    for entry in entries
+                    if entry.name in {*ATTEMPT_HISTORY_FILES, "artifacts"}
+                }
+        except FileNotFoundError:
+            continue
         for name in ATTEMPT_HISTORY_FILES:
-            path = attempt / name
-            if path.is_file():
-                files.append((f"{attempt.name}/{name}", path))
+            entry = entry_lookup.get(name)
+            if entry is not None and entry.is_file():
+                files.append((f"{attempt.name}/{name}", Path(entry.path)))
         artifacts = attempt / "artifacts"
-        if artifacts.is_dir():
-            for path in artifacts.rglob("*"):
-                if path.is_file():
-                    relative = path.relative_to(problem.directory).as_posix()
+        artifact_entry = entry_lookup.get("artifacts")
+        if artifact_entry is not None and artifact_entry.is_dir():
+            for directory, _, names in os.walk(artifacts):
+                for name in names:
+                    path = Path(directory) / name
+                    relative = os.path.relpath(
+                        path,
+                        problem.directory,
+                    ).replace(os.sep, "/")
                     files.append((relative, path))
     return files
 
 
-def attempt_history_digest(problem: ProblemRef) -> str:
-    return files_digest(_attempt_history_paths(problem))
+def attempt_history_digest(
+    problem: ProblemRef,
+    *,
+    attempts: Sequence[Path] | None = None,
+) -> str:
+    return files_digest(_attempt_history_paths(problem, attempts=attempts))
 
 
 def solver_attempt_digest(attempt_directory: Path) -> str:
@@ -445,11 +503,23 @@ def solver_attempt_digest(attempt_directory: Path) -> str:
     return files_digest(files)
 
 
-def triage_input_digest(problem: ProblemRef) -> str:
+def triage_input_digest(
+    problem: ProblemRef,
+    *,
+    problem_digest_value: str | None = None,
+    attempts: Sequence[Path] | None = None,
+) -> str:
     return stable_value_digest(
         {
-            "problem_digest": problem_digest(problem),
-            "attempt_history_digest": attempt_history_digest(problem),
+            "problem_digest": (
+                problem_digest_value
+                if problem_digest_value is not None
+                else problem_digest(problem)
+            ),
+            "attempt_history_digest": attempt_history_digest(
+                problem,
+                attempts=attempts,
+            ),
         }
     )
 
@@ -466,6 +536,8 @@ def triage_is_current(
     problem: ProblemRef,
     *,
     config_digest: str | None = None,
+    problem_digest_value: str | None = None,
+    attempts: Sequence[Path] | None = None,
 ) -> bool:
     manifest = triage_manifest(problem)
     result = triage_result(problem)
@@ -473,7 +545,11 @@ def triage_is_current(
         return False
     if manifest.get("schema_version") != TRIAGE_MANIFEST_SCHEMA_VERSION:
         return False
-    if manifest.get("input_digest") != triage_input_digest(problem):
+    if manifest.get("input_digest") != triage_input_digest(
+        problem,
+        problem_digest_value=problem_digest_value,
+        attempts=attempts,
+    ):
         return False
     if (
         config_digest is not None
@@ -483,9 +559,17 @@ def triage_is_current(
     return result.get("problem_id") == problem.id
 
 
-def literature_input_digest(problem: ProblemRef) -> str:
+def literature_input_digest(
+    problem: ProblemRef,
+    *,
+    problem_digest_value: str | None = None,
+) -> str:
     """Hash the analyzed problem, independent of attempts and triage."""
-    return problem_digest(problem)
+    return (
+        problem_digest_value
+        if problem_digest_value is not None
+        else problem_digest(problem)
+    )
 
 
 def literature_manifest(problem: ProblemRef) -> dict | None:
@@ -500,6 +584,7 @@ def literature_is_current(
     problem: ProblemRef,
     *,
     config_digest: str | None = None,
+    problem_digest_value: str | None = None,
 ) -> bool:
     manifest = literature_manifest(problem)
     result = literature_result(problem)
@@ -507,7 +592,10 @@ def literature_is_current(
         return False
     if manifest.get("schema_version") != LITERATURE_MANIFEST_SCHEMA_VERSION:
         return False
-    if manifest.get("input_digest") != literature_input_digest(problem):
+    if manifest.get("input_digest") != literature_input_digest(
+        problem,
+        problem_digest_value=problem_digest_value,
+    ):
         return False
     if (
         config_digest is not None

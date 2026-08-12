@@ -739,6 +739,12 @@ literature search, solving, independent review, paper writing, and revision.
 Initial discovery runs in the background with live phase and row progress.
 Manuscript details link back to the source paper and open-problem titles recorded
 by their input selectors and attempts.
+The last completed catalog is cached under the private state directory. After
+the first successful scan, a server restart renders that catalog immediately
+and checks the filesystem in the background; a corrupt cache or one belonging
+to different paper roots is ignored. Unchanged freshness digests are also
+reused within the running server, while changed file metadata invalidates the
+corresponding digest automatically.
 
 The four top-level views have reloadable paths: `/research`, `/papers`,
 `/manuscripts`, and `/activity`. Their query strings capture the complete

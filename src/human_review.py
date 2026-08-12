@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import lru_cache
 import json
@@ -36,6 +37,7 @@ PRIORITY_RANK = {
     "low": 2,
     "none": 3,
 }
+CATALOG_IO_WORKERS = 4
 
 
 @dataclass(frozen=True)
@@ -65,6 +67,7 @@ def discover_human_reviews(
     include_stale: bool = True,
     latest_per_problem: bool = False,
     allow_empty: bool = False,
+    progress: Callable[[int, int], None] | None = None,
 ) -> list[HumanReviewItem]:
     """Find reviewed attempts selected for human inspection."""
     attempts: list[review_solutions.AttemptRef] = []
@@ -84,7 +87,7 @@ def discover_human_reviews(
             attempts.append(
                 review_solutions.AttemptRef(problem, directory, result)
             )
-    items: list[HumanReviewItem] = []
+    candidates: list[tuple[review_solutions.AttemptRef, dict]] = []
     for attempt in attempts:
         result_path = attempt.directory / "review-result.json"
         result = common.load_json(result_path)
@@ -97,10 +100,36 @@ def discover_human_reviews(
             )
         if level not in priority:
             continue
-        current = review_solutions.review_is_current(attempt)
+        candidates.append((attempt, result))
+
+    def currentness(
+        candidate: tuple[review_solutions.AttemptRef, dict],
+    ) -> bool:
+        attempt, result = candidate
+        return review_solutions.review_is_current(attempt, result=result)
+
+    if progress is not None:
+        progress(0, len(candidates))
+    current_values = []
+    if len(candidates) > 1:
+        with ThreadPoolExecutor(max_workers=CATALOG_IO_WORKERS) as executor:
+            values = executor.map(currentness, candidates)
+            for index, current in enumerate(values, 1):
+                current_values.append(current)
+                if progress is not None:
+                    progress(index, len(candidates))
+    else:
+        for index, candidate in enumerate(candidates, 1):
+            current_values.append(currentness(candidate))
+            if progress is not None:
+                progress(index, len(candidates))
+
+    items: list[HumanReviewItem] = []
+    for (attempt, result), current in zip(candidates, current_values):
         if not current and not include_stale:
-            continue
-        items.append(HumanReviewItem(attempt, result, current))
+            pass
+        else:
+            items.append(HumanReviewItem(attempt, result, current))
 
     if latest_per_problem:
         latest: dict[tuple[Path, str], HumanReviewItem] = {}
@@ -190,6 +219,71 @@ def _relevant_problem_paths(
     return [path for path in paths if path.is_file()]
 
 
+def _review_file_records(
+    paper: Path,
+    problem_directory: Path,
+    attempt_directory: Path | None,
+    *,
+    include_browser_uris: bool,
+) -> list[dict]:
+    paths = [
+        paper / "paper.pdf",
+        paper / "analysis" / "summary.md",
+        paper / "analysis" / "results.md",
+        paper / "analysis" / "open-problems.md",
+        problem_directory / common.TRIAGE_MARKDOWN,
+        problem_directory / common.TRIAGE_RESULT,
+        problem_directory / common.LITERATURE_MARKDOWN,
+        problem_directory / common.LITERATURE_RESULT,
+    ]
+    artifact_paths: set[Path] = set()
+    if attempt_directory is not None:
+        paths.extend(
+            attempt_directory / name
+            for name in (
+                "attempt.md",
+                "solver-result.json",
+                "critique.md",
+                "review-result.json",
+            )
+        )
+        artifacts = attempt_directory / "artifacts"
+        if artifacts.is_dir():
+            artifact_paths.update(
+                path for path in artifacts.rglob("*") if path.is_file()
+            )
+            paths.extend(sorted(artifact_paths, key=lambda path: path.as_posix()))
+    files = []
+    for path in paths:
+        if not path.is_file():
+            continue
+        file = {
+            "label": os.path.relpath(path, paper).replace(os.sep, "/"),
+            "path": str(path),
+            "artifact": path in artifact_paths,
+        }
+        if include_browser_uris:
+            file["uri"] = _browser_file_uri(path)
+        files.append(file)
+    return files
+
+
+def load_review_files(
+    item: dict,
+    *,
+    include_browser_uris: bool = False,
+) -> list[dict]:
+    """Load file links for one review only when its detail is requested."""
+    paper = Path(item["paperDirectory"])
+    attempt_value = item.get("attemptDirectory")
+    return _review_file_records(
+        paper,
+        paper / item["problemId"],
+        Path(attempt_value) if attempt_value else None,
+        include_browser_uris=include_browser_uris,
+    )
+
+
 def _relevant_paths(item: HumanReviewItem) -> list[Path]:
     return _relevant_problem_paths(item.attempt.problem, item.attempt)
 
@@ -215,6 +309,7 @@ def _native_project_root() -> str:
     return codex_cli.path_for_codex(PROJECT_ROOT)
 
 
+@lru_cache(maxsize=65536)
 def _browser_file_uri(path: Path) -> str:
     resolved = path if path.is_absolute() else path.resolve()
     try:
@@ -262,6 +357,7 @@ def _review_tokens_css() -> str:
     return REVIEW_TOKENS_PATH.read_text(encoding="utf-8")
 
 
+@lru_cache(maxsize=65536)
 def project_display_path(path: Path) -> str:
     """Format a path relative to this project, with portable separators."""
     resolved = path if path.is_absolute() else path.resolve()
@@ -319,10 +415,19 @@ def build_review_catalog(
     attempt_names: set[str] | None = None,
     latest_per_problem: bool = False,
     progress: Callable[[int, int], None] | None = None,
+    freshness_progress: Callable[[int, int], None] | None = None,
+    include_browser_uris: bool = True,
+    include_files: bool = True,
 ) -> list[dict]:
     data: list[dict] = []
     problem_statements: dict[tuple[Path, str], str] = {}
     problem_attempt_counts: dict[tuple[Path, str], int] = {}
+    problem_attempt_directories: dict[tuple[Path, str], list[Path]] = {}
+    problem_contexts: dict[
+        tuple[Path, str], tuple[dict | None, bool, dict | None]
+    ] = {}
+    paper_analysis_digests: dict[Path, str] = {}
+    resolved_papers: dict[Path, Path] = {}
     reviewed = {
         item.attempt.directory: item
         for item in items
@@ -339,6 +444,12 @@ def build_review_catalog(
     else:
         for problem in problems:
             all_attempts = common.attempt_directories(problem)
+            problem_attempt_counts[
+                (problem.paper_directory, problem.id)
+            ] = len(all_attempts)
+            problem_attempt_directories[
+                (problem.paper_directory, problem.id)
+            ] = all_attempts
             attempts = [
                 directory
                 for directory in all_attempts
@@ -422,6 +533,78 @@ def build_review_catalog(
                 latest_rows[key] = row
         rows = list(latest_rows.values())
 
+    unique_problems = {
+        (problem.paper_directory, problem.id): problem
+        for problem, _, _ in rows
+    }
+    context_papers = {
+        problem.paper_directory
+        for problem in unique_problems.values()
+        if common.triage_result(problem) is not None
+        or common.literature_result(problem) is not None
+    }
+    paper_analysis_digests.update(
+        (paper, common.analysis_digest(paper))
+        for paper in context_papers
+    )
+
+    def load_problem_context(
+        problem: common.ProblemRef,
+    ) -> tuple[dict | None, bool, dict | None]:
+        triage_value = common.triage_result(problem)
+        literature_candidate = common.literature_result(problem)
+        digest = (
+            common.problem_digest(
+                problem,
+                paper_analysis_digest=paper_analysis_digests[
+                    problem.paper_directory
+                ],
+            )
+            if problem.paper_directory in paper_analysis_digests
+            else None
+        )
+        triage_current = common.triage_is_current(
+            problem,
+            problem_digest_value=digest,
+            attempts=problem_attempt_directories.get(
+                (problem.paper_directory, problem.id)
+            ),
+        )
+        literature_value = (
+            literature_candidate
+            if literature_candidate is not None
+            and common.literature_is_current(
+                problem,
+                problem_digest_value=digest,
+            )
+            else None
+        )
+        return triage_value, triage_current, literature_value
+
+    problem_values = list(unique_problems.items())
+    if freshness_progress is not None:
+        freshness_progress(0, len(problem_values))
+    if len(problem_values) > 1:
+        with ThreadPoolExecutor(max_workers=CATALOG_IO_WORKERS) as executor:
+            contexts = executor.map(
+                load_problem_context,
+                (problem for _, problem in problem_values),
+            )
+            for index, ((key, _), context) in enumerate(
+                zip(problem_values, contexts),
+                1,
+            ):
+                problem_contexts[key] = context
+                if freshness_progress is not None:
+                    freshness_progress(index, len(problem_values))
+    else:
+        problem_contexts.update(
+            (key, load_problem_context(problem))
+            for key, problem in problem_values
+        )
+        if freshness_progress is not None:
+            freshness_progress(len(problem_values), len(problem_values))
+
     total_rows = len(rows)
     if progress is not None:
         progress(0, total_rows)
@@ -441,13 +624,9 @@ def build_review_catalog(
         )
         review_result = item.review_result if item is not None else {}
         solver_result = attempt.solver_result if attempt is not None else {}
-        triage = common.triage_result(problem)
-        triage_current = common.triage_is_current(problem)
-        literature = (
-            common.literature_result(problem)
-            if common.literature_is_current(problem)
-            else None
-        )
+        triage, triage_current, literature = problem_contexts[problem_key]
+        if paper not in resolved_papers:
+            resolved_papers[paper] = paper.resolve()
         if include_contents and problem_key not in problem_statements:
             problem_statements[problem_key] = (
                 _extract_open_problem_markdown(
@@ -455,29 +634,22 @@ def build_review_catalog(
                     problem.id,
                 )
             )
-        paths = _relevant_problem_paths(problem, attempt)
-        files = []
-        for path in paths:
-            try:
-                label = path.relative_to(paper).as_posix()
-            except ValueError:
-                label = path.name
-            files.append(
-                {
-                    "label": label,
-                    "path": str(path),
-                    "uri": _browser_file_uri(path),
-                    "artifact": (
-                        attempt is not None
-                        and attempt.directory / "artifacts" in path.parents
-                    ),
-                }
+        files = (
+            _review_file_records(
+                paper,
+                problem.directory,
+                attempt.directory if attempt is not None else None,
+                include_browser_uris=include_browser_uris,
             )
+            if include_files
+            else []
+        )
         data.append(
             {
                 "id": f"review-{index + 1}",
                 "itemKey": (
-                    f"{paper.resolve()}::{problem.id}::"
+                    f"{resolved_papers[paper]}::"
+                    f"{problem.id}::"
                     f"{attempt.name if attempt is not None else ''}"
                 ),
                 "problemKey": f"{paper}::{problem.id}",
