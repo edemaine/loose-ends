@@ -1367,6 +1367,8 @@ class OpenProblemPipelineTests(unittest.TestCase):
 
             dashboard = human_review.render_human_review_html(items)
             self.assertIn(human_review._review_model_script(), dashboard)
+            self.assertIn('id="triage-filter"', dashboard)
+            self.assertIn('[triageFilter, "triage"]', dashboard)
             dashboard_data = human_review._html_data(
                 items,
                 include_contents=True,

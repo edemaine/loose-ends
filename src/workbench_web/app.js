@@ -822,6 +822,7 @@ function renderResearchFilters() {
   const controls = node("div", "research-filter-grid");
   controls.append(
     filterControl("Attempt status", "attemptStatus", reviewModel.filterOptions.attemptStatus),
+    filterControl("Triage recommendation", "triage", reviewModel.filterOptions.triage),
     filterControl("Claim type", "claim", reviewModel.filterOptions.claim),
     filterControl("Correctness", "correctness", reviewModel.filterOptions.correctness),
     filterControl("Coverage", "coverage", reviewModel.filterOptions.coverage),

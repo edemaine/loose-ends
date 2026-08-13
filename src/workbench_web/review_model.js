@@ -8,6 +8,14 @@
       ["unreviewed", "Awaiting review"],
       ["reviewed", "Reviewed"],
     ],
+    triage: [
+      ["all", "Any triage recommendation"],
+      ["attempt", "Attempt (current)"],
+      ["maybe", "Maybe (current)"],
+      ["skip", "Skip (current)"],
+      ["stale", "Stale triage"],
+      ["missing", "No triage"],
+    ],
     claim: [
       ["all", "Any claim type"],
       ["resolution", "Any resolution claim"],
@@ -72,6 +80,7 @@
 
   const filterParameters = Object.freeze({
     attemptStatus: "status",
+    triage: "triage",
     claim: "claim",
     correctness: "correctness",
     coverage: "coverage",
@@ -104,6 +113,7 @@
   function createDefaultFilters(initialPriorities = ["high", "medium"]) {
     return {
       attemptStatus: "all",
+      triage: "all",
       claim: "all",
       correctness: "all",
       coverage: "all",
@@ -118,6 +128,12 @@
 
   function matches(item, filters) {
     if (filters.attemptStatus !== "all" && item.attemptStatus !== filters.attemptStatus) return false;
+    const triage = filters.triage || "all";
+    if (triage === "missing" && item.triageClassification) return false;
+    if (triage === "stale" && (!item.triageClassification || item.triageCurrent)) return false;
+    if (!["all", "missing", "stale"].includes(triage) && (
+      item.triageClassification !== triage || !item.triageCurrent
+    )) return false;
     if (item.attemptStatus === "reviewed") {
       if (!filters.priorities.has(item.priority)) return false;
       if (item.current && !filters.current) return false;
@@ -449,6 +465,11 @@
       partially_resolved: "partially resolved in literature", no_resolution_found: "no literature resolution found",
       uncertain: "uncertain literature status", missing: "no literature review",
     };
+    const triageLabels = {
+      attempt: "current triage: attempt", maybe: "current triage: maybe",
+      skip: "current triage: skip", stale: "stale triage", missing: "no triage",
+    };
+    if (triageLabels[filters.triage]) parts.push(triageLabels[filters.triage]);
     if (focusLabels[filters.claim]) parts.push(focusLabels[filters.claim]);
     if (literatureLabels[filters.literature]) parts.push(literatureLabels[filters.literature]);
     return parts.join(" · ");

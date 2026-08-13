@@ -1465,6 +1465,9 @@ def render_human_review_html(
         <label class="control">Attempt status
           <select id="attempt-status-filter"></select>
         </label>
+        <label class="control">Triage recommendation
+          <select id="triage-filter"></select>
+        </label>
         <label class="control">Claim type
           <select id="claim-filter"></select>
         </label>
@@ -1544,6 +1547,7 @@ def render_human_review_html(
     const attemptStatusFilter = document.getElementById(
       "attempt-status-filter"
     );
+    const triageFilter = document.getElementById("triage-filter");
     const claimFilter = document.getElementById("claim-filter");
     const correctnessFilter = document.getElementById("correctness-filter");
     const coverageFilter = document.getElementById("coverage-filter");
@@ -1561,6 +1565,7 @@ def render_human_review_html(
     populateFilter(paperSort, LooseEndsReviewModel.paperSortOptions);
     [
       [attemptStatusFilter, "attemptStatus"],
+      [triageFilter, "triage"],
       [claimFilter, "claim"],
       [correctnessFilter, "correctness"],
       [coverageFilter, "coverage"],
@@ -1602,6 +1607,7 @@ def render_human_review_html(
     function activeReviewFilters() {
       return {
         attemptStatus: attemptStatusFilter.value,
+        triage: triageFilter.value,
         claim: claimFilter.value,
         correctness: correctnessFilter.value,
         coverage: coverageFilter.value,
@@ -1719,6 +1725,7 @@ def render_human_review_html(
         settings.initialPriorities
       );
       attemptStatusFilter.value = filters.attemptStatus;
+      triageFilter.value = filters.triage;
       claimFilter.value = filters.claim;
       correctnessFilter.value = filters.correctness;
       coverageFilter.value = filters.coverage;
@@ -2066,6 +2073,7 @@ def render_human_review_html(
     search.addEventListener("input", updateFilters);
     paperSort.addEventListener("change", updatePaperSort);
     attemptStatusFilter.addEventListener("change", updateFilters);
+    triageFilter.addEventListener("change", updateFilters);
     claimFilter.addEventListener("change", updateFilters);
     correctnessFilter.addEventListener("change", updateFilters);
     coverageFilter.addEventListener("change", updateFilters);
