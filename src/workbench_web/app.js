@@ -2224,11 +2224,12 @@ function connectEvents() {
     try {
       const value = JSON.parse(event.data);
       if (value.type === "catalog.progress") {
-        state.catalog.loading = true;
-        state.catalog.progress = value;
-        if (state.catalog.version) renderCatalogLoading();
-        else render();
-      } else if (value.type.startsWith("catalog.")) {
+        if (!state.catalog.version) {
+          state.catalog.loading = true;
+          state.catalog.progress = value;
+          render();
+        }
+      } else if (["catalog.changed", "catalog.error"].includes(value.type)) {
         refreshCatalog().catch(error => showNotice(error.message, true));
       }
       if (value.type === "tasks.changed") {

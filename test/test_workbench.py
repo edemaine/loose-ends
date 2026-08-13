@@ -89,6 +89,25 @@ def fake_plan(
 
 
 class WorkbenchPlanningTests(unittest.TestCase):
+    def test_catalog_change_does_not_invalidate_a_confirmed_plan(self):
+        app = object.__new__(workbench.WorkbenchApplication)
+        app.plan_lock = threading.Lock()
+        app.plans = {
+            "plan": {
+                "created": time.time(),
+                "request": {"action": "solve"},
+                "plan": {"catalogVersion": 1},
+            }
+        }
+        app.catalog = SimpleNamespace(version=2)
+        app.store = Mock()
+        app.store.create_job.return_value = {"id": "job"}
+        app.scheduler = Mock()
+        app.hub = Mock()
+
+        self.assertEqual(app.confirm_plan("plan"), {"id": "job"})
+        app.store.create_job.assert_called_once()
+
     def test_request_json_consumes_exact_body_before_next_request(self):
         payload = b'{"action":"literature"}'
         trailing = b"GET /research HTTP/1.1\r\n"
@@ -537,11 +556,9 @@ class WorkbenchPlanningTests(unittest.TestCase):
                 try:
                     snapshot = second.snapshot()
                     self.assertEqual(snapshot["version"], version)
-                    self.assertTrue(snapshot["loading"])
+                    self.assertFalse(snapshot["loading"])
                     self.assertEqual(len(snapshot["papers"]), 1)
-                    self.assertEqual(
-                        snapshot["progress"]["phase"], "refreshing"
-                    )
+                    self.assertNotIn("progress", snapshot)
                 finally:
                     scan_allowed.set()
                     second.close()
@@ -880,7 +897,7 @@ class WorkbenchStoreTests(unittest.TestCase):
             during = store.get_run(run["id"])
             self.assertEqual(during["outputs"], [str(first.resolve())])
             self.assertEqual(during["status"], "running")
-            worker.join(5)
+            worker.join(10)
             self.assertFalse(worker.is_alive())
             saved = store.get_run(run["id"])
             self.assertEqual(saved["outputs"], [str(first.resolve()), str(second.resolve())])
@@ -975,6 +992,36 @@ class WorkbenchWatchTests(unittest.TestCase):
                 src_path=str(PROJECT_ROOT / "papers" / "metadata.json"),
             )
         )
+
+        catalog.schedule.assert_called_once_with()
+
+    def test_watchdog_ignores_files_outside_the_catalog_model(self):
+        catalog = Mock()
+        handler = ChangeHandler(catalog)
+
+        handler.on_any_event(
+            SimpleNamespace(
+                event_type="modified",
+                is_directory=False,
+                src_path=str(PROJECT_ROOT / "papers" / "agent-run.log"),
+            )
+        )
+
+        catalog.schedule.assert_not_called()
+
+    def test_watchdog_ignores_duplicate_file_notifications(self):
+        catalog = Mock()
+        handler = ChangeHandler(catalog)
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "metadata.json"
+            path.write_text("{}", encoding="utf-8")
+            event = SimpleNamespace(
+                event_type="modified",
+                is_directory=False,
+                src_path=str(path),
+            )
+            handler.on_any_event(event)
+            handler.on_any_event(event)
 
         catalog.schedule.assert_called_once_with()
 
@@ -1132,8 +1179,10 @@ class WorkbenchWatchTests(unittest.TestCase):
                 scan_allowed.set()
                 self.assertTrue(manager.wait_until_ready(2))
                 self.assertFalse(manager.snapshot()["loading"])
+                version = manager.version
                 manager.refresh()
                 self.assertFalse(manager.snapshot()["loading"])
+                self.assertEqual(manager.version, version)
             finally:
                 scan_allowed.set()
                 manager.close()

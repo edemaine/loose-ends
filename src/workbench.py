@@ -68,6 +68,24 @@ IGNORED_PREFIXES = (
 )
 DRAFT_RE = re.compile(r"^draft-([0-9]{3,})$")
 CATALOG_CACHE_SCHEMA_VERSION = 2
+CATALOG_FILE_NAMES = {
+    "metadata.json",
+    "paper.pdf",
+    *common.ANALYSIS_FILES,
+    common.TRIAGE_MARKDOWN,
+    common.TRIAGE_RESULT,
+    common.TRIAGE_MANIFEST,
+    common.LITERATURE_MARKDOWN,
+    common.LITERATURE_RESULT,
+    common.LITERATURE_MANIFEST,
+    *common.ATTEMPT_HISTORY_FILES,
+    "paper-result.json",
+    "paper-review.json",
+    "main.tex",
+    "main.pdf",
+    "readiness.md",
+    "paper-critique.md",
+}
 
 
 def _read_json(path: Path) -> dict:
@@ -531,6 +549,7 @@ class CatalogManager:
         self.fingerprint = ""
         self._load_cache()
         self.pending = threading.Event()
+        self.force_refresh = False
         self.stopping = threading.Event()
         self.ready = threading.Event()
         self.thread = threading.Thread(
@@ -560,12 +579,11 @@ class CatalogManager:
         ):
             return
         self.catalog = catalog
-        self.catalog["loading"] = True
+        # Cached data is immediately usable; validation happens silently in
+        # the background rather than becoming another initial load.
+        self.catalog["loading"] = False
         self.catalog["error"] = ""
-        self.catalog["progress"] = {
-            "phase": "refreshing",
-            "label": "Checking for file changes…",
-        }
+        self.catalog.pop("progress", None)
         self.version = int(catalog.get("version", 0))
         self.fingerprint = cached["fingerprint"]
 
@@ -665,8 +683,9 @@ class CatalogManager:
         fingerprint = hashlib.sha256(
             json.dumps(value, sort_keys=True, ensure_ascii=False).encode("utf-8")
         ).hexdigest()
+        changed = fingerprint != self.fingerprint or force
         with self.lock:
-            if fingerprint == self.fingerprint and not force:
+            if not changed:
                 self.error = ""
                 self.catalog["error"] = ""
                 self.catalog["loading"] = False
@@ -683,7 +702,8 @@ class CatalogManager:
         except (OSError, UnicodeError):
             pass
         self.ready.set()
-        self.hub.publish("catalog.changed", version=self.version)
+        if changed:
+            self.hub.publish("catalog.changed", version=self.version)
 
     def _set_progress(
         self,
@@ -696,12 +716,16 @@ class CatalogManager:
         progress = {"phase": phase, "label": label}
         if current is not None and total is not None:
             progress.update({"current": current, "total": total})
+        initial_load = not self.version
         with self.lock:
-            self.catalog["loading"] = True
-            self.catalog["progress"] = progress
-        self.hub.publish("catalog.progress", **progress)
+            if initial_load:
+                self.catalog["loading"] = True
+                self.catalog["progress"] = progress
+        if initial_load:
+            self.hub.publish("catalog.progress", **progress)
 
     def schedule(self) -> None:
+        self.force_refresh = True
         self.pending.set()
 
     def wait_until_ready(self, timeout: float | None = None) -> bool:
@@ -716,7 +740,9 @@ class CatalogManager:
             if self.stopping.wait(0.3):
                 break
             self.pending.clear()
-            self.refresh(force=True)
+            force = self.force_refresh
+            self.force_refresh = False
+            self.refresh(force=force)
 
     def snapshot(self) -> dict:
         with self.lock:
@@ -757,6 +783,7 @@ class CatalogManager:
 class ChangeHandler(FileSystemEventHandler):
     def __init__(self, catalog: CatalogManager):
         self.catalog = catalog
+        self.signatures: dict[str, tuple[int, int] | None] = {}
 
     @staticmethod
     def ignored(path: str) -> bool:
@@ -765,6 +792,23 @@ class ChangeHandler(FileSystemEventHandler):
             part in IGNORED_PARTS or part.startswith(IGNORED_PREFIXES)
             for part in parts
         )
+
+    @staticmethod
+    def relevant_file(path: str) -> bool:
+        value = Path(path)
+        parts = {part.casefold() for part in value.parts}
+        return (
+            value.name.casefold() in CATALOG_FILE_NAMES
+            or "artifacts" in parts
+        )
+
+    @staticmethod
+    def signature(path: str) -> tuple[int, int] | None:
+        try:
+            status = Path(path).stat()
+        except OSError:
+            return None
+        return status.st_mtime_ns, status.st_size
 
     def on_any_event(self, event: FileSystemEvent) -> None:
         if getattr(event, "event_type", "") in {
@@ -785,8 +829,24 @@ class ChangeHandler(FileSystemEventHandler):
         destination = getattr(event, "dest_path", "")
         if destination:
             paths.append(destination)
-        if any(not self.ignored(path) for path in paths):
-            self.catalog.schedule()
+        paths = [path for path in paths if not self.ignored(path)]
+        if not paths:
+            return
+        if not getattr(event, "is_directory", False):
+            paths = [path for path in paths if self.relevant_file(path)]
+            if not paths:
+                return
+        if getattr(event, "event_type", "") == "modified":
+            changed = False
+            for path in paths:
+                key = os.path.normcase(os.path.abspath(path))
+                signature = self.signature(path)
+                if self.signatures.get(key, object()) != signature:
+                    changed = True
+                self.signatures[key] = signature
+            if not changed:
+                return
+        self.catalog.schedule()
 
 
 class TaskChangeHandler(FileSystemEventHandler):
@@ -1029,10 +1089,6 @@ class WorkbenchApplication:
             saved = self.plans.pop(plan_id, None)
         if saved is None:
             raise PlanError("this plan expired; review the task again")
-        if saved["plan"]["catalogVersion"] != self.catalog.version:
-            raise RuntimeError(
-                "project files changed after this plan was prepared; review it again"
-            )
         job = self.store.create_job(saved["request"], saved["plan"])
         self.scheduler.schedule()
         self.hub.publish("tasks.changed")
