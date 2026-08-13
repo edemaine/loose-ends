@@ -211,7 +211,7 @@ button { color: inherit; }
 .badge.succeeded, .badge.solution { background: var(--success-soft); color: var(--success); }
 .badge.counterexample { background: var(--counterexample-soft); color: var(--counterexample); }
 .badge.partial { background: var(--amber-soft); color: var(--amber); }
-.badge.neutral { background: #e9edef; color: #53666c; }
+.badge.neutral { background: #332f35; color: #fff; }
 .job-scheduling { display: grid; min-width: 260px; gap: 5px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); padding: 10px; }
 .job-scheduling-row { display: flex; align-items: center; gap: 6px; }
 .job-scheduling label { display: flex; min-width: 0; flex: 1; align-items: center; justify-content: space-between; gap: 6px; color: var(--heading); font-size: 10px; font-weight: 800; }

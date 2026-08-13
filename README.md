@@ -769,8 +769,8 @@ installed output before a later phase failed is marked partial so the next
 action can operate on that output without accidentally duplicating it.
 
 Use the worker control in the top bar to change concurrent CLI invocations or
-pause new starts. Task scheduling shares and per-task pause/resume controls are
-available when configuring or viewing a task. Shares are displayed as ⅛×
+pause new starts. Task scheduling weights and per-task pause/resume controls are
+available when configuring or viewing a task. Weights are displayed as ⅛×
 through 8× (with 1× as the default), and eligible tasks receive worker starts
 in roughly those proportions. Pausing or lowering the limit never stops an
 already active run. Use `--no-open` to

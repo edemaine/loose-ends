@@ -322,7 +322,7 @@ function taskBadges(job) {
   const values = node("span", "task-badges");
   values.append(taskIsPaused(job) ? badge("Paused", "paused") : taskStatusBadge(job.status));
   if (!["succeeded", "partial", "failed", "canceled", "interrupted"].includes(job.status)) {
-    values.append(badge(`Share ${priorityMultiplier(job.priority_level)}`, "neutral"));
+    values.append(badge(`Weight ${priorityMultiplier(job.priority_level)}`, "neutral"));
   }
   return values;
 }
@@ -1548,7 +1548,7 @@ function renderJobDetail(job) {
   copy.append(scope, node("p", "", `Created ${formatTime(job.created_at)}`));
   const badges = node("div", "badges");
   badges.append(taskIsPaused(job) ? badge("Paused", "paused") : taskStatusBadge(job.status));
-  badges.append(badge(`Share ${priorityMultiplier(job.priority_level)}`, "neutral"));
+  badges.append(badge(`Weight ${priorityMultiplier(job.priority_level)}`, "neutral"));
   copy.append(badges);
   hero.append(copy, jobSchedulingControls(job));
   shell.append(hero);
@@ -1712,7 +1712,7 @@ function jobSchedulingControls(job) {
   const controls = node("div", "job-scheduling");
   const row = node("div", "job-scheduling-row");
   const label = node("label");
-  label.append(node("span", "", "Scheduling share"));
+  label.append(node("span", "", "Scheduling weight"));
   const select = node("select");
   priorityOptions(false).forEach(([value, text]) => {
     const option = node("option", "", text);
@@ -2026,11 +2026,11 @@ function renderTaskConfiguration(errorMessage = "") {
     grid.append(field("title", "Override title direction", { value: options.title || "" }));
     grid.append(checkbox("refreshResults", "Refresh result selection", "Promote stored selectors to paper scope and use latest attempts.", options.refreshResults));
   }
-  grid.append(field("priorityLevel", "Scheduling share", {
+  grid.append(field("priorityLevel", "Scheduling weight", {
     type: "select",
     value: options.priorityLevel ?? "0",
     options: priorityOptions(),
-    help: "Relative share of worker starts when this task competes with other eligible tasks.",
+    help: "Relative weight of worker starts when this task competes with other eligible tasks.",
   }));
 
   const advanced = node("details", "advanced");
@@ -2111,7 +2111,7 @@ function renderTaskConfirmation() {
   dialogEyebrow.textContent = "Step 2 of 2 · Confirm";
   dialogTitle.textContent = plan.title;
   dialogBody.replaceChildren();
-  const intro = node("p", "", `This will queue ${plan.units.length} managed run${plan.units.length === 1 ? "" : "s"} with a ${priorityMultiplier(plan.priorityLevel)} scheduling share. Nothing has started yet.`);
+  const intro = node("p", "", `This will queue ${plan.units.length} managed run${plan.units.length === 1 ? "" : "s"} with a ${priorityMultiplier(plan.priorityLevel)} scheduling weight. Nothing has started yet.`);
   dialogBody.append(intro);
   if (plan.warnings.length) plan.warnings.forEach(value => dialogBody.append(node("div", "warning", value)));
   if (Object.keys(plan.prompts).length) {

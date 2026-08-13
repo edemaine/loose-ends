@@ -259,7 +259,10 @@ class WorkbenchPlanningTests(unittest.TestCase):
         self.assertIn("function runConsoleStatus", app)
         self.assertIn("tags: taskBadges(job)", app)
         self.assertIn('taskIsPaused(job) ? badge("Paused", "paused")', app)
-        self.assertIn('values.append(badge(`Share ${priorityMultiplier(job.priority_level)}`', app)
+        self.assertIn(
+            'values.append(badge(`Weight ${priorityMultiplier(job.priority_level)}`, "neutral"))',
+            app,
+        )
         self.assertIn('job.scheduling_paused ? "Resume" : "Pause"', app)
         self.assertIn(
             'node("small", "", "Proportion of workers assigned to this task")',
@@ -302,6 +305,8 @@ class WorkbenchPlanningTests(unittest.TestCase):
         self.assertIn(".console-cursor", styles)
         self.assertIn("prefers-reduced-motion: reduce", styles)
         self.assertIn(".badge.paused", styles)
+        self.assertIn(".badge.neutral { background: #332f35; color: #fff; }", styles)
+        self.assertNotIn(".badge.weight", styles)
 
     def test_network_bind_and_request_host_security(self):
         args = build_parser().parse_args(
