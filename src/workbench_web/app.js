@@ -41,8 +41,9 @@ const connection = document.getElementById("connection");
 const schedulerControl = document.getElementById("scheduler-control");
 const workerSummary = document.getElementById("worker-summary");
 const workerLimit = document.getElementById("worker-limit");
+const workerDecrease = document.getElementById("worker-decrease");
+const workerIncrease = document.getElementById("worker-increase");
 const workerStatus = document.getElementById("worker-status");
-const workerApply = document.getElementById("worker-apply");
 const queueToggle = document.getElementById("queue-toggle");
 const dialog = document.getElementById("task-dialog");
 const dialogBody = document.getElementById("dialog-body");
@@ -66,6 +67,9 @@ let navigationReady = false;
 let eventConnection = null;
 let eventReconnectNeedsRefresh = false;
 let sessionRefresh = null;
+let workerLimitDraft = null;
+let workerLimitTimer = null;
+let workerLimitSaving = false;
 const priorityLevels = [
   [-3, "⅛×"],
   [-2, "¼×"],
@@ -719,15 +723,18 @@ function schedulerCounts() {
 }
 
 function renderSchedulerControl() {
-  const limit = Number(state.settings.workerLimit) || 2;
+  const configuredLimit = Number(state.settings.workerLimit) || 2;
+  const displayedLimit = workerLimitDraft ?? configuredLimit;
   const counts = schedulerCounts();
-  workerSummary.textContent = `${state.settings.queuePaused ? "Queue paused" : "Workers"} ${counts.active}/${limit}`;
-  if (document.activeElement !== workerLimit) workerLimit.value = String(limit);
+  workerSummary.textContent = `${state.settings.queuePaused ? "Queue paused" : "Workers"} ${counts.active}/${configuredLimit}`;
+  workerLimit.textContent = String(displayedLimit);
+  workerDecrease.disabled = workerLimitSaving || displayedLimit <= 1;
+  workerIncrease.disabled = workerLimitSaving || displayedLimit >= 64;
   queueToggle.textContent = state.settings.queuePaused ? "Resume queue" : "Pause queue";
   if (state.settings.queuePaused) {
     workerStatus.textContent = `${counts.active} active; ${counts.queued} waiting. Active runs continue.`;
-  } else if (counts.active > limit) {
-    workerStatus.textContent = `Draining ${counts.active} active runs to the new limit of ${limit}.`;
+  } else if (counts.active > configuredLimit) {
+    workerStatus.textContent = `Draining ${counts.active} active runs to the new limit of ${configuredLimit}.`;
   } else {
     workerStatus.textContent = `${counts.active} active; ${counts.queued} waiting.`;
   }
@@ -742,7 +749,36 @@ async function updateScheduler(changes) {
   }
 }
 
-workerApply.addEventListener("click", () => updateScheduler({ workerLimit: Number(workerLimit.value) }));
+function adjustWorkerLimit(delta) {
+  if (workerLimitSaving) return;
+  const current = (workerLimitDraft ?? Number(state.settings.workerLimit)) || 2;
+  const next = Math.max(1, Math.min(64, current + delta));
+  if (next === current) return;
+  workerLimitDraft = next;
+  renderSchedulerControl();
+  clearTimeout(workerLimitTimer);
+  workerLimitTimer = setTimeout(async () => {
+    const limit = workerLimitDraft;
+    workerLimitSaving = true;
+    renderSchedulerControl();
+    try {
+      state.settings = await api("/api/scheduler", {
+        method: "POST",
+        body: { workerLimit: limit },
+      });
+      workerLimitDraft = null;
+    } catch (error) {
+      workerLimitDraft = null;
+      showNotice(error.message, true);
+    } finally {
+      workerLimitSaving = false;
+      renderSchedulerControl();
+    }
+  }, 2000);
+}
+
+workerDecrease.addEventListener("click", () => adjustWorkerLimit(-1));
+workerIncrease.addEventListener("click", () => adjustWorkerLimit(1));
 queueToggle.addEventListener("click", () => updateScheduler({ queuePaused: !state.settings.queuePaused }));
 document.addEventListener("pointerdown", event => {
   if (schedulerControl.open && !schedulerControl.contains(event.target)) {

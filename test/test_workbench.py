@@ -268,6 +268,10 @@ class WorkbenchPlanningTests(unittest.TestCase):
         self.assertIn("preserveActivityDetail", app)
         self.assertIn("function updateActivityCount()", app)
         self.assertIn("!schedulerControl.contains(event.target)", app)
+        self.assertIn("function adjustWorkerLimit(delta)", app)
+        self.assertIn("workerLimitTimer = setTimeout", app)
+        self.assertIn("${counts.active}/${configuredLimit}", app)
+        self.assertNotIn("workerApply", app)
         self.assertIn('if (!navigationReady || state.tab !== "activity") return', app)
         refresh_jobs = app[app.index("async function refreshJobs"):app.index("function connectEvents")]
         self.assertNotIn("syncNavigation", refresh_jobs)

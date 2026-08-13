@@ -82,8 +82,12 @@ button { color: inherit; }
 .scheduler-control > summary::-webkit-details-marker { display: none; }
 .scheduler-control[open] > summary { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-ring); }
 .scheduler-popover { position: absolute; z-index: 40; top: calc(100% + 8px); right: 0; width: 290px; border: 1px solid var(--line-strong); border-radius: 11px; background: var(--panel); padding: 12px; box-shadow: 0 18px 50px var(--dialog-shadow); }
-.scheduler-limit { display: grid; grid-template-columns: minmax(0, 1fr) 64px; align-items: center; gap: 10px; color: var(--heading); font-size: 11px; font-weight: 800; }
-.scheduler-limit input { width: 100%; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--ink); padding: 6px 7px; }
+.scheduler-limit { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--heading); font-size: 11px; font-weight: 800; }
+.worker-stepper { display: grid; grid-template-columns: 28px 30px 28px; align-items: stretch; overflow: hidden; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); }
+.worker-stepper button { border: 0; background: transparent; color: var(--accent); padding: 4px 0; font-size: 15px; font-weight: 850; line-height: 1; cursor: pointer; }
+.worker-stepper button:hover:not(:disabled), .worker-stepper button:focus-visible { background: var(--accent-soft); outline: none; }
+.worker-stepper button:disabled { color: var(--line-strong); cursor: default; }
+.worker-stepper output { display: grid; place-items: center; border-inline: 1px solid var(--line); color: var(--heading); font-variant-numeric: tabular-nums; }
 .scheduler-popover p { margin: 9px 0; color: var(--muted); font-size: 10px; }
 .scheduler-actions { display: flex; justify-content: flex-end; gap: 6px; }
 

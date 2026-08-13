@@ -28,14 +28,17 @@
     <details id="scheduler-control" class="scheduler-control">
       <summary id="worker-summary">Workers</summary>
       <div class="scheduler-popover">
-        <label class="scheduler-limit">
+        <div class="scheduler-limit">
           <span>Maximum active workers</span>
-          <input id="worker-limit" type="number" min="1" max="64" step="1">
-        </label>
+          <div class="worker-stepper" role="group" aria-label="Maximum active workers">
+            <button id="worker-decrease" type="button" aria-label="Decrease worker limit">−</button>
+            <output id="worker-limit" aria-live="polite">2</output>
+            <button id="worker-increase" type="button" aria-label="Increase worker limit">+</button>
+          </div>
+        </div>
         <p id="worker-status"></p>
         <div class="scheduler-actions">
           <button id="queue-toggle" type="button" class="button"></button>
-          <button id="worker-apply" type="button" class="button primary">Apply limit</button>
         </div>
       </div>
     </details>
