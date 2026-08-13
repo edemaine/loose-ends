@@ -134,6 +134,7 @@ button { color: inherit; }
 .filter-control select { min-width: 0; width: 100%; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); padding: 4px 5px; font-size: 10px; }
 .filter-toggles { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 4px; padding-top: 2px; }
 .filter-toggle { display: inline-flex; align-items: center; gap: 3px; border: 1px solid var(--line); border-radius: 999px; padding: 3px 6px; color: var(--muted); font-size: 9px; font-weight: 750; cursor: pointer; }
+.filter-toggle[hidden] { display: none; }
 .filter-toggle input { width: 11px; height: 11px; margin: 0; accent-color: var(--accent); }
 .filter-footer { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--muted); font-size: 9px; }
 .filter-reset { border: 0; background: transparent; color: var(--accent); padding: 2px; font-size: 9px; font-weight: 800; cursor: pointer; }

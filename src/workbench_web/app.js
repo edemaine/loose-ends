@@ -52,6 +52,7 @@ const viewPaths = Object.freeze({
 const tabUrlStoragePrefix = "loose-ends-workbench:tab-url:";
 const initialPriorities = ["high", "medium"];
 const pageScrollPositions = new Map();
+const sidebarControlNodes = new Map();
 let renderedUrl = "";
 let scrollUpdateFrame = null;
 let navigationReady = false;
@@ -419,6 +420,7 @@ function renderCatalogLoading() {
 
 function renderInitialLoading() {
   sidebar.replaceChildren();
+  delete sidebar.dataset.controlsTab;
   const side = node("div", "loading-shell");
   side.append(node("div", "loading-pulse"), node("div", "loading-pulse short"));
   sidebar.append(side);
@@ -641,8 +643,7 @@ function render() {
   document.querySelectorAll("[data-tab]").forEach(value => {
     value.classList.toggle("active", value.dataset.tab === state.tab);
   });
-  const active = state.jobs.filter(job => ["queued", "running"].includes(job.status)).length;
-  activityCount.textContent = active ? String(active) : "";
+  updateActivityCount();
   if (state.catalog.error) showNotice(`Catalog update delayed: ${state.catalog.error}`, true);
   else if (state.catalog.loading) renderCatalogLoading();
   else showNotice("");
@@ -658,6 +659,11 @@ function render() {
   else renderActivity();
   restoreSidebarScroll(state.tab);
   renderSelectionBar();
+}
+
+function updateActivityCount() {
+  const active = state.jobs.filter(job => ["queued", "running"].includes(job.status)).length;
+  activityCount.textContent = active ? String(active) : "";
 }
 
 function rememberSidebarScroll() {
@@ -696,18 +702,8 @@ function sidebarSearch(placeholder) {
   input.placeholder = placeholder;
   input.value = state.search;
   input.addEventListener("input", () => {
-    const selectionStart = input.selectionStart ?? input.value.length;
-    const selectionEnd = input.selectionEnd ?? selectionStart;
-    const selectionDirection = input.selectionDirection || "none";
     state.search = input.value;
     syncNavigation({ replace: true, preserveScroll: true });
-    const replacement = sidebar.querySelector("input.search");
-    replacement?.focus({ preventScroll: true });
-    replacement?.setSelectionRange(
-      selectionStart,
-      selectionEnd,
-      selectionDirection,
-    );
   });
   return input;
 }
@@ -716,6 +712,7 @@ function paperSortControl() {
   const wrapper = node("label", "paper-sort-control");
   wrapper.append(node("span", "", "Sort papers"));
   const select = node("select");
+  select.dataset.paperSort = "";
   select.title = "Most results uses the best result per problem: solutions and counterexamples 1.0, partial results and obstructions 0.1, reviewed incorrect results 0.";
   reviewModel.paperSortOptions.forEach(([value, label]) => {
     const option = node("option", "", label);
@@ -778,6 +775,7 @@ function filterControl(label, key, options) {
   const wrapper = node("label", "filter-control");
   wrapper.append(node("span", "", label));
   const select = node("select");
+  select.dataset.filterKey = key;
   options.forEach(([value, text]) => {
     const option = node("option", "", text);
     option.value = value;
@@ -794,8 +792,10 @@ function filterControl(label, key, options) {
   return wrapper;
 }
 
-function filterToggle(label, checked, handler) {
+function filterToggle(label, checked, handler, { priority = "", availability = "" } = {}) {
   const wrapper = node("label", "filter-toggle");
+  if (priority) wrapper.dataset.filterPriority = priority;
+  if (availability) wrapper.dataset.filterAvailability = availability;
   const input = node("input");
   input.type = "checkbox";
   input.checked = checked;
@@ -830,20 +830,18 @@ function renderResearchFilters() {
     filterControl("Literature", "literature", reviewModel.filterOptions.literature),
   );
   const toggles = node("div", "filter-toggles");
-  const available = reviewModel.availableFilters(state.catalog.reviews);
   reviewModel.priorityLevels.forEach(priority => {
-    if (!available.priorities.has(priority)) return;
     toggles.append(filterToggle(reviewModel.titleize(priority), state.researchFilters.priorities.has(priority), checked => {
       if (checked) state.researchFilters.priorities.add(priority);
       else state.researchFilters.priorities.delete(priority);
-    }));
+    }, { priority }));
   });
-  if (available.current) {
-    toggles.append(filterToggle("Current", state.researchFilters.current, checked => { state.researchFilters.current = checked; }));
-  }
-  if (available.stale) {
-    toggles.append(filterToggle("Stale", state.researchFilters.stale, checked => { state.researchFilters.stale = checked; }));
-  }
+  toggles.append(filterToggle("Current", state.researchFilters.current, checked => {
+    state.researchFilters.current = checked;
+  }, { availability: "current" }));
+  toggles.append(filterToggle("Stale", state.researchFilters.stale, checked => {
+    state.researchFilters.stale = checked;
+  }, { availability: "stale" }));
   const footer = node("div", "filter-footer");
   footer.append(node("span", "", "Human priority and review freshness"));
   footer.append(button("Reset", () => {
@@ -857,15 +855,63 @@ function renderResearchFilters() {
   return details;
 }
 
-function renderResearch() {
-  sidebar.replaceChildren();
-  const controls = node("div", "paper-list-controls research-controls");
-  controls.append(
-    sidebarSearch("Search open problems…"),
-    paperSortControl(),
-    renderResearchFilters(),
+function syncSidebarControls(tab, controls) {
+  const search = controls.querySelector("input.search");
+  if (search && search.value !== state.search) search.value = state.search;
+  const sort = controls.querySelector("select[data-paper-sort]");
+  if (sort && sort.value !== state.paperSort) sort.value = state.paperSort;
+  if (tab !== "research") return;
+
+  const details = controls.querySelector(".research-filters");
+  if (details && details.open !== state.researchFiltersOpen) {
+    details.open = state.researchFiltersOpen;
+  }
+  controls.querySelectorAll("select[data-filter-key]").forEach(select => {
+    const value = state.researchFilters[select.dataset.filterKey];
+    if (select.value !== value) select.value = value;
+  });
+  const available = reviewModel.availableFilters(state.catalog.reviews);
+  controls.querySelectorAll("[data-filter-priority]").forEach(wrapper => {
+    const priority = wrapper.dataset.filterPriority;
+    wrapper.hidden = !available.priorities.has(priority);
+    wrapper.querySelector("input").checked = state.researchFilters.priorities.has(priority);
+  });
+  controls.querySelectorAll("[data-filter-availability]").forEach(wrapper => {
+    const key = wrapper.dataset.filterAvailability;
+    wrapper.hidden = !available[key];
+    wrapper.querySelector("input").checked = Boolean(state.researchFilters[key]);
+  });
+  updateVisibleProblemSelectionControl(
+    controls.querySelector("input[data-select-visible-problems]"),
   );
-  sidebar.append(controls);
+}
+
+function persistentSidebarControls(tab, create) {
+  let controls = sidebarControlNodes.get(tab);
+  if (!controls) {
+    controls = create();
+    sidebarControlNodes.set(tab, controls);
+  }
+  if (sidebar.dataset.controlsTab !== tab || controls.parentNode !== sidebar) {
+    sidebar.replaceChildren(controls);
+    sidebar.dataset.controlsTab = tab;
+  } else {
+    while (controls.nextSibling) controls.nextSibling.remove();
+  }
+  syncSidebarControls(tab, controls);
+  return controls;
+}
+
+function renderResearch() {
+  persistentSidebarControls("research", () => {
+    const controls = node("div", "paper-list-controls research-controls");
+    controls.append(
+      sidebarSearch("Search open problems…"),
+      paperSortControl(),
+      renderResearchFilters(),
+    );
+    return controls;
+  });
   const reviews = filteredReviews();
   const paperGroups = reviewModel.groupProblemsByPaper(
     reviews,
@@ -1092,12 +1138,14 @@ function fileGrid(files) {
 }
 
 function renderPapers() {
-  const controls = node("div", "paper-list-controls");
-  controls.append(
-    sidebarSearch("Search source papers…"),
-    paperSortControl(),
-  );
-  sidebar.replaceChildren(controls);
+  persistentSidebarControls("papers", () => {
+    const controls = node("div", "paper-list-controls");
+    controls.append(
+      sidebarSearch("Search source papers…"),
+      paperSortControl(),
+    );
+    return controls;
+  });
   const query = state.search.trim().toLowerCase();
   const papers = reviewModel.sortPapers(
     state.catalog.papers.filter(paper => !query || `${paper.title} ${paper.name} ${paper.authors.join(" ")}`.toLowerCase().includes(query)),
@@ -1158,7 +1206,11 @@ function uniqueProblemTargets(paperPath) {
 }
 
 function renderManuscripts() {
-  sidebar.replaceChildren(sidebarSearch("Search manuscripts…"));
+  persistentSidebarControls("manuscripts", () => {
+    const controls = node("div", "paper-list-controls");
+    controls.append(sidebarSearch("Search manuscripts…"));
+    return controls;
+  });
   const query = state.search.trim().toLowerCase();
   const manuscripts = state.catalog.manuscripts.filter(value => !query || `${value.name} ${value.latest.title}`.toLowerCase().includes(query));
   const list = node("div", "side-list");
@@ -1276,7 +1328,11 @@ function renderManuscripts() {
 }
 
 function renderActivity({ preserveDetail = false } = {}) {
-  sidebar.replaceChildren(sidebarSearch("Search tasks…"));
+  persistentSidebarControls("activity", () => {
+    const controls = node("div", "paper-list-controls");
+    controls.append(sidebarSearch("Search tasks…"));
+    return controls;
+  });
   const query = state.search.trim().toLowerCase();
   const jobs = state.jobs.filter(job => !query || `${job.title} ${job.action} ${job.status}`.toLowerCase().includes(query));
   const list = node("div", "side-list");
@@ -1936,24 +1992,14 @@ async function refreshCatalog() {
 async function refreshJobs({ preserveActivityDetail = false } = {}) {
   const value = await api("/api/jobs");
   state.jobs = value.jobs;
-  if (
-    navigationReady &&
-    preserveActivityDetail &&
-    state.tab === "activity"
-  ) {
-    rememberSidebarScroll();
-    const active = state.jobs.filter(job => ["queued", "running"].includes(job.status)).length;
-    activityCount.textContent = active ? String(active) : "";
-    renderActivity({ preserveDetail: true });
-    restoreSidebarScroll("activity");
-    const url = currentUrl();
-    history.replaceState(historyPayload(window.scrollY), "", url);
-    renderedUrl = url;
-  } else if (navigationReady) {
-    syncNavigation({ replace: true, preserveScroll: true });
-  } else {
-    render();
-  }
+  updateActivityCount();
+  if (!navigationReady || state.tab !== "activity") return;
+  rememberSidebarScroll();
+  renderActivity({ preserveDetail: preserveActivityDetail });
+  restoreSidebarScroll("activity");
+  const url = currentUrl();
+  history.replaceState(historyPayload(window.scrollY), "", url);
+  renderedUrl = url;
 }
 
 function connectEvents() {
