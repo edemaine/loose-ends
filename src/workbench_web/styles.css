@@ -361,9 +361,11 @@ button { color: inherit; }
 .viewer-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 12px; }
 .viewer-header h1 { margin: 4px 0; color: var(--heading); font: 760 clamp(25px, 4vw, 38px)/1.1 ui-serif, Georgia, serif; }
 .viewer-header p { max-width: 850px; margin: 0; overflow-wrap: anywhere; color: var(--muted); font: 10px/1.4 ui-monospace, Consolas, monospace; }
+.viewer-actions { display: flex; flex: none; gap: 6px; }
 .viewer-content { min-height: 70vh; }
 .viewer-content.markdown { padding: 24px clamp(16px, 4vw, 44px); }
-.viewer-frame { width: 100%; height: calc(100vh - 150px); border: 0; }
+.viewer-frame { width: 100%; height: calc(100vh - 150px); border: 0; background: #111; }
+.viewer-frame.pdf-inverted { filter: invert(1) hue-rotate(180deg); }
 .viewer-image { display: block; max-width: 100%; height: auto; margin: 0 auto; }
 .viewer-source { margin: 0; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.55 ui-monospace, "Cascadia Code", Consolas, monospace; }
 .json-source .json-key { color: var(--accent); font-weight: 700; }

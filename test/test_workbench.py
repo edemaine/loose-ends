@@ -259,6 +259,8 @@ class WorkbenchPlanningTests(unittest.TestCase):
         self.assertIn('if (filename.startsWith("triage")) detail = "triage"', app)
         self.assertIn('else if (filename.startsWith("literature")) detail = "literature"', app)
         self.assertIn('node("a", "artifact-action", "View")', app)
+        self.assertIn("link.href = artifactViewUrl(path)", app)
+        self.assertIn("open.href = artifactViewUrl(pdf)", app)
         self.assertIn('node("a", "artifact-action", "Raw")', app)
         self.assertIn("function taskScopeSummary(job)", app)
         self.assertIn("function problemRunPresentation(action, run)", app)
@@ -304,9 +306,20 @@ class WorkbenchPlanningTests(unittest.TestCase):
         viewer = (
             PROJECT_ROOT / "src" / "workbench_web" / "viewer.js"
         ).read_text(encoding="utf-8")
+        viewer_html = (
+            PROJECT_ROOT / "src" / "workbench_web" / "viewer.html"
+        ).read_text(encoding="utf-8")
+        styles = (
+            PROJECT_ROOT / "src" / "workbench_web" / "styles.css"
+        ).read_text(encoding="utf-8")
         self.assertIn("createMarkdownRenderer(window)", viewer)
         self.assertIn('query.set("raw", "1")', viewer)
         self.assertIn('extension === "pdf"', viewer)
+        self.assertIn("function setPdfDarkMode(frame, enabled)", viewer)
+        self.assertIn('frame.className = "viewer-frame pdf-inverted"', viewer)
+        self.assertIn('id="viewer-pdf-theme"', viewer_html)
+        self.assertIn(".viewer-frame.pdf-inverted", styles)
+        self.assertIn("invert(1) hue-rotate(180deg)", styles)
         self.assertIn("function appendHighlightedJson(pre, value)", viewer)
         self.assertIn('span.className = `json-${kind}`', viewer)
         self.assertIn("function filtersFromSearchParams", model)

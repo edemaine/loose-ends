@@ -5,6 +5,7 @@ const path = parameters.get("path") || "";
 const title = document.getElementById("viewer-title");
 const pathNode = document.getElementById("viewer-path");
 const raw = document.getElementById("viewer-raw");
+const pdfTheme = document.getElementById("viewer-pdf-theme");
 const content = document.getElementById("viewer-content");
 
 function fileUrl(rawMode = false) {
@@ -19,6 +20,15 @@ function showError(message) {
   value.className = "error-box";
   value.textContent = message;
   content.append(value);
+}
+
+function setPdfDarkMode(frame, enabled) {
+  frame.classList.toggle("pdf-inverted", enabled);
+  pdfTheme.textContent = `Dark PDF: ${enabled ? "on" : "off"}`;
+  pdfTheme.setAttribute("aria-pressed", String(enabled));
+  pdfTheme.title = enabled
+    ? "Show this PDF without color inversion"
+    : "Invert this PDF for dark viewing";
 }
 
 function appendHighlightedJson(pre, value) {
@@ -63,9 +73,14 @@ async function load() {
 
   if (extension === "pdf") {
     const frame = document.createElement("iframe");
-    frame.className = "viewer-frame";
+    frame.className = "viewer-frame pdf-inverted";
     frame.title = filename;
     frame.src = fileUrl();
+    pdfTheme.hidden = false;
+    setPdfDarkMode(frame, true);
+    pdfTheme.addEventListener("click", () => {
+      setPdfDarkMode(frame, !frame.classList.contains("pdf-inverted"));
+    });
     content.replaceChildren(frame);
     return;
   }

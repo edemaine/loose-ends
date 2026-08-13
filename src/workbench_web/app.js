@@ -1281,7 +1281,7 @@ function fileGrid(files) {
     const path = typeof value === "string" ? value : value.path;
     const label = typeof value === "string" ? path.split(/[\\/]/).pop() : value.label;
     const link = node("a", "file-link");
-    link.href = fileUrl(path);
+    link.href = artifactViewUrl(path);
     link.target = "_blank";
     link.rel = "noopener noreferrer";
     link.append(node("strong", "", label));
@@ -1437,7 +1437,7 @@ function renderManuscripts() {
   const pdf = draft.files.find(path => path.endsWith("main.pdf"));
   if (pdf) {
     const open = node("a", "button", "Open PDF");
-    open.href = fileUrl(pdf);
+    open.href = artifactViewUrl(pdf);
     open.target = "_blank";
     shell.append(actions);
     actions.append(open);
