@@ -223,6 +223,7 @@ button { color: inherit; }
 .run-toggle[aria-expanded="true"] .run-chevron { transform: rotate(90deg); }
 .run-heading-copy { min-width: 0; display: flex; flex-wrap: wrap; align-items: center; column-gap: 10px; row-gap: 2px; }
 .run-heading-copy > strong { min-width: min(280px, 100%); overflow: hidden; color: var(--heading); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.run-target-summary { width: 100%; overflow: hidden; color: var(--muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .run-heading-copy .run-timing { font-size: 10px; }
 .run-heading-copy .badge { padding: 2px 5px; font-size: 8px; }
 .run-actions { display: flex; flex: none; gap: 5px; }
@@ -230,6 +231,8 @@ button { color: inherit; }
 .run-actions .button { padding: 4px 7px; font-size: 10px; }
 .run-artifacts { display: grid; gap: 4px; padding: 0 10px 9px 36px; }
 .run-expanded { border-top: 1px solid var(--line); padding: 0 12px 8px; }
+.run-targets { display: flex; flex-wrap: wrap; gap: 4px; }
+.confirm-target-summary { margin: -2px 0 8px; color: var(--muted); font-size: 11px; }
 .detail-tabs { display: flex; flex-wrap: wrap; gap: 2px; margin-top: 18px; border-bottom: 1px solid var(--line); }
 .detail-tabs button { border: 0; border-bottom: 3px solid transparent; background: transparent; padding: 6px 9px; color: var(--muted); font-weight: 750; cursor: pointer; }
 .detail-tabs button.active { color: var(--heading); border-color: var(--accent); }

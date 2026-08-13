@@ -1390,6 +1390,39 @@ function jobRenderFingerprint(job) {
   });
 }
 
+function problemRunPresentation(action, run) {
+  const targets = (run.targets || []).filter(target => target.kind === "problem");
+  if (action !== "literature" || !targets.length) {
+    return { title: run.label, targets: [] };
+  }
+  const paperPaths = new Set(targets.map(target =>
+    normalizedPath(target.path).split("/").slice(0, -1).join("/"),
+  ));
+  if (paperPaths.size !== 1) return { title: run.label, targets: [] };
+  const paperPath = paperPaths.values().next().value;
+  const paper = state.catalog.papers.find(value => normalizedPath(value.path) === paperPath);
+  const review = state.catalog.reviews.find(value => normalizedPath(value.paperDirectory) === paperPath);
+  const fallback = targets[0].path.split(/[\\/]/).slice(-2, -1)[0] || run.label;
+  const paperTitle = reviewModel.paperTitleWithYear(
+    paper?.title || review?.paperTitle || fallback,
+    paper?.published || review?.paperPublished,
+  );
+  const labels = targets.map(target => target.label || target.path.split(/[\\/]/).pop());
+  const count = `${targets.length} selected problem${targets.length === 1 ? "" : "s"}`;
+  return {
+    title: paperTitle,
+    summary: `${count} · ${labels.join(" · ")}`,
+    targets: labels,
+  };
+}
+
+function appendRunTargetSummary(parent, presentation) {
+  if (!presentation.targets.length) return;
+  const summary = node("span", "run-target-summary", presentation.summary);
+  summary.title = presentation.summary;
+  parent.append(summary);
+}
+
 async function loadJob(id) {
   try {
     const job = await api(`/api/jobs/${id}`);
@@ -1435,6 +1468,7 @@ function renderJobDetail(job) {
   job.runs.forEach((run, index) => {
     const section = node("section", "run-card panel");
     const expanded = state.expandedRuns.has(run.id);
+    const presentation = problemRunPresentation(job.action, run);
     const heading = node("div", "run-summary");
     const toggle = button("", () => {
       if (state.expandedRuns.has(run.id)) state.expandedRuns.delete(run.id);
@@ -1442,10 +1476,14 @@ function renderJobDetail(job) {
       renderJobDetail(job);
     }, "run-toggle");
     toggle.setAttribute("aria-expanded", String(expanded));
-    toggle.setAttribute("aria-label", `${expanded ? "Hide" : "Show"} details for ${run.label}`);
+    toggle.setAttribute("aria-label", `${expanded ? "Hide" : "Show"} details for ${presentation.title}`);
     toggle.append(node("span", "run-chevron", "›"));
     const headingCopy = node("span", "run-heading-copy");
-    headingCopy.append(node("strong", "", `${index + 1}. ${run.label}`), runTiming(run));
+    const title = node("strong", "", `${index + 1}. ${presentation.title}`);
+    title.title = presentation.title;
+    headingCopy.append(title);
+    appendRunTargetSummary(headingCopy, presentation);
+    headingCopy.append(runTiming(run));
     toggle.append(headingCopy);
     const actions = node("div", "run-actions");
     if (["queued", "starting", "running", "cancel_requested"].includes(run.status)) {
@@ -1492,6 +1530,14 @@ function renderJobDetail(job) {
     }
     if (expanded) {
       const details = node("div", "run-expanded");
+      if (presentation.targets.length) {
+        const selected = node("div", "confirm-block");
+        selected.append(node("h3", "", "Selected problems"));
+        const targetList = node("div", "target-list run-targets");
+        presentation.targets.forEach(label => targetList.append(node("span", "target-chip", label)));
+        selected.append(targetList);
+        details.append(selected);
+      }
       const command = node("div", "confirm-block");
       command.append(node("h3", "", "Command"), node("pre", "command", run.argv.join(" ")));
       details.append(command);
@@ -1936,7 +1982,11 @@ function renderTaskConfirmation() {
   }
   plan.units.forEach((unit, index) => {
     const block = node("section", "confirm-block");
-    block.append(node("h3", "", `${index + 1}. ${unit.label}`));
+    const presentation = problemRunPresentation(plan.action, unit);
+    block.append(node("h3", "", `${index + 1}. ${presentation.title}`));
+    if (presentation.targets.length) {
+      block.append(node("div", "confirm-target-summary", presentation.summary));
+    }
     block.append(node("div", "eyebrow", "Command"));
     block.append(node("pre", "command", unit.command));
     const preview = unit.dryRun;
