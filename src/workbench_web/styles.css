@@ -120,7 +120,7 @@ button { color: inherit; }
   border-right: 1px solid var(--line);
   background: var(--rail-bg);
 }
-.sidebar.research-sidebar { display: flex; flex-direction: column; overflow: hidden; padding-bottom: 7px; }
+.sidebar.split-sidebar { display: flex; flex-direction: column; overflow: hidden; padding-bottom: 7px; }
 .main { min-width: 0; padding: 22px clamp(16px, 3vw, 40px) 72px; }
 .main-inner { max-width: 1180px; margin: 0 auto; }
 
@@ -134,7 +134,7 @@ button { color: inherit; }
 }
 .search:focus, input:focus, select:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring); outline: none; }
 .paper-list-controls { display: grid; gap: 6px; }
-.research-controls { flex: none; }
+.split-sidebar > .paper-list-controls { flex: none; }
 .paper-sort-control { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 7px; color: var(--muted); font-size: 9px; font-weight: 800; }
 .paper-sort-control select { min-width: 0; width: 100%; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); padding: 4px 5px; font-size: 10px; }
 .research-filters { border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
@@ -151,11 +151,11 @@ button { color: inherit; }
 .filter-toggle input { width: 11px; height: 11px; margin: 0; accent-color: var(--accent); }
 .filter-footer { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--muted); font-size: 9px; }
 .filter-reset { border: 0; background: transparent; color: var(--accent); padding: 2px; font-size: 9px; font-weight: 800; cursor: pointer; }
-.problem-scroll { flex: 1 1 auto; min-height: 100px; overflow: auto; margin-top: 4px; padding-right: 2px; scrollbar-gutter: stable; }
+.problem-scroll, .manuscript-scroll { flex: 1 1 auto; min-height: 100px; overflow: auto; margin-top: 4px; padding-right: 2px; scrollbar-gutter: stable; }
 .paper-heading { margin-top: 9px; color: var(--accent); letter-spacing: .04em; text-transform: none; }
-.attempt-switcher { flex: none; max-height: 155px; overflow: hidden; margin-top: 5px; padding-top: 2px; border-top: 1px solid var(--line); }
-.attempt-switcher > .sidebar-heading { margin-top: 3px; }
-.attempt-list { display: grid; gap: 2px; max-height: 125px; overflow: auto; padding-right: 2px; scrollbar-gutter: stable; }
+.attempt-switcher, .draft-switcher { flex: none; max-height: 155px; overflow: hidden; margin-top: 5px; padding-top: 2px; border-top: 1px solid var(--line); }
+.attempt-switcher > .sidebar-heading, .draft-switcher > .sidebar-heading { margin-top: 3px; }
+.attempt-list, .draft-list { display: grid; gap: 2px; max-height: 125px; overflow: auto; padding-right: 2px; scrollbar-gutter: stable; }
 .sidebar-heading { margin: 10px 4px 4px; color: var(--muted); font-size: 9px; font-weight: 850; letter-spacing: .13em; text-transform: uppercase; }
 .sidebar-heading.queue-summary { line-height: 1.35; letter-spacing: 0; text-transform: none; }
 .side-list { display: grid; gap: 2px; }
@@ -303,8 +303,6 @@ button { color: inherit; }
 .artifact-action { border: 0; border-radius: 5px; background: transparent; color: var(--accent); padding: 3px 5px; font-size: 9px; font-weight: 800; text-decoration: none; cursor: pointer; }
 .artifact-action:hover, .artifact-action:focus-visible { background: var(--accent-soft); outline: none; }
 .artifact-action.route { border: 1px solid var(--accent); }
-.draft-card { color: var(--ink); font: inherit; text-align: left; cursor: pointer; }
-.draft-card.active { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-ring); }
 .source-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 10px; margin-bottom: 18px; }
 .source-panel { box-shadow: none; }
 .source-list { display: grid; gap: 7px; margin: 0; padding-left: 18px; }
@@ -382,7 +380,7 @@ button { color: inherit; }
   .tabs button { flex: 1; padding: 0 8px; }
   .workspace { display: block; }
   .sidebar { position: static; height: auto; max-height: 43vh; padding: 8px 7px 14px; border-right: 0; border-bottom: 1px solid var(--line); }
-  .sidebar.research-sidebar { display: flex; height: 43vh; padding-bottom: 5px; }
+  .sidebar.split-sidebar { display: flex; height: 43vh; padding-bottom: 5px; }
   .research-filter-grid { max-height: 25vh; }
   .main { padding: 18px 12px 90px; }
   .summary-grid, .form-grid { grid-template-columns: 1fr; }

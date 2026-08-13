@@ -16,11 +16,14 @@ const state = {
   researchFilters: reviewModel.createDefaultFilters(),
   researchFiltersOpen: false,
   revealSidebarSelection: false,
+  revealSidebarSecondarySelection: false,
   sidebarScroll: { research: 0, papers: 0, manuscripts: 0, activity: 0 },
+  sidebarSecondaryScroll: { research: 0, manuscripts: 0 },
   paperSort: "alphabetical",
   selectedPaper: "",
   selectedManuscript: "",
   selectedDraft: "",
+  manuscriptDraftSelections: new Map(),
   selectedJob: "",
   detailTab: "attempt",
   detailCache: new Map(),
@@ -193,6 +196,7 @@ function syncNavigation({ replace = false, preserveScroll = false } = {}) {
 function applyLocation({ scrollY } = {}) {
   const parameters = new URLSearchParams(location.search);
   state.tab = tabFromPath(location.pathname);
+  state.revealSidebarSecondarySelection = false;
   state.search = parameters.get("q") || "";
   state.paperSort = reviewModel.normalizePaperSort(parameters.get("sort"));
   if (state.tab === "research") {
@@ -204,6 +208,7 @@ function applyLocation({ scrollY } = {}) {
     state.selectedReview = requested?.itemKey || "";
     state.selectedProblem = requested?.problemKey || "";
     state.revealSidebarSelection = Boolean(requested);
+    state.revealSidebarSecondarySelection = Boolean(requested);
     state.detailTab = parameters.get("detail") || "attempt";
   } else if (state.tab === "papers") {
     const requested = parameters.get("paper");
@@ -223,6 +228,10 @@ function applyLocation({ scrollY } = {}) {
     state.selectedDraft = manuscript?.drafts.find(
       draft => draft.name === requestedDraft || draft.urlKey === requestedDraft,
     )?.key || manuscript?.latest.key || "";
+    if (manuscript && state.selectedDraft) {
+      state.manuscriptDraftSelections.set(manuscript.key, state.selectedDraft);
+      state.revealSidebarSecondarySelection = true;
+    }
   } else {
     state.selectedJob = parameters.get("job") || "";
     state.revealSidebarSelection = state.jobs.some(
@@ -699,7 +708,7 @@ function render() {
     renderSelectionBar();
     return;
   }
-  sidebar.classList.toggle("research-sidebar", state.tab === "research");
+  sidebar.classList.toggle("split-sidebar", ["research", "manuscripts"].includes(state.tab));
   if (state.tab === "research") renderResearch();
   else if (state.tab === "papers") renderPapers();
   else if (state.tab === "manuscripts") renderManuscripts();
@@ -789,23 +798,22 @@ document.addEventListener("pointerdown", event => {
 function rememberSidebarScroll() {
   const renderedTab = sidebar.dataset.tab;
   if (!(renderedTab in state.sidebarScroll)) return;
-  const scrollingElement = renderedTab === "research"
-    ? sidebar.querySelector(".problem-scroll")
-    : sidebar;
+  const primarySelector = {
+    research: ".problem-scroll",
+    manuscripts: ".manuscript-scroll",
+  }[renderedTab];
+  const scrollingElement = primarySelector ? sidebar.querySelector(primarySelector) : sidebar;
   if (scrollingElement) state.sidebarScroll[renderedTab] = scrollingElement.scrollTop;
+  const secondarySelector = {
+    research: ".attempt-list",
+    manuscripts: ".draft-list",
+  }[renderedTab];
+  const secondary = secondarySelector ? sidebar.querySelector(secondarySelector) : null;
+  if (secondary) state.sidebarSecondaryScroll[renderedTab] = secondary.scrollTop;
 }
 
-function restoreSidebarScroll(tab) {
-  sidebar.dataset.tab = tab;
-  if (tab === "research") sidebar.scrollTop = 0;
-  const scrollingElement = tab === "research"
-    ? sidebar.querySelector(".problem-scroll")
-    : sidebar;
-  if (!scrollingElement) return;
-  scrollingElement.scrollTop = state.sidebarScroll[tab] || 0;
-  if (!state.revealSidebarSelection) return;
-  state.revealSidebarSelection = false;
-  const selected = scrollingElement.querySelector(".side-card.active");
+function revealCentered(scrollingElement) {
+  const selected = scrollingElement?.querySelector(".side-card.active");
   if (!selected) return;
   const viewport = scrollingElement.getBoundingClientRect();
   const card = selected.getBoundingClientRect();
@@ -813,7 +821,32 @@ function restoreSidebarScroll(tab) {
     (card.top + card.bottom - viewport.top - viewport.bottom) / 2;
   const maximum = scrollingElement.scrollHeight - scrollingElement.clientHeight;
   scrollingElement.scrollTop = Math.max(0, Math.min(maximum, centered));
+}
+
+function restoreSidebarScroll(tab) {
+  sidebar.dataset.tab = tab;
+  const primarySelector = {
+    research: ".problem-scroll",
+    manuscripts: ".manuscript-scroll",
+  }[tab];
+  if (primarySelector) sidebar.scrollTop = 0;
+  const scrollingElement = primarySelector ? sidebar.querySelector(primarySelector) : sidebar;
+  if (!scrollingElement) return;
+  scrollingElement.scrollTop = state.sidebarScroll[tab] || 0;
+  if (state.revealSidebarSelection) revealCentered(scrollingElement);
+  state.revealSidebarSelection = false;
   state.sidebarScroll[tab] = scrollingElement.scrollTop;
+
+  const secondarySelector = {
+    research: ".attempt-list",
+    manuscripts: ".draft-list",
+  }[tab];
+  const secondary = secondarySelector ? sidebar.querySelector(secondarySelector) : null;
+  if (!secondary) return;
+  secondary.scrollTop = state.sidebarSecondaryScroll[tab] || 0;
+  if (state.revealSidebarSecondarySelection) revealCentered(secondary);
+  state.revealSidebarSecondarySelection = false;
+  state.sidebarSecondaryScroll[tab] = secondary.scrollTop;
 }
 
 function sidebarSearch(placeholder) {
@@ -1334,6 +1367,10 @@ function renderManuscripts() {
   });
   const query = state.search.trim().toLowerCase();
   const manuscripts = state.catalog.manuscripts.filter(value => !query || `${value.name} ${value.latest.title}`.toLowerCase().includes(query));
+  if (!state.selectedManuscript || !manuscripts.some(value => value.key === state.selectedManuscript)) {
+    state.selectedManuscript = manuscripts[0]?.key || "";
+  }
+  const manuscriptScroll = node("div", "manuscript-scroll");
   const list = node("div", "side-list");
   manuscripts.forEach(value => appendSideCard(list, {
     title: value.latest.title,
@@ -1341,21 +1378,49 @@ function renderManuscripts() {
     active: state.selectedManuscript === value.key,
     onClick: () => {
       state.selectedManuscript = value.key;
-      state.selectedDraft = value.latest.key;
+      const rememberedDraft = state.manuscriptDraftSelections.get(value.key);
+      state.selectedDraft = value.drafts.some(draft => draft.key === rememberedDraft)
+        ? rememberedDraft
+        : value.latest.key;
+      state.revealSidebarSecondarySelection = true;
       syncNavigation();
     },
   }));
-  sidebar.append(node("div", "sidebar-heading", `${manuscripts.length} manuscripts`), list);
-  if (!state.selectedManuscript || !manuscripts.some(value => value.key === state.selectedManuscript)) state.selectedManuscript = manuscripts[0]?.key || "";
+  manuscriptScroll.append(node("div", "sidebar-heading", `${manuscripts.length} manuscripts`), list);
+  sidebar.append(manuscriptScroll);
   const manuscript = state.catalog.manuscripts.find(value => value.key === state.selectedManuscript);
   if (!manuscript) {
     main.replaceChildren(document.getElementById("empty-template").content.cloneNode(true));
     return;
   }
   if (!manuscript.drafts.some(value => value.key === state.selectedDraft)) {
-    state.selectedDraft = manuscript.latest.key;
+    const rememberedDraft = state.manuscriptDraftSelections.get(manuscript.key);
+    state.selectedDraft = manuscript.drafts.some(value => value.key === rememberedDraft)
+      ? rememberedDraft
+      : manuscript.latest.key;
   }
+  state.manuscriptDraftSelections.set(manuscript.key, state.selectedDraft);
   const draft = manuscript.drafts.find(value => value.key === state.selectedDraft) || manuscript.latest;
+
+  const draftSwitcher = node("div", "draft-switcher");
+  draftSwitcher.append(node("div", "sidebar-heading", `Drafts · ${manuscript.drafts.length}`));
+  const draftList = node("div", "draft-list");
+  [...manuscript.drafts].reverse().forEach(value => {
+    const latest = value.key === manuscript.latest.key;
+    appendSideCard(draftList, {
+      title: value.name,
+      meta: `${latest ? "Latest · " : ""}${humanize(value.status)} · ${humanize(value.verdict)}`,
+      active: value.key === draft.key,
+      onClick: () => {
+        state.selectedDraft = value.key;
+        state.manuscriptDraftSelections.set(manuscript.key, value.key);
+        syncNavigation();
+      },
+    });
+  });
+  draftSwitcher.append(draftList);
+  sidebar.append(draftSwitcher);
+
   const shell = node("div", "main-inner");
   const hero = node("section", "hero");
   const copy = node("div");
@@ -1429,23 +1494,8 @@ function renderManuscripts() {
     shell.append(sourcesHeading, sourceGrid);
   }
   const heading = node("div", "section-title");
-  heading.append(node("h2", "", "Latest draft files"));
+  heading.append(node("h2", "", "Draft files"));
   shell.append(heading, fileGrid(draft.files));
-  const historyHeading = node("div", "section-title");
-  historyHeading.append(node("h2", "", "Draft history"));
-  const history = node("div", "card-grid");
-  [...manuscript.drafts].reverse().forEach(value => {
-    const card = node("button", `entity-card draft-card${value.key === draft.key ? " active" : ""}`);
-    card.type = "button";
-    card.append(node("strong", "", value.name));
-    card.append(node("small", "", `${humanize(value.status)} · ${humanize(value.verdict)}`));
-    card.addEventListener("click", () => {
-      state.selectedDraft = value.key;
-      syncNavigation();
-    });
-    history.append(card);
-  });
-  shell.append(historyHeading, history);
   main.replaceChildren(shell);
 }
 
@@ -1858,6 +1908,8 @@ function openOutput(path) {
   } else {
     state.selectedManuscript = route.manuscript.key;
     state.selectedDraft = route.draft.key;
+    state.manuscriptDraftSelections.set(route.manuscript.key, route.draft.key);
+    state.revealSidebarSecondarySelection = true;
   }
   setTab(route.tab);
   return true;
