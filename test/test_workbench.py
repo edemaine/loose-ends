@@ -464,6 +464,14 @@ class WorkbenchPlanningTests(unittest.TestCase):
                         ],
                     },
                 )
+                (draft / "main.tex").write_text(
+                    "\\begin{abstract}\n"
+                    "A \\emph{concise} abstract with \\textbf{strong} "
+                    "$O(n^2)$ work by Gourv\\`es, Erd\\H{o}s, "
+                    "Fran\\c{c}ois, and a na\\\"ive coauthor. % hidden\n"
+                    "\\end{abstract}\n",
+                    encoding="utf-8",
+                )
             papers = [{"path": str(paper), "title": "Test Paper"}]
             progress = []
 
@@ -477,6 +485,11 @@ class WorkbenchPlanningTests(unittest.TestCase):
             )
 
             self.assertEqual(len(records), 1)
+            self.assertEqual(
+                records[0]["latest"]["abstract"],
+                "A *concise* abstract with **strong** $O(n^2)$ work by "
+                "Gourvès, Erdős, François, and a naïve coauthor.",
+            )
             self.assertEqual(progress, [(0, 2), (1, 2), (2, 2)])
 
     def test_event_hub_exposes_bootstrap_sequence(self):

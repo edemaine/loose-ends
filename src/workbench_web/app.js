@@ -1341,6 +1341,7 @@ function renderManuscripts() {
     shell.append(actions);
     actions.append(open);
   } else shell.append(actions);
+  if (draft.abstract) shell.append(summaryPanel("Abstract", draft.abstract));
   if (draft.summary) shell.append(summaryPanel("Paper critic", draft.summary));
   const sources = draft.sources || { papers: [], problems: [] };
   if (sources.papers.length || sources.problems.length) {
