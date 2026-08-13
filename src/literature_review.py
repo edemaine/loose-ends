@@ -66,18 +66,71 @@ class LiteratureOutcome:
 def render_prompt(
     template: str,
     *,
-    problem_ids: Sequence[str],
+    problems: Sequence[common.ProblemRef],
     context_directory: Path,
 ) -> str:
-    return (
+    registry = "\n\n".join(
+        (
+            f"- ID: {problem.id}\n"
+            f"  Title: {problem.title}"
+        )
+        for problem in problems
+    )
+    rendered = (
         template.replace(
             "{{PROBLEM_IDS}}",
-            "\n".join(f"- {problem_id}" for problem_id in problem_ids),
+            "\n".join(f"- {problem.id}" for problem in problems),
         ).replace(
             "{{CONTEXT_DIRECTORY}}",
             codex_cli.path_for_codex(context_directory),
         )
     )
+    return (
+        rendered.rstrip()
+        + "\n\n"
+        + "## Authoritative driver problem registry\n\n"
+        + "The driver read this registry directly from the installed analysis. "
+        + "It is authoritative even if local tools cannot open `inputs/`. Do not "
+        + "reconstruct or renumber problems from a public copy of the paper.\n\n"
+        + registry
+        + "\n\n"
+        + "For each structured literature entry, copy its `Title` exactly "
+        + "into `problem_title`. If any required staged input cannot be read, "
+        + "return root status `partial`, explain the failure, and do not guess; "
+        + "the driver will preserve but not install that run.\n"
+    )
+
+
+def write_literature_schema(
+    schema_path: Path,
+    workspace: Path,
+    problems: Sequence[common.ProblemRef],
+) -> Path:
+    """Constrain a literature response to the exact requested problem registry."""
+    schema = common.read_json(schema_path, description="literature schema")
+    try:
+        literature_schema = schema["properties"]["literature"]
+        entry_schema = literature_schema["items"]
+        entry_properties = entry_schema["properties"]
+        required = entry_schema["required"]
+    except (KeyError, TypeError) as exc:
+        raise common.CodexError(
+            "literature schema cannot be specialized by problem registry"
+        ) from exc
+    problem_titles = [problem.title for problem in problems]
+    problem_ids = [problem.id for problem in problems]
+    literature_schema["minItems"] = len(problems)
+    literature_schema["maxItems"] = len(problems)
+    entry_properties["problem_id"]["enum"] = problem_ids
+    entry_properties["problem_title"] = {
+        "type": "string",
+        "enum": problem_titles,
+    }
+    if "problem_title" not in required:
+        required.append("problem_title")
+    output = workspace / "literature-output-schema.json"
+    common.write_json(output, schema)
+    return output
 
 
 def render_literature_markdown(entry: dict) -> str:
@@ -206,6 +259,10 @@ def validate_literature_result(
     result = common.read_json(result_path, description="literature response")
     if result.get("status") not in {"complete", "partial"}:
         raise common.CodexError("literature response has invalid run status")
+    if result["status"] == "partial":
+        raise common.CodexError(
+            "literature agent reported a partial run; no reports were installed"
+        )
     root_warnings = _validate_string_list(
         result.get("warnings"), "root warnings"
     )
@@ -213,6 +270,7 @@ def validate_literature_result(
     if not isinstance(entries, list):
         raise common.CodexError("literature response has no literature array")
     requested = {problem.id for problem in problems}
+    required_titles = {problem.id: problem.title for problem in problems}
     by_id: dict[str, dict] = {}
     synthesized: list[str] = []
     status_repairs: list[str] = []
@@ -229,6 +287,14 @@ def validate_literature_result(
             raise common.CodexError(
                 f"literature response duplicates problem {problem_id}"
             )
+        problem_title = entry.get("problem_title")
+        if problem_title != required_titles[problem_id]:
+            raise common.CodexError(
+                f"literature response has wrong problem title for "
+                f"{problem_id}: {problem_title!r}; expected "
+                f"{required_titles[problem_id]!r}"
+            )
+        del entry["problem_title"]
         resolution = entry.get("resolution_status")
         confidence = entry.get("confidence")
         if resolution not in RESOLUTION_STATUSES:
@@ -456,8 +522,11 @@ def _write_work_record(
     common.write_json(
         workspace / WORK_RECORD_FILE,
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "problem_ids": [problem.id for problem in problems],
+            "problem_titles": {
+                problem.id: problem.title for problem in problems
+            },
             "input_digests": input_digests,
             "config_digest": config_digest,
             "codex_version": codex_version,
@@ -488,7 +557,7 @@ def recover_paper_literature(
     )
     for workspace in candidates:
         record = common.load_json(workspace / WORK_RECORD_FILE)
-        if record is None or record.get("schema_version") != 1:
+        if record is None or record.get("schema_version") != 2:
             continue
         if not (
             record.get("problem_ids")
@@ -600,14 +669,19 @@ def search_paper_literature(
         )
         prompt = render_prompt(
             prompt_template,
-            problem_ids=[problem.id for problem in problems],
+            problems=problems,
             context_directory=context,
+        )
+        attempt_schema_path = write_literature_schema(
+            schema_path,
+            workspace,
+            problems,
         )
         result_path = codex_cli.run_structured_codex(
             codex=codex,
             workspace=workspace,
             prompt=prompt,
-            schema_path=schema_path,
+            schema_path=attempt_schema_path,
             options=options,
             web_search=web_search,
             launch_interval=launch_interval,

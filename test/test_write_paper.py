@@ -85,6 +85,8 @@ def make_ready_attempt(paper: Path, problem_id: str, attempt_number: int = 1) ->
             "sources": [],
             "search_queries": [],
             "warnings": [],
+            "run_status": "complete",
+            "run_warnings": [],
         },
     )
     common.write_json(

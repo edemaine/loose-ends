@@ -602,7 +602,10 @@ def literature_is_current(
         and manifest.get("config_digest") != config_digest
     ):
         return False
-    return result.get("problem_id") == problem.id
+    return (
+        result.get("problem_id") == problem.id
+        and result.get("run_status") == "complete"
+    )
 
 
 def literature_snapshot_digest(problem: ProblemRef) -> str | None:

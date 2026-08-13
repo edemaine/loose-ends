@@ -848,6 +848,7 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 entries = [
                     {
                         "problem_id": "OP-001",
+                        "problem_title": problems[0].title,
                         "resolution_status": "resolved",
                         "confidence": "high",
                         "status_summary": "A later theorem resolves OP-001.",
@@ -860,6 +861,7 @@ class OpenProblemPipelineTests(unittest.TestCase):
                     },
                     {
                         "problem_id": "OP-002",
+                        "problem_title": problems[1].title,
                         "resolution_status": "partially_resolved",
                         "confidence": "high",
                         "status_summary": "A special case is known.",
@@ -878,6 +880,20 @@ class OpenProblemPipelineTests(unittest.TestCase):
                         "literature": entries,
                         "warnings": [],
                     },
+                )
+                constrained = common.read_json(kwargs["schema_path"])
+                literature_schema = constrained["properties"]["literature"]
+                self.assertEqual(literature_schema["minItems"], 2)
+                self.assertEqual(literature_schema["maxItems"], 2)
+                self.assertEqual(
+                    literature_schema["items"]["properties"][
+                        "problem_title"
+                    ]["enum"],
+                    [problem.title for problem in problems],
+                )
+                self.assertIn(
+                    "- ID: OP-001\n  Title: Test conjecture",
+                    kwargs["prompt"],
                 )
                 write_run_files(workspace)
                 return workspace / "agent-result.json"
@@ -941,6 +957,13 @@ class OpenProblemPipelineTests(unittest.TestCase):
             )
             self.assertFalse(common.triage_is_current(problems[0]))
             self.assertTrue(common.literature_is_current(problems[0]))
+            partial = common.literature_result(problems[0])
+            partial["run_status"] = "partial"
+            common.write_json(
+                problems[0].directory / common.LITERATURE_RESULT,
+                partial,
+            )
+            self.assertFalse(common.literature_is_current(problems[0]))
 
     def test_literature_recovers_matching_completed_workspace(self):
         with TemporaryDirectory() as temporary:
@@ -981,6 +1004,7 @@ class OpenProblemPipelineTests(unittest.TestCase):
             )
             entry = {
                 "problem_id": problem.id,
+                "problem_title": problem.title,
                 "resolution_status": "no_resolution_found",
                 "confidence": "medium",
                 "status_summary": "No exact resolution was located.",
@@ -1053,8 +1077,14 @@ class OpenProblemPipelineTests(unittest.TestCase):
             workspace.mkdir()
 
             def entry(problem_id, confidence, role):
+                problem = next(
+                    problem
+                    for problem in problems
+                    if problem.id == problem_id
+                )
                 return {
                     "problem_id": problem_id,
+                    "problem_title": problem.title,
                     "resolution_status": "resolved",
                     "confidence": confidence,
                     "status_summary": "A later source resolves the problem.",
@@ -1133,6 +1163,53 @@ class OpenProblemPipelineTests(unittest.TestCase):
             self.assertTrue(
                 installed.startswith("> **Driver status correction:**")
             )
+
+    def test_literature_rejects_partial_run_and_wrong_problem_title(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = make_analyzed_paper(root)
+            problem = common.discover_problem_refs(
+                [paper], problem_ids={"OP-001"}
+            )[0]
+            workspace = root / "literature-workspace"
+            workspace.mkdir()
+            response = workspace / "agent-result.json"
+            common.write_json(
+                response,
+                {"status": "partial", "literature": [], "warnings": []},
+            )
+            with self.assertRaisesRegex(
+                common.CodexError,
+                "partial run; no reports were installed",
+            ):
+                literature_review.validate_literature_result(
+                    response,
+                    workspace,
+                    [problem],
+                )
+
+            common.write_json(
+                response,
+                {
+                    "status": "complete",
+                    "literature": [
+                        {
+                            "problem_id": problem.id,
+                            "problem_title": "Wrong problem",
+                        }
+                    ],
+                    "warnings": [],
+                },
+            )
+            with self.assertRaisesRegex(
+                common.CodexError,
+                "wrong problem title for OP-001",
+            ):
+                literature_review.validate_literature_result(
+                    response,
+                    workspace,
+                    [problem],
+                )
 
     def test_literature_attempted_selector_bypasses_triage(self):
         with TemporaryDirectory() as temporary:
