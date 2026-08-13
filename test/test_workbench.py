@@ -111,6 +111,9 @@ class WorkbenchPlanningTests(unittest.TestCase):
             def _send_asset(self, name):
                 self.sent_asset = name
 
+            def _send_file(self, value, *, raw=False):
+                self.sent_file = (value, raw)
+
             def send_error_json(self, status, message):
                 self.error = (status, message)
 
@@ -124,6 +127,16 @@ class WorkbenchPlanningTests(unittest.TestCase):
         handler.path = "/review_tokens.css"
         handler.do_GET()
         self.assertEqual(handler.sent_asset, "review_tokens.css")
+
+        handler = object.__new__(RecordingHandler)
+        handler.path = "/view?path=result.md"
+        handler.do_GET()
+        self.assertEqual(handler.sent_asset, "viewer.html")
+
+        handler = object.__new__(RecordingHandler)
+        handler.path = "/api/file?path=result.md&raw=1"
+        handler.do_GET()
+        self.assertEqual(handler.sent_file, ("result.md", True))
 
     def test_workbench_assets_use_stable_history_routes_and_shared_model(self):
         app = (PROJECT_ROOT / "src" / "workbench_web" / "app.js").read_text(
@@ -207,7 +220,14 @@ class WorkbenchPlanningTests(unittest.TestCase):
         self.assertIn('detail: critiqueFiles.has(filename) ? "critique" : "attempt"', app)
         self.assertIn('if (filename.startsWith("triage")) detail = "triage"', app)
         self.assertIn('else if (filename.startsWith("literature")) detail = "literature"', app)
-        self.assertIn('node("a", "artifact-file", "Open file")', app)
+        self.assertIn('node("a", "artifact-action", "View")', app)
+        self.assertIn('node("a", "artifact-action", "Raw")', app)
+        self.assertIn("function taskScopeSummary(job)", app)
+        self.assertIn("function taskSidebarMeta(job)", app)
+        self.assertIn('`${done}/${total} done`', app)
+        self.assertIn('pieces.push(`${active} running`)', app)
+        self.assertIn("expandedRuns: new Set()", app)
+        self.assertIn('node("div", "run-expanded")', app)
         self.assertIn("preserveActivityDetail", app)
         self.assertIn("refreshVisibleRunLogs", app)
         self.assertIn("Running dry-run previews", app)
@@ -215,9 +235,17 @@ class WorkbenchPlanningTests(unittest.TestCase):
         self.assertIn("function formatDuration", app)
         self.assertIn("function runConsoleStatus", app)
         self.assertIn("tags: taskStatusBadge(job.status)", app)
-        self.assertIn('meta: `Created ${formatTime(job.created_at)}`', app)
+        self.assertIn("meta: taskSidebarMeta(job)", app)
         self.assertIn("row.append(node(\"span\", \"run-timing-separator\", \"·\"), taskStatusBadge(run.status))", app)
         self.assertNotIn('Exit ${run.exit_code ?? "—"}', app)
+        viewer = (
+            PROJECT_ROOT / "src" / "workbench_web" / "viewer.js"
+        ).read_text(encoding="utf-8")
+        self.assertIn("createMarkdownRenderer(window)", viewer)
+        self.assertIn('query.set("raw", "1")', viewer)
+        self.assertIn('extension === "pdf"', viewer)
+        self.assertIn("function appendHighlightedJson(pre, value)", viewer)
+        self.assertIn('span.className = `json-${kind}`', viewer)
         self.assertIn("function filtersFromSearchParams", model)
         self.assertIn("function identityToSearchParams", model)
         self.assertIn("function queueSummary", model)
@@ -591,6 +619,37 @@ class WorkbenchPlanningTests(unittest.TestCase):
 
 
 class WorkbenchStoreTests(unittest.TestCase):
+    def test_job_counts_only_latest_retry_for_each_part(self):
+        with TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            store = WorkbenchStore(state / "workbench.sqlite3", state)
+            job = store.create_job(
+                {"action": "solve"},
+                fake_plan([sys.executable, "-c", "pass"]),
+            )
+            original = job["runs"][0]
+            store.update_run(
+                original["id"],
+                status="failed",
+                finished_at=time.time(),
+                error="test failure",
+            )
+            retry = store.retry_run(original["id"])
+
+            listed = store.list_jobs()[0]
+            self.assertEqual(retry["status"], "queued")
+            self.assertEqual(
+                listed["counts"],
+                {
+                    "job_id": job["id"],
+                    "queued": 1,
+                    "active": 0,
+                    "succeeded": 0,
+                    "unsuccessful": 0,
+                    "total": 1,
+                },
+            )
+
     def test_worker_persists_console_and_success(self):
         with TemporaryDirectory() as temporary:
             state = Path(temporary)

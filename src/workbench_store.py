@@ -227,13 +227,21 @@ class WorkbenchStore:
                 row["job_id"]: dict(row)
                 for row in connection.execute(
                     """
+                    WITH latest AS (
+                        SELECT job_id, status,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY job_id, unit_index
+                                ORDER BY created_at DESC
+                            ) AS position
+                        FROM runs
+                    )
                     SELECT job_id,
                         SUM(status = 'queued') AS queued,
                         SUM(status IN ('starting', 'running', 'cancel_requested')) AS active,
                         SUM(status = 'succeeded') AS succeeded,
                         SUM(status IN ('partial', 'failed', 'canceled', 'interrupted')) AS unsuccessful,
                         COUNT(*) AS total
-                    FROM runs GROUP BY job_id
+                    FROM latest WHERE position = 1 GROUP BY job_id
                     """
                 )
             }

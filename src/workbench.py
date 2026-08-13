@@ -1152,7 +1152,13 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
             elif path == "/api/events":
                 self._send_events(parsed.query)
             elif path == "/api/file":
-                self._send_file(parse_qs(parsed.query).get("path", [""])[0])
+                values = parse_qs(parsed.query)
+                self._send_file(
+                    values.get("path", [""])[0],
+                    raw=values.get("raw", [""])[0] == "1",
+                )
+            elif path == "/view":
+                self._send_asset("viewer.html")
             elif path in {
                 "/", "/index.html", "/research", "/papers",
                 "/manuscripts", "/activity",
@@ -1160,7 +1166,7 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                 self._send_asset("index.html")
             elif path in {
                 "/app.js", "/review_model.js", "/review_tokens.css",
-                "/styles.css",
+                "/styles.css", "/viewer.js",
             }:
                 self._send_asset(path.removeprefix("/"))
             else:
@@ -1218,7 +1224,7 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
         self._headers(200, content_type, len(data))
         self.wfile.write(data)
 
-    def _send_file(self, value: str) -> None:
+    def _send_file(self, value: str, *, raw: bool = False) -> None:
         if not value:
             self.send_error_json(400, "path is required")
             return
@@ -1227,7 +1233,10 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
             self.send_error_json(404, "file is unavailable")
             return
         content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-        if content_type in {"text/html", "image/svg+xml"}:
+        if raw:
+            content_type = "text/plain; charset=utf-8"
+            disposition = "inline"
+        elif content_type in {"text/html", "image/svg+xml"}:
             content_type = "application/octet-stream"
             disposition = "attachment"
         else:

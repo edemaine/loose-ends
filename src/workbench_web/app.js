@@ -27,6 +27,7 @@ const state = {
   jobDetails: new Map(),
   runLogs: new Map(),
   runLogLoads: new Map(),
+  expandedRuns: new Set(),
   dialog: null,
 };
 
@@ -325,6 +326,14 @@ function runConsoleStatus(run) {
 
 function fileUrl(path) {
   return `/api/file?${new URLSearchParams({ path })}`;
+}
+
+function rawFileUrl(path) {
+  return `/api/file?${new URLSearchParams({ path, raw: "1" })}`;
+}
+
+function artifactViewUrl(path) {
+  return `/view?${new URLSearchParams({ path })}`;
 }
 
 async function refreshSession() {
@@ -1272,8 +1281,8 @@ function renderActivity({ preserveDetail = false } = {}) {
   const jobs = state.jobs.filter(job => !query || `${job.title} ${job.action} ${job.status}`.toLowerCase().includes(query));
   const list = node("div", "side-list");
   jobs.forEach(job => appendSideCard(list, {
-    title: job.title,
-    meta: `Created ${formatTime(job.created_at)}`,
+    title: taskSidebarTitle(job),
+    meta: taskSidebarMeta(job),
     tags: taskStatusBadge(job.status),
     active: state.selectedJob === job.id,
     onClick: () => {
@@ -1350,65 +1359,93 @@ function renderJobDetail(job) {
   shell.dataset.jobDetail = job.id;
   const hero = node("section", "hero");
   const copy = node("div");
-  copy.append(node("div", "eyebrow", `${humanize(job.action)} task`));
-  copy.append(node("h1", "", job.title));
-  copy.append(node("p", "", `Created ${formatTime(job.created_at)}`));
+  copy.append(node("div", "eyebrow", "Managed task"));
+  copy.append(node("h1", "", taskActionTitle(job.action)));
+  const scope = node("details", "task-scope");
+  scope.append(node("summary", "", taskScopeSummary(job)));
+  const targets = job.plan?.targets || job.request?.targets || [];
+  if (targets.length) {
+    const targetList = node("div", "target-list task-targets");
+    targets.forEach(value => targetList.append(node("span", "target-chip", value.label || value.path)));
+    scope.append(targetList);
+  }
+  copy.append(scope, node("p", "", `Created ${formatTime(job.created_at)}`));
   const badges = node("div", "badges");
   badges.append(taskStatusBadge(job.status));
   copy.append(badges);
   hero.append(copy);
   shell.append(hero);
   job.runs.forEach((run, index) => {
-    const section = node("section", "section panel");
-    const heading = node("div", "section-title");
-    const title = node("h2", "", `${index + 1}. ${run.label}`);
-    heading.append(title);
-    section.append(heading);
-    section.append(runTiming(run));
-    const actions = node("div", "actions");
+    const section = node("section", "run-card panel");
+    const expanded = state.expandedRuns.has(run.id);
+    const heading = node("div", "run-summary");
+    const toggle = button("", () => {
+      if (state.expandedRuns.has(run.id)) state.expandedRuns.delete(run.id);
+      else state.expandedRuns.add(run.id);
+      renderJobDetail(job);
+    }, "run-toggle");
+    toggle.setAttribute("aria-expanded", String(expanded));
+    toggle.setAttribute("aria-label", `${expanded ? "Hide" : "Show"} details for ${run.label}`);
+    toggle.append(node("span", "run-chevron", "›"));
+    const headingCopy = node("span", "run-heading-copy");
+    headingCopy.append(node("strong", "", `${index + 1}. ${run.label}`), runTiming(run));
+    toggle.append(headingCopy);
+    const actions = node("div", "run-actions");
     if (["queued", "starting", "running", "cancel_requested"].includes(run.status)) {
       actions.append(button("Cancel", () => mutateRun(run.id, "cancel"), "button danger"));
     }
     if (["failed", "canceled", "interrupted"].includes(run.status) && !(run.outputs || []).length) {
       actions.append(button("Retry", () => mutateRun(run.id, "retry"), "button primary"));
     }
-    section.append(actions);
+    heading.append(toggle, actions);
+    section.append(heading);
     if (run.error) section.append(node("div", "error-box", run.error));
     if (run.outputs?.length) {
-      const output = node("div", "confirm-block");
-      output.append(node("h3", "", `Installed output · ${run.outputs.length}`));
+      const output = node("div", "run-artifacts");
       run.outputs.forEach(path => {
         const row = node("div", "artifact-row");
         const route = outputRoute(path);
-        const primary = node(route ? "button" : "a", "artifact-main");
+        const artifactCopy = node("div", "artifact-copy");
+        artifactCopy.title = path;
+        artifactCopy.append(
+          node("strong", "", path.split(/[\\/]/).pop()),
+          node("small", "", path),
+        );
+        const artifactActions = node("div", "artifact-actions");
         if (route) {
-          primary.type = "button";
-          primary.addEventListener("click", () => openOutput(path));
-        } else {
-          primary.href = fileUrl(path);
-          primary.target = "_blank";
-          primary.rel = "noopener noreferrer";
+          artifactActions.append(button(
+            outputRouteLabel(route),
+            () => openOutput(path),
+            "artifact-action route",
+          ));
         }
-        primary.append(node("strong", "", path.split(/[\\/]/).pop()));
-        primary.append(node("small", "", path));
-        const exact = node("a", "artifact-file", "Open file");
-        exact.href = fileUrl(path);
-        exact.target = "_blank";
-        exact.rel = "noopener noreferrer";
-        row.append(primary, exact);
+        const view = node("a", "artifact-action", "View");
+        view.href = artifactViewUrl(path);
+        view.target = "_blank";
+        view.rel = "noopener noreferrer";
+        const raw = node("a", "artifact-action", "Raw");
+        raw.href = rawFileUrl(path);
+        raw.target = "_blank";
+        raw.rel = "noopener noreferrer";
+        artifactActions.append(view, raw);
+        row.append(artifactCopy, artifactActions);
         output.append(row);
       });
       section.append(output);
     }
-    const command = node("div", "confirm-block");
-    command.append(node("h3", "", "Command"), node("pre", "command", run.argv.join(" ")));
-    section.append(command);
-    const cachedLog = state.runLogs.get(run.id);
-    const log = node("pre", "console", runLogText(cachedLog));
-    log.dataset.runLog = run.id;
-    const consoleShell = node("div", "console-shell");
-    consoleShell.append(log, runConsoleStatus(run));
-    section.append(consoleShell);
+    if (expanded) {
+      const details = node("div", "run-expanded");
+      const command = node("div", "confirm-block");
+      command.append(node("h3", "", "Command"), node("pre", "command", run.argv.join(" ")));
+      details.append(command);
+      const cachedLog = state.runLogs.get(run.id);
+      const log = node("pre", "console", runLogText(cachedLog));
+      log.dataset.runLog = run.id;
+      const consoleShell = node("div", "console-shell");
+      consoleShell.append(log, runConsoleStatus(run));
+      details.append(consoleShell);
+      section.append(details);
+    }
     shell.append(section);
   });
   main.replaceChildren(shell);
@@ -1528,6 +1565,15 @@ function outputRoute(path) {
   return null;
 }
 
+function outputRouteLabel(route) {
+  if (route.tab === "papers") return "Go to paper";
+  if (route.tab === "manuscripts") return "Go to manuscript";
+  if (route.review?.attemptDirectory && route.detail !== "literature" && route.detail !== "triage") {
+    return "Go to attempt";
+  }
+  return "Go to problem";
+}
+
 function openOutput(path) {
   const route = outputRoute(path);
   if (!route) return false;
@@ -1549,6 +1595,83 @@ const actionNames = {
   analyze: "Analyze papers", triage: "Triage problems", literature: "Search literature",
   solve: "Solve problems", review: "Review attempts", write: "Write paper", revise: "Revise manuscript",
 };
+
+const taskActionTitles = {
+  analyze: "Paper analysis",
+  triage: "Problem triage",
+  literature: "Literature review",
+  solve: "Problem solving",
+  review: "Solution review",
+  write: "Paper writing",
+  revise: "Manuscript revision",
+};
+
+function taskActionTitle(action) {
+  return taskActionTitles[action] || humanize(action);
+}
+
+function taskTargets(job) {
+  return job.plan?.targets || job.request?.targets || [];
+}
+
+function targetCountLabel(targets) {
+  const nouns = {
+    paper: ["paper", "papers"],
+    problem: ["problem", "problems"],
+    attempt: ["attempt", "attempts"],
+    draft: ["draft", "drafts"],
+  };
+  const kinds = new Set(targets.map(value => value.kind));
+  if (kinds.size === 1 && nouns[kinds.values().next().value]) {
+    const [singular, plural] = nouns[kinds.values().next().value];
+    return `${targets.length} ${targets.length === 1 ? singular : plural}`;
+  }
+  return `${targets.length} selection${targets.length === 1 ? "" : "s"}`;
+}
+
+function targetPaperCount(targets) {
+  const papers = new Set();
+  targets.forEach(value => {
+    const parts = normalizedPath(value.path).split("/");
+    if (value.kind === "paper") papers.add(parts.join("/"));
+    else if (value.kind === "problem") papers.add(parts.slice(0, -1).join("/"));
+    else if (value.kind === "attempt") papers.add(parts.slice(0, -2).join("/"));
+  });
+  return papers.size;
+}
+
+function taskScopeSummary(job) {
+  const targets = taskTargets(job);
+  if (!targets.length) return job.title;
+  const pieces = [targetCountLabel(targets)];
+  const papers = targetPaperCount(targets);
+  if (papers) pieces.push(`${papers} paper${papers === 1 ? "" : "s"}`);
+  const units = job.plan?.units?.length || new Set(job.runs.map(run => run.unit_index)).size;
+  if (units) pieces.push(`${units} run${units === 1 ? "" : "s"}`);
+  return pieces.join(" · ");
+}
+
+function taskSidebarTitle(job) {
+  const targets = taskTargets(job);
+  const scope = targets.length === 1
+    ? targets[0].label || targetCountLabel(targets)
+    : targets.length ? targetCountLabel(targets) : job.title;
+  return `${humanize(job.action)} · ${scope}`;
+}
+
+function taskSidebarMeta(job) {
+  if (job.status !== "running") return `Created ${formatTime(job.created_at)}`;
+  const counts = job.counts || {};
+  const total = Number(counts.total) || 0;
+  const done = (Number(counts.succeeded) || 0) + (Number(counts.unsuccessful) || 0);
+  const active = Number(counts.active) || 0;
+  const queued = Number(counts.queued) || 0;
+  if (!total) return `Created ${formatTime(job.created_at)}`;
+  const pieces = [`${done}/${total} done`];
+  if (active) pieces.push(`${active} running`);
+  if (queued) pieces.push(`${queued} queued`);
+  return pieces.join(" · ");
+}
 
 function field(name, label, { type = "text", value = "", help = "", full = false, options = [] } = {}) {
   const wrapper = node("label", `field${full ? " full" : ""}`);
