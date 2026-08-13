@@ -64,18 +64,26 @@ def make_paper(root: Path) -> Path:
     return paper
 
 
-def fake_plan(argv: list[str], *, resources: list[str] | None = None) -> dict:
+def fake_plan(
+    argv: list[str],
+    *,
+    resources: list[str] | None = None,
+    unit_count: int = 1,
+    priority_level: int = 0,
+) -> dict:
     return {
         "action": "solve",
         "title": "Fake task",
+        "priorityLevel": priority_level,
         "units": [
             {
-                "label": "Fake run",
+                "label": f"Fake run {index + 1}",
                 "argv": argv,
                 "cwd": str(PROJECT_ROOT),
                 "targets": [],
                 "resources": resources or [],
             }
+            for index in range(unit_count)
         ],
     }
 
@@ -240,6 +248,7 @@ class WorkbenchPlanningTests(unittest.TestCase):
         self.assertIn('node("div", "run-expanded")', app)
         self.assertIn("preserveActivityDetail", app)
         self.assertIn("function updateActivityCount()", app)
+        self.assertIn("!schedulerControl.contains(event.target)", app)
         self.assertIn('if (!navigationReady || state.tab !== "activity") return', app)
         refresh_jobs = app[app.index("async function refreshJobs"):app.index("function connectEvents")]
         self.assertNotIn("syncNavigation", refresh_jobs)
@@ -248,7 +257,14 @@ class WorkbenchPlanningTests(unittest.TestCase):
         self.assertIn("preview?.output", app)
         self.assertIn("function formatDuration", app)
         self.assertIn("function runConsoleStatus", app)
-        self.assertIn("tags: taskStatusBadge(job.status)", app)
+        self.assertIn("tags: taskBadges(job)", app)
+        self.assertIn('taskIsPaused(job) ? badge("Paused", "paused")', app)
+        self.assertIn('values.append(badge(`Share ${priorityMultiplier(job.priority_level)}`', app)
+        self.assertIn('job.scheduling_paused ? "Resume" : "Pause"', app)
+        self.assertIn(
+            'node("small", "", "Proportion of workers assigned to this task")',
+            app,
+        )
         self.assertIn("meta: taskSidebarMeta(job)", app)
         self.assertIn("row.append(node(\"span\", \"run-timing-separator\", \"·\"), taskStatusBadge(run.status))", app)
         self.assertNotIn('Exit ${run.exit_code ?? "—"}', app)
@@ -285,6 +301,7 @@ class WorkbenchPlanningTests(unittest.TestCase):
         self.assertNotIn(".research-controls > .search", styles)
         self.assertIn(".console-cursor", styles)
         self.assertIn("prefers-reduced-motion: reduce", styles)
+        self.assertIn(".badge.paused", styles)
 
     def test_network_bind_and_request_host_security(self):
         args = build_parser().parse_args(
@@ -527,6 +544,7 @@ class WorkbenchPlanningTests(unittest.TestCase):
                         "reviewPrompt": "Check the boundary case.",
                         "maxRounds": 3,
                         "review": "all",
+                        "priorityLevel": 2,
                     },
                 },
                 project_root=PROJECT_ROOT,
@@ -536,12 +554,35 @@ class WorkbenchPlanningTests(unittest.TestCase):
             )
 
             self.assertEqual(plan["catalogVersion"], 7)
+            self.assertEqual(plan["priorityLevel"], 2)
             self.assertEqual(len(plan["units"]), 1)
             argv = plan["units"][0]["argv"]
             self.assertEqual(argv[argv.index("--max-rounds") + 1], "3")
             self.assertEqual(argv[argv.index("--review") + 1], "all")
             self.assertIn("Try small cases.", argv)
             self.assertIn("Check the boundary case.", argv)
+
+    def test_planner_rejects_priority_outside_displayed_range(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = make_paper(root)
+            with self.assertRaisesRegex(PlanError, "priorityLevel"):
+                build_plan(
+                    {
+                        "action": "solve",
+                        "targets": [
+                            {
+                                "kind": "problem",
+                                "path": str(paper / "OP-001"),
+                            }
+                        ],
+                        "options": {"priorityLevel": 4},
+                    },
+                    project_root=PROJECT_ROOT,
+                    allowed_roots=[root],
+                    manuscripts=root / "manuscripts",
+                    catalog_version=1,
+                )
 
     def test_triage_groups_problem_targets_by_paper(self):
         with TemporaryDirectory() as temporary:
@@ -637,6 +678,69 @@ class WorkbenchPlanningTests(unittest.TestCase):
 
 
 class WorkbenchStoreTests(unittest.TestCase):
+    def test_weighted_scheduler_shares_starts_proportionally(self):
+        with TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            store = WorkbenchStore(state / "workbench.sqlite3", state)
+            regular = store.create_job(
+                {"action": "solve"},
+                fake_plan([sys.executable, "-c", "pass"], unit_count=12),
+            )
+            double = store.create_job(
+                {"action": "solve"},
+                fake_plan(
+                    [sys.executable, "-c", "pass"],
+                    unit_count=12,
+                    priority_level=1,
+                ),
+            )
+            starts = {regular["id"]: 0, double["id"]: 0}
+
+            for _ in range(12):
+                run = store.claim_next_run(set())
+                self.assertIsNotNone(run)
+                starts[run["job_id"]] += 1
+                store.update_run(
+                    run["id"], status="succeeded", finished_at=time.time()
+                )
+
+            self.assertEqual(starts[regular["id"]], 4)
+            self.assertEqual(starts[double["id"]], 8)
+
+    def test_task_pause_preserves_active_runs_and_blocks_new_starts(self):
+        with TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            store = WorkbenchStore(state / "workbench.sqlite3", state)
+            job = store.create_job(
+                {"action": "solve"},
+                fake_plan([sys.executable, "-c", "pass"], unit_count=2),
+            )
+            active = store.claim_next_run(set())
+            store.update_run(active["id"], status="running", heartbeat_at=time.time())
+            saved = store.update_job_scheduling(job["id"], paused=True)
+
+            self.assertTrue(saved["scheduling_paused"])
+            self.assertEqual(store.get_run(active["id"])["status"], "running")
+            self.assertIsNone(store.claim_next_run(set()))
+
+            store.update_job_scheduling(job["id"], paused=False)
+            self.assertIsNotNone(store.claim_next_run(set()))
+
+    def test_scheduler_settings_persist(self):
+        with TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            database = state / "workbench.sqlite3"
+            store = WorkbenchStore(database, state)
+            settings = store.update_scheduler_settings(
+                worker_limit=7, queue_paused=True
+            )
+            self.assertEqual(settings["workerLimit"], 7)
+            self.assertTrue(settings["queuePaused"])
+
+            reopened = WorkbenchStore(database, state)
+            self.assertEqual(reopened.scheduler_settings()["workerLimit"], 7)
+            self.assertTrue(reopened.scheduler_settings()["queuePaused"])
+
     def test_job_counts_only_latest_retry_for_each_part(self):
         with TemporaryDirectory() as temporary:
             state = Path(temporary)
@@ -883,11 +987,15 @@ class WorkbenchWatchTests(unittest.TestCase):
         store.revision.return_value = 0.0
         store.mark_stale_runs.return_value = []
         store.active_count.return_value = 0
-        store.queued_runs.return_value = []
+        store.scheduler_settings.return_value = {
+            "workerLimit": 1,
+            "queuePaused": False,
+        }
+        store.active_resources.return_value = set()
+        store.claim_next_run.return_value = None
         scheduler = workbench.Scheduler(
             store,
             Mock(),
-            max_workers=1,
             state_directory=PROJECT_ROOT / ".loose-ends",
         )
         try:
@@ -932,7 +1040,6 @@ class WorkbenchWatchTests(unittest.TestCase):
             scheduler = workbench.Scheduler(
                 store,
                 hub,
-                max_workers=1,
                 state_directory=state,
             )
             observer = Observer()
@@ -962,7 +1069,6 @@ class WorkbenchWatchTests(unittest.TestCase):
     def test_scheduler_launches_worker_without_a_console_window(self):
         scheduler = object.__new__(workbench.Scheduler)
         scheduler.store = Mock()
-        scheduler.store.mark_starting.return_value = True
         scheduler.hub = Mock()
         scheduler.state_directory = PROJECT_ROOT / ".loose-ends"
         scheduler.last_launch = 0.0

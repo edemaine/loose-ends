@@ -25,6 +25,8 @@
   --code-ink: #eee4f1;
   --amber: #96620d;
   --amber-soft: #fbefcd;
+  --orange: #a54c16;
+  --orange-soft: #f9e5d5;
   --red: #b53a2f;
   --red-soft: #f8e5df;
   --blue-soft: #dcecf4;
@@ -71,6 +73,8 @@
     --code-ink: #eee4f1;
     --amber: #f0c46f;
     --amber-soft: #40341c;
+    --orange: #f2a064;
+    --orange-soft: #472b1d;
     --red: #ff9587;
     --red-soft: #472520;
     --blue-soft: #213c48;

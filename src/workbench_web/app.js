@@ -8,6 +8,7 @@ const state = {
   eventSequence: 0,
   catalog: { papers: [], reviews: [], manuscripts: [], counts: {} },
   jobs: [],
+  settings: { workerLimit: 2, queuePaused: false },
   tab: "research",
   search: "",
   selectedReview: "",
@@ -37,6 +38,12 @@ const notice = document.getElementById("notice");
 const selectionBar = document.getElementById("selection-bar");
 const activityCount = document.getElementById("activity-count");
 const connection = document.getElementById("connection");
+const schedulerControl = document.getElementById("scheduler-control");
+const workerSummary = document.getElementById("worker-summary");
+const workerLimit = document.getElementById("worker-limit");
+const workerStatus = document.getElementById("worker-status");
+const workerApply = document.getElementById("worker-apply");
+const queueToggle = document.getElementById("queue-toggle");
 const dialog = document.getElementById("task-dialog");
 const dialogBody = document.getElementById("dialog-body");
 const dialogFooter = document.getElementById("dialog-footer");
@@ -59,6 +66,15 @@ let navigationReady = false;
 let eventConnection = null;
 let eventReconnectNeedsRefresh = false;
 let sessionRefresh = null;
+const priorityLevels = [
+  [-3, "⅛×"],
+  [-2, "¼×"],
+  [-1, "½×"],
+  [0, "1×"],
+  [1, "2×"],
+  [2, "4×"],
+  [3, "8×"],
+];
 
 if ("scrollRestoration" in history) history.scrollRestoration = "manual";
 
@@ -264,6 +280,17 @@ function formatDuration(startedAt, finishedAt) {
   return pieces.join(" ");
 }
 
+function priorityMultiplier(level) {
+  return priorityLevels.find(([value]) => value === Number(level))?.[1] || "1×";
+}
+
+function priorityOptions(defaultLabel = true) {
+  return priorityLevels.map(([value, label]) => [
+    String(value),
+    `${label}${defaultLabel && value === 0 ? " (default)" : ""}`,
+  ]);
+}
+
 function taskStatus(status) {
   const values = {
     queued: ["Queued", "queued", false],
@@ -283,6 +310,21 @@ function taskStatus(status) {
 function taskStatusBadge(status) {
   const value = taskStatus(status);
   return node("span", `badge ${value.tone}`, value.label);
+}
+
+function taskIsPaused(job) {
+  return job.scheduling_paused && ![
+    "succeeded", "partial", "failed", "canceled", "interrupted",
+  ].includes(job.status);
+}
+
+function taskBadges(job) {
+  const values = node("span", "task-badges");
+  values.append(taskIsPaused(job) ? badge("Paused", "paused") : taskStatusBadge(job.status));
+  if (!["succeeded", "partial", "failed", "canceled", "interrupted"].includes(job.status)) {
+    values.append(badge(`Share ${priorityMultiplier(job.priority_level)}`, "neutral"));
+  }
+  return values;
 }
 
 function runTiming(run) {
@@ -345,6 +387,7 @@ async function refreshSession() {
     state.eventSequence = value.eventSequence || 0;
     state.catalog = value.catalog;
     state.jobs = value.jobs;
+    state.settings = value.settings || state.settings;
     state.detailCache.clear();
     if (navigationReady) {
       syncNavigation({ replace: true, preserveScroll: true });
@@ -664,7 +707,48 @@ function render() {
 function updateActivityCount() {
   const active = state.jobs.filter(job => ["queued", "running"].includes(job.status)).length;
   activityCount.textContent = active ? String(active) : "";
+  renderSchedulerControl();
 }
+
+function schedulerCounts() {
+  return state.jobs.reduce((counts, job) => {
+    counts.active += Number(job.counts?.active) || 0;
+    counts.queued += Number(job.counts?.queued) || 0;
+    return counts;
+  }, { active: 0, queued: 0 });
+}
+
+function renderSchedulerControl() {
+  const limit = Number(state.settings.workerLimit) || 2;
+  const counts = schedulerCounts();
+  workerSummary.textContent = `${state.settings.queuePaused ? "Queue paused" : "Workers"} ${counts.active}/${limit}`;
+  if (document.activeElement !== workerLimit) workerLimit.value = String(limit);
+  queueToggle.textContent = state.settings.queuePaused ? "Resume queue" : "Pause queue";
+  if (state.settings.queuePaused) {
+    workerStatus.textContent = `${counts.active} active; ${counts.queued} waiting. Active runs continue.`;
+  } else if (counts.active > limit) {
+    workerStatus.textContent = `Draining ${counts.active} active runs to the new limit of ${limit}.`;
+  } else {
+    workerStatus.textContent = `${counts.active} active; ${counts.queued} waiting.`;
+  }
+}
+
+async function updateScheduler(changes) {
+  try {
+    state.settings = await api("/api/scheduler", { method: "POST", body: changes });
+    renderSchedulerControl();
+  } catch (error) {
+    showNotice(error.message, true);
+  }
+}
+
+workerApply.addEventListener("click", () => updateScheduler({ workerLimit: Number(workerLimit.value) }));
+queueToggle.addEventListener("click", () => updateScheduler({ queuePaused: !state.settings.queuePaused }));
+document.addEventListener("pointerdown", event => {
+  if (schedulerControl.open && !schedulerControl.contains(event.target)) {
+    schedulerControl.open = false;
+  }
+});
 
 function rememberSidebarScroll() {
   const renderedTab = sidebar.dataset.tab;
@@ -1340,7 +1424,7 @@ function renderActivity({ preserveDetail = false } = {}) {
   jobs.forEach(job => appendSideCard(list, {
     title: taskSidebarTitle(job),
     meta: taskSidebarMeta(job),
-    tags: taskStatusBadge(job.status),
+    tags: taskBadges(job),
     active: state.selectedJob === job.id,
     onClick: () => {
       state.selectedJob = job.id;
@@ -1373,6 +1457,8 @@ function jobRenderFingerprint(job) {
     action: job.action,
     title: job.title,
     status: job.status,
+    priority_level: job.priority_level,
+    scheduling_paused: job.scheduling_paused,
     created_at: job.created_at,
     finished_at: job.finished_at,
     runs: job.runs.map(run => ({
@@ -1461,9 +1547,10 @@ function renderJobDetail(job) {
   }
   copy.append(scope, node("p", "", `Created ${formatTime(job.created_at)}`));
   const badges = node("div", "badges");
-  badges.append(taskStatusBadge(job.status));
+  badges.append(taskIsPaused(job) ? badge("Paused", "paused") : taskStatusBadge(job.status));
+  badges.append(badge(`Share ${priorityMultiplier(job.priority_level)}`, "neutral"));
   copy.append(badges);
-  hero.append(copy);
+  hero.append(copy, jobSchedulingControls(job));
   shell.append(hero);
   job.runs.forEach((run, index) => {
     const section = node("section", "run-card panel");
@@ -1621,6 +1708,51 @@ async function mutateRun(runId, action) {
   }
 }
 
+function jobSchedulingControls(job) {
+  const controls = node("div", "job-scheduling");
+  const row = node("div", "job-scheduling-row");
+  const label = node("label");
+  label.append(node("span", "", "Scheduling share"));
+  const select = node("select");
+  priorityOptions(false).forEach(([value, text]) => {
+    const option = node("option", "", text);
+    option.value = value;
+    select.append(option);
+  });
+  select.value = String(job.priority_level ?? 0);
+  select.disabled = ["succeeded", "partial", "failed", "canceled", "interrupted"].includes(job.status);
+  select.addEventListener("change", () => mutateJobScheduling(job.id, {
+    priorityLevel: Number(select.value),
+  }));
+  label.append(select);
+  row.append(label);
+  if (!select.disabled) {
+    row.append(button(
+      job.scheduling_paused ? "Resume" : "Pause",
+      () => mutateJobScheduling(job.id, { paused: !job.scheduling_paused }),
+      "button",
+    ));
+  }
+  controls.append(row, node("small", "", "Proportion of workers assigned to this task"));
+  return controls;
+}
+
+async function mutateJobScheduling(jobId, changes) {
+  try {
+    const job = await api(`/api/jobs/${jobId}/scheduling`, {
+      method: "POST",
+      body: changes,
+    });
+    state.jobDetails.set(jobId, job);
+    await refreshJobs({ preserveActivityDetail: true });
+    if (state.tab === "activity" && state.selectedJob === jobId) renderJobDetail(job);
+  } catch (error) {
+    showNotice(error.message, true);
+    const job = state.jobDetails.get(jobId);
+    if (job && state.tab === "activity" && state.selectedJob === jobId) renderJobDetail(job);
+  }
+}
+
 function normalizedPath(path) {
   return path.replaceAll("\\", "/").replace(/\/$/, "").toLowerCase();
 }
@@ -1763,6 +1895,11 @@ function taskSidebarTitle(job) {
 }
 
 function taskSidebarMeta(job) {
+  if (taskIsPaused(job)) {
+    const active = Number(job.counts?.active) || 0;
+    const queued = Number(job.counts?.queued) || 0;
+    return `${active ? `${active} finishing · ` : ""}${queued} waiting · ${priorityMultiplier(job.priority_level)}`;
+  }
   if (job.status !== "running") return `Created ${formatTime(job.created_at)}`;
   const counts = job.counts || {};
   const total = Number(counts.total) || 0;
@@ -1889,6 +2026,12 @@ function renderTaskConfiguration(errorMessage = "") {
     grid.append(field("title", "Override title direction", { value: options.title || "" }));
     grid.append(checkbox("refreshResults", "Refresh result selection", "Promote stored selectors to paper scope and use latest attempts.", options.refreshResults));
   }
+  grid.append(field("priorityLevel", "Scheduling share", {
+    type: "select",
+    value: options.priorityLevel ?? "0",
+    options: priorityOptions(),
+    help: "Relative share of worker starts when this task competes with other eligible tasks.",
+  }));
 
   const advanced = node("details", "advanced");
   advanced.append(node("summary", "", "Model and web-search settings"));
@@ -1968,7 +2111,7 @@ function renderTaskConfirmation() {
   dialogEyebrow.textContent = "Step 2 of 2 · Confirm";
   dialogTitle.textContent = plan.title;
   dialogBody.replaceChildren();
-  const intro = node("p", "", `This will queue ${plan.units.length} managed run${plan.units.length === 1 ? "" : "s"}. Nothing has started yet.`);
+  const intro = node("p", "", `This will queue ${plan.units.length} managed run${plan.units.length === 1 ? "" : "s"} with a ${priorityMultiplier(plan.priorityLevel)} scheduling share. Nothing has started yet.`);
   dialogBody.append(intro);
   if (plan.warnings.length) plan.warnings.forEach(value => dialogBody.append(node("div", "warning", value)));
   if (Object.keys(plan.prompts).length) {
@@ -2091,6 +2234,10 @@ function connectEvents() {
         refreshJobs({ preserveActivityDetail: true })
           .catch(error => showNotice(error.message, true));
       }
+      if (value.type === "settings.changed") {
+        state.settings = { ...state.settings, ...value };
+        renderSchedulerControl();
+      }
     } catch (error) {
       console.warn("Invalid live event", error);
     }
@@ -2104,6 +2251,7 @@ async function start() {
     state.eventSequence = value.eventSequence || 0;
     state.catalog = value.catalog;
     state.jobs = value.jobs;
+    state.settings = value.settings || state.settings;
     navigationReady = true;
     applyLocation({
       scrollY: history.state?.looseEndsWorkbench ? history.state.scrollY : 0,

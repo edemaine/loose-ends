@@ -768,7 +768,12 @@ interrupted and runs that installed no output can be retried. A run that
 installed output before a later phase failed is marked partial so the next
 action can operate on that output without accidentally duplicating it.
 
-Use `--max-workers N` to control concurrent CLI invocations, `--no-open` to
+Use the worker control in the top bar to change concurrent CLI invocations or
+pause new starts. Task scheduling shares and per-task pause/resume controls are
+available when configuring or viewing a task. Shares are displayed as ⅛×
+through 8× (with 1× as the default), and eligible tasks receive worker starts
+in roughly those proportions. Pausing or lowering the limit never stops an
+already active run. Use `--no-open` to
 avoid opening a browser, `--port` to select another local port, or
 `--state-dir` to place the private task database and logs elsewhere. The
 default binding is local-only. To use the workbench from another machine on a

@@ -35,6 +35,8 @@ MAX_PROMPT_LENGTH = 16_000
 DRY_RUN_TIMEOUT_SECONDS = 30
 MAX_DRY_RUN_OUTPUT = 100_000
 MAX_DRY_RUN_WORKERS = 4
+MIN_PRIORITY_LEVEL = -3
+MAX_PRIORITY_LEVEL = 3
 
 
 class PlanError(codex_cli.CodexError):
@@ -246,6 +248,22 @@ def _positive_integer(options: dict, name: str, default: int) -> int:
     return number
 
 
+def _priority_level(options: dict) -> int:
+    value = options.get("priorityLevel", 0)
+    if isinstance(value, bool):
+        raise PlanError("priorityLevel must be an integer")
+    try:
+        level = int(value)
+    except (TypeError, ValueError) as exc:
+        raise PlanError("priorityLevel must be an integer") from exc
+    if not MIN_PRIORITY_LEVEL <= level <= MAX_PRIORITY_LEVEL:
+        raise PlanError(
+            f"priorityLevel must be between {MIN_PRIORITY_LEVEL} and "
+            f"{MAX_PRIORITY_LEVEL}"
+        )
+    return level
+
+
 def _positive_number(options: dict, name: str, default: float) -> float:
     value = options.get(name, default)
     try:
@@ -369,6 +387,7 @@ def build_plan(
     script = project_root / "src"
     units: list[dict] = []
     warnings: list[str] = []
+    priority_level = _priority_level(options)
 
     if action == "analyze":
         _require(targets, {"paper"}, action)
@@ -577,6 +596,7 @@ def build_plan(
         "action": action,
         "title": f"{action.title()}: {labels}",
         "catalogVersion": catalog_version,
+        "priorityLevel": priority_level,
         "targets": targets,
         "options": options,
         "prompts": prompts,

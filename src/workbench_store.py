@@ -20,6 +20,10 @@ TERMINAL_STATUSES = {
     "canceled",
     "interrupted",
 }
+MIN_PRIORITY_LEVEL = -3
+MAX_PRIORITY_LEVEL = 3
+DEFAULT_WORKER_LIMIT = 2
+MAX_WORKER_LIMIT = 64
 
 
 class WorkbenchStore:
@@ -60,6 +64,10 @@ class WorkbenchStore:
                     status TEXT NOT NULL,
                     request_json TEXT NOT NULL,
                     plan_json TEXT NOT NULL,
+                    priority_level INTEGER NOT NULL DEFAULT 0,
+                    scheduling_paused INTEGER NOT NULL DEFAULT 0,
+                    scheduler_credit REAL NOT NULL DEFAULT 0,
+                    last_dispatched_at REAL,
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL,
                     finished_at REAL
@@ -94,6 +102,13 @@ class WorkbenchStore:
                     ON runs(job_id, unit_index, created_at);
                 CREATE INDEX IF NOT EXISTS runs_status_index
                     ON runs(status, created_at);
+
+                CREATE TABLE IF NOT EXISTS scheduler_settings (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    worker_limit INTEGER NOT NULL,
+                    queue_paused INTEGER NOT NULL DEFAULT 0,
+                    updated_at REAL NOT NULL
+                );
                 """
             )
             columns = {
@@ -104,6 +119,29 @@ class WorkbenchStore:
                 connection.execute(
                     "ALTER TABLE runs ADD COLUMN resources_json TEXT NOT NULL DEFAULT '[]'"
                 )
+            job_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(jobs)")
+            }
+            job_migrations = {
+                "priority_level": "INTEGER NOT NULL DEFAULT 0",
+                "scheduling_paused": "INTEGER NOT NULL DEFAULT 0",
+                "scheduler_credit": "REAL NOT NULL DEFAULT 0",
+                "last_dispatched_at": "REAL",
+            }
+            for name, declaration in job_migrations.items():
+                if name not in job_columns:
+                    connection.execute(
+                        f"ALTER TABLE jobs ADD COLUMN {name} {declaration}"
+                    )
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO scheduler_settings (
+                    id, worker_limit, queue_paused, updated_at
+                ) VALUES (1, ?, 0, ?)
+                """,
+                (DEFAULT_WORKER_LIMIT, time.time()),
+            )
 
     @staticmethod
     def _decode(row: sqlite3.Row, fields: Iterable[str]) -> dict:
@@ -112,6 +150,8 @@ class WorkbenchStore:
             value[field.removesuffix("_json")] = json.loads(value.pop(field))
         if "cancel_requested" in value:
             value["cancel_requested"] = bool(value["cancel_requested"])
+        if "scheduling_paused" in value:
+            value["scheduling_paused"] = bool(value["scheduling_paused"])
         return value
 
     def create_job(self, request: dict, plan: dict) -> dict:
@@ -122,8 +162,8 @@ class WorkbenchStore:
                 """
                 INSERT INTO jobs (
                     id, action, title, status, request_json, plan_json,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?)
+                    priority_level, created_at, updated_at
+                ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?)
                 """,
                 (
                     job_id,
@@ -131,6 +171,7 @@ class WorkbenchStore:
                     plan["title"],
                     json.dumps(request, ensure_ascii=False),
                     json.dumps(plan, ensure_ascii=False),
+                    plan.get("priorityLevel", 0),
                     now,
                     now,
                 ),
@@ -252,28 +293,179 @@ class WorkbenchStore:
             jobs.append(job)
         return jobs
 
-    def queued_runs(self, *, limit: int = 100) -> list[dict]:
+    def scheduler_settings(self) -> dict:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM scheduler_settings WHERE id = 1"
+            ).fetchone()
+        return {
+            "workerLimit": int(row["worker_limit"]),
+            "queuePaused": bool(row["queue_paused"]),
+            "updatedAt": float(row["updated_at"]),
+        }
+
+    def update_scheduler_settings(
+        self,
+        *,
+        worker_limit: object | None = None,
+        queue_paused: object | None = None,
+    ) -> dict:
+        assignments: list[str] = []
+        parameters: list[object] = []
+        if worker_limit is not None:
+            if isinstance(worker_limit, bool):
+                raise ValueError("worker limit must be an integer")
+            try:
+                limit = int(worker_limit)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("worker limit must be an integer") from exc
+            if not 1 <= limit <= MAX_WORKER_LIMIT:
+                raise ValueError(
+                    f"worker limit must be between 1 and {MAX_WORKER_LIMIT}"
+                )
+            assignments.append("worker_limit = ?")
+            parameters.append(limit)
+        if queue_paused is not None:
+            if not isinstance(queue_paused, bool):
+                raise ValueError("queuePaused must be true or false")
+            assignments.append("queue_paused = ?")
+            parameters.append(int(queue_paused))
+        if not assignments:
+            raise ValueError("no scheduler setting was supplied")
+        assignments.append("updated_at = ?")
+        parameters.append(time.time())
+        with self.connect() as connection:
+            connection.execute(
+                f"UPDATE scheduler_settings SET {', '.join(assignments)} WHERE id = 1",
+                parameters,
+            )
+        return self.scheduler_settings()
+
+    def update_job_scheduling(
+        self,
+        job_id: str,
+        *,
+        priority_level: object | None = None,
+        paused: object | None = None,
+    ) -> dict:
+        assignments: list[str] = []
+        parameters: list[object] = []
+        if priority_level is not None:
+            if isinstance(priority_level, bool):
+                raise ValueError("priority level must be an integer")
+            try:
+                level = int(priority_level)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("priority level must be an integer") from exc
+            if not MIN_PRIORITY_LEVEL <= level <= MAX_PRIORITY_LEVEL:
+                raise ValueError(
+                    f"priority level must be between {MIN_PRIORITY_LEVEL} and "
+                    f"{MAX_PRIORITY_LEVEL}"
+                )
+            assignments.extend(("priority_level = ?", "scheduler_credit = 0"))
+            parameters.append(level)
+        if paused is not None:
+            if not isinstance(paused, bool):
+                raise ValueError("paused must be true or false")
+            assignments.append("scheduling_paused = ?")
+            parameters.append(int(paused))
+        if not assignments:
+            raise ValueError("no task scheduling change was supplied")
+        now = time.time()
+        assignments.append("updated_at = ?")
+        parameters.extend((now, job_id))
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT status FROM jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(job_id)
+            if paused is not None and row["status"] in TERMINAL_STATUSES:
+                raise ValueError("finished tasks cannot be paused or resumed")
+            connection.execute(
+                f"UPDATE jobs SET {', '.join(assignments)} WHERE id = ?",
+                parameters,
+            )
+        return self.get_job(job_id)
+
+    def claim_next_run(self, active_resources: set[str]) -> dict | None:
+        """Claim one resource-compatible run using smooth weighted fairness."""
+        now = time.time()
+        selected_row: sqlite3.Row | None = None
         with self.connect() as connection:
             rows = connection.execute(
                 """
-                SELECT * FROM runs WHERE status = 'queued'
-                ORDER BY created_at, unit_index LIMIT ?
-                """,
-                (limit,),
+                SELECT runs.*, jobs.priority_level, jobs.scheduler_credit,
+                    jobs.last_dispatched_at,
+                    jobs.created_at AS job_created_at
+                FROM runs JOIN jobs ON jobs.id = runs.job_id
+                WHERE runs.status = 'queued' AND jobs.scheduling_paused = 0
+                ORDER BY jobs.created_at, runs.unit_index, runs.created_at
+                """
             ).fetchall()
-        return [
-            self._decode(
-                row,
-                (
-                    "argv_json",
-                    "targets_json",
-                    "resources_json",
-                    "probe_json",
-                    "outputs_json",
+            active_counts = {
+                row["job_id"]: int(row["active_count"])
+                for row in connection.execute(
+                    """
+                    SELECT job_id, COUNT(*) AS active_count FROM runs
+                    WHERE status IN ('starting', 'running', 'cancel_requested')
+                    GROUP BY job_id
+                    """
+                )
+            }
+            eligible: dict[str, sqlite3.Row] = {}
+            for row in rows:
+                if row["job_id"] in eligible:
+                    continue
+                resources = set(json.loads(row["resources_json"]))
+                if active_resources.intersection(resources):
+                    continue
+                eligible[row["job_id"]] = row
+            if not eligible:
+                return None
+
+            candidates: list[tuple[sqlite3.Row, float, float]] = []
+            total_weight = 0.0
+            for row in eligible.values():
+                weight = 2.0 ** int(row["priority_level"])
+                credit = float(row["scheduler_credit"]) + weight
+                total_weight += weight
+                candidates.append((row, weight, credit))
+            selected_row, _selected_weight, selected_credit = max(
+                candidates,
+                key=lambda candidate: (
+                    candidate[2],
+                    -active_counts.get(candidate[0]["job_id"], 0) / candidate[1],
+                    -float(candidate[0]["last_dispatched_at"] or 0),
+                    -float(candidate[0]["job_created_at"]),
                 ),
             )
-            for row in rows
-        ]
+            for row, _weight, credit in candidates:
+                if row["job_id"] == selected_row["job_id"]:
+                    credit = selected_credit - total_weight
+                    connection.execute(
+                        """
+                        UPDATE jobs SET scheduler_credit = ?, last_dispatched_at = ?
+                        WHERE id = ?
+                        """,
+                        (credit, now, row["job_id"]),
+                    )
+                else:
+                    connection.execute(
+                        "UPDATE jobs SET scheduler_credit = ? WHERE id = ?",
+                        (credit, row["job_id"]),
+                    )
+            cursor = connection.execute(
+                """
+                UPDATE runs SET status = 'starting', updated_at = ?
+                WHERE id = ? AND status = 'queued'
+                """,
+                (now, selected_row["id"]),
+            )
+            if not cursor.rowcount:
+                return None
+        self.reconcile_job(selected_row["job_id"])
+        return self.get_run(selected_row["id"])
 
     def active_count(self) -> int:
         placeholders = ",".join("?" for _ in ACTIVE_STATUSES)
@@ -499,4 +691,7 @@ class WorkbenchStore:
             run = connection.execute(
                 "SELECT COALESCE(MAX(updated_at), 0) FROM runs"
             ).fetchone()[0]
-        return max(float(job), float(run))
+            settings = connection.execute(
+                "SELECT COALESCE(MAX(updated_at), 0) FROM scheduler_settings"
+            ).fetchone()[0]
+        return max(float(job), float(run), float(settings))

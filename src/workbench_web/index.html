@@ -25,6 +25,20 @@
       <button data-tab="manuscripts">Manuscripts</button>
       <button data-tab="activity">Activity <span id="activity-count" class="count"></span></button>
     </nav>
+    <details id="scheduler-control" class="scheduler-control">
+      <summary id="worker-summary">Workers</summary>
+      <div class="scheduler-popover">
+        <label class="scheduler-limit">
+          <span>Maximum active workers</span>
+          <input id="worker-limit" type="number" min="1" max="64" step="1">
+        </label>
+        <p id="worker-status"></p>
+        <div class="scheduler-actions">
+          <button id="queue-toggle" type="button" class="button"></button>
+          <button id="worker-apply" type="button" class="button primary">Apply limit</button>
+        </div>
+      </div>
+    </details>
     <div id="connection" class="connection">Connecting…</div>
   </header>
 

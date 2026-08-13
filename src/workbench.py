@@ -728,12 +728,10 @@ class Scheduler:
         store: WorkbenchStore,
         hub: EventHub,
         *,
-        max_workers: int,
         state_directory: Path,
     ):
         self.store = store
         self.hub = hub
-        self.max_workers = max_workers
         self.state_directory = state_directory
         self.stopping = threading.Event()
         self.pending = threading.Event()
@@ -748,8 +746,6 @@ class Scheduler:
         self.thread.start()
 
     def _launch(self, run: dict) -> None:
-        if not self.store.mark_starting(run["id"]):
-            return
         command = [
             sys.executable,
             "-u",
@@ -804,23 +800,20 @@ class Scheduler:
             self.revision = current_revision
             self.hub.publish("tasks.changed", revision=self.revision)
 
+        settings = self.store.scheduler_settings()
         active_count = self.store.active_count()
-        slots = self.max_workers - active_count
-        if slots > 0:
-            queued = self.store.queued_runs(limit=100)
-            if queued:
-                launch_delay = max(
-                    0.0,
-                    1.05 - (time.monotonic() - self.last_launch),
-                )
-                if launch_delay:
-                    return launch_delay
-                active_resources = self.store.active_resources()
-                for run in queued:
-                    if active_resources.intersection(run["resources"]):
-                        continue
-                    self._launch(run)
-                    return 1.05
+        slots = settings["workerLimit"] - active_count
+        if slots > 0 and not settings["queuePaused"]:
+            launch_delay = max(
+                0.0,
+                1.05 - (time.monotonic() - self.last_launch),
+            )
+            if launch_delay:
+                return launch_delay
+            run = self.store.claim_next_run(self.store.active_resources())
+            if run is not None:
+                self._launch(run)
+                return 1.05
         # An active worker normally wakes us through SQLite WAL events.  This
         # timeout only detects a worker that died without another commit.
         if active_count:
@@ -854,7 +847,6 @@ class WorkbenchApplication:
         paths: list[Path],
         manuscripts: Path,
         state_directory: Path,
-        max_workers: int,
     ):
         self.paths = paths
         self.manuscripts = manuscripts
@@ -874,7 +866,6 @@ class WorkbenchApplication:
         self.scheduler = Scheduler(
             self.store,
             self.hub,
-            max_workers=max_workers,
             state_directory=state_directory,
         )
         self.csrf = secrets.token_urlsafe(24)
@@ -1133,7 +1124,7 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                         "catalog": self.app.catalog.snapshot(),
                         "jobs": self.app.store.list_jobs(),
                         "settings": {
-                            "maxWorkers": self.app.scheduler.max_workers,
+                            **self.app.store.scheduler_settings(),
                             "projectRoot": str(PROJECT_ROOT),
                         },
                     }
@@ -1193,6 +1184,30 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                 if not isinstance(plan_id, str):
                     raise PlanError("planId is required")
                 self.send_json(self.app.confirm_plan(plan_id), 201)
+            elif parsed.path == "/api/scheduler":
+                changes = {}
+                if "workerLimit" in body:
+                    changes["worker_limit"] = body["workerLimit"]
+                if "queuePaused" in body:
+                    changes["queue_paused"] = body["queuePaused"]
+                settings = self.app.store.update_scheduler_settings(**changes)
+                self.send_json(settings)
+                self.app.scheduler.schedule()
+                self.app.hub.publish("settings.changed", **settings)
+            elif match := re.fullmatch(
+                r"/api/jobs/([0-9a-f-]+)/scheduling", parsed.path
+            ):
+                changes = {}
+                if "priorityLevel" in body:
+                    changes["priority_level"] = body["priorityLevel"]
+                if "paused" in body:
+                    changes["paused"] = body["paused"]
+                job = self.app.store.update_job_scheduling(
+                    match.group(1), **changes
+                )
+                self.send_json(job)
+                self.app.scheduler.schedule()
+                self.app.hub.publish("tasks.changed")
             elif match := re.fullmatch(r"/api/runs/([0-9a-f-]+)/cancel", parsed.path):
                 self.send_json(self.app.store.request_cancel(match.group(1)))
                 self.app.scheduler.schedule()
@@ -1395,12 +1410,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=DEFAULT_STATE_DIRECTORY,
     )
-    parser.add_argument(
-        "--max-workers",
-        type=codex_cli.positive_integer,
-        default=2,
-        help="maximum concurrently active CLI runs (default: 2)",
-    )
     parser.add_argument("--no-open", action="store_true")
     return parser
 
@@ -1424,7 +1433,6 @@ def main(argv: list[str] | None = None) -> int:
             paths=paths,
             manuscripts=manuscripts,
             state_directory=state_directory,
-            max_workers=args.max_workers,
         )
         app.start_watching()
         server = WorkbenchHTTPServer(
