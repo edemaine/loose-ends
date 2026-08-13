@@ -337,6 +337,28 @@ class WorkbenchStore:
             return
         self.reconcile_job(job_id)
 
+    def append_run_output(self, run_id: str, path: Path | str) -> bool:
+        """Persist one newly reported artifact, preserving first-report order."""
+        value = str(Path(path).resolve())
+        now = time.time()
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT job_id, outputs_json FROM runs WHERE id = ?", (run_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(run_id)
+            outputs = json.loads(row["outputs_json"])
+            if value in outputs:
+                return False
+            outputs.append(value)
+            connection.execute(
+                "UPDATE runs SET outputs_json = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(outputs, ensure_ascii=False), now, run_id),
+            )
+            job_id = row["job_id"]
+        self.reconcile_job(job_id)
+        return True
+
     def request_cancel(self, run_id: str) -> dict:
         run = self.get_run(run_id)
         if run["status"] == "queued":

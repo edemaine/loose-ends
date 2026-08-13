@@ -313,6 +313,10 @@ def _install_triage(
             f"at {staging}: {exc}"
         ) from exc
     shutil.rmtree(staging)
+    common.report_artifacts(
+        problem.directory / name
+        for name in (common.TRIAGE_MARKDOWN, common.TRIAGE_RESULT)
+    )
 
 
 def triage_paper(

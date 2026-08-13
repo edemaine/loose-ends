@@ -507,6 +507,10 @@ def _install_literature(
             f"preserved at {staging}: {exc}"
         ) from exc
     shutil.rmtree(staging)
+    common.report_artifacts(
+        problem.directory / name
+        for name in (common.LITERATURE_MARKDOWN, common.LITERATURE_RESULT)
+    )
 
 
 def _write_work_record(

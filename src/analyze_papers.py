@@ -18,6 +18,7 @@ import sys
 import tempfile
 from typing import Iterable
 
+import artifact_reporting
 import codex_cli
 
 
@@ -507,6 +508,11 @@ def analyze_paper(
         except OSError:
             pass
 
+    artifact_reporting.report_artifacts(
+        analysis_directory / filename
+        for filename in (*CONTENT_FILES, MANIFEST_FILE)
+    )
+
     detail = (
         f"{format_analysis_counts(results, open_problems)}, "
         f"status {agent_result['status']}"
@@ -600,6 +606,10 @@ def recover_complete_analysis(
             f"{staging}: {exc}"
         ) from exc
     shutil.rmtree(staging)
+    artifact_reporting.report_artifacts(
+        analysis_directory / filename
+        for filename in (*CONTENT_FILES, MANIFEST_FILE)
+    )
     return AnalysisOutcome(
         paper_directory,
         "recovered",

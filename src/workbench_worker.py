@@ -11,13 +11,78 @@ import signal
 import subprocess
 import time
 
+import artifact_reporting
 import codex_cli
 from workbench_store import WorkbenchStore
-from workbench_tasks import probe_outputs
 
 
 HEARTBEAT_SECONDS = 2.0
 CANCEL_GRACE_SECONDS = 8.0
+
+
+def _artifact_roots(run: dict) -> list[Path]:
+    roots = []
+    for resource in run.get("resources", []):
+        kind, separator, value = resource.partition(":")
+        if separator and kind in {"paper", "manuscript"} and value:
+            roots.append(Path(value).resolve())
+    return roots
+
+
+def _under_roots(path: Path, roots: list[Path]) -> bool:
+    for root in roots:
+        try:
+            path.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def _consume_artifact_log(
+    store: WorkbenchStore,
+    run: dict,
+    artifact_log: Path,
+    offset: int,
+    remainder: bytes,
+    console,
+) -> tuple[int, bytes]:
+    try:
+        with artifact_log.open("rb") as source:
+            source.seek(offset)
+            chunk = source.read()
+    except FileNotFoundError:
+        return offset, remainder
+    if not chunk:
+        return offset, remainder
+    offset += len(chunk)
+    pieces = (remainder + chunk).split(b"\n")
+    remainder = pieces.pop()
+    roots = _artifact_roots(run)
+    for raw in pieces:
+        try:
+            value = raw.removesuffix(b"\r").decode("utf-8")
+        except UnicodeDecodeError:
+            console.write("\nIgnored a non-UTF-8 artifact path.\n")
+            continue
+        if not value:
+            continue
+        path = Path(value).resolve()
+        if not path.is_file() or not _under_roots(path, roots):
+            console.write(f"\nIgnored unavailable or out-of-scope artifact: {value}\n")
+            continue
+        if store.append_run_output(run["id"], path):
+            console.write(f"\nInstalled artifact: {path}\n")
+    return offset, remainder
+
+
+def recover_run_artifacts(store: WorkbenchStore, run: dict) -> None:
+    """Recover complete artifact lines that preceded a worker interruption."""
+    console_path = Path(run["log_path"])
+    artifact_log = console_path.parent / "artifacts.txt"
+    console_path.parent.mkdir(parents=True, exist_ok=True)
+    with console_path.open("a", encoding="utf-8", buffering=1) as console:
+        _consume_artifact_log(store, run, artifact_log, 0, b"", console)
 
 
 def _stop_process_tree(process: subprocess.Popen) -> None:
@@ -70,12 +135,17 @@ def run_worker(database: Path, run_id: str) -> int:
     )
     environment = os.environ.copy()
     environment["PYTHONUNBUFFERED"] = "1"
+    artifact_log = log_path.parent / "artifacts.txt"
+    artifact_log.touch(exist_ok=True)
+    environment[artifact_reporting.ARTIFACT_LOG_ENV] = str(artifact_log)
     popen_options = codex_cli.windowless_popen_options()
 
     process: subprocess.Popen | None = None
     canceled = False
     error: str | None = None
     exit_code: int | None = None
+    artifact_offset = 0
+    artifact_remainder = b""
     try:
         with log_path.open("a", encoding="utf-8", buffering=1) as log:
             log.write(f"Workbench run {run_id}\n")
@@ -93,6 +163,14 @@ def run_worker(database: Path, run_id: str) -> int:
             )
             next_heartbeat = time.monotonic()
             while process.poll() is None:
+                artifact_offset, artifact_remainder = _consume_artifact_log(
+                    store,
+                    run,
+                    artifact_log,
+                    artifact_offset,
+                    artifact_remainder,
+                    log,
+                )
                 current = store.get_run(run_id)
                 if current["cancel_requested"]:
                     canceled = True
@@ -108,13 +186,23 @@ def run_worker(database: Path, run_id: str) -> int:
                     next_heartbeat = time.monotonic() + HEARTBEAT_SECONDS
                 time.sleep(0.25)
             exit_code = process.wait()
+            artifact_offset, artifact_remainder = _consume_artifact_log(
+                store,
+                run,
+                artifact_log,
+                artifact_offset,
+                artifact_remainder,
+                log,
+            )
+            if artifact_remainder:
+                log.write("\nIgnored an incomplete artifact-log line.\n")
             log.write(f"\nProcess exited with code {exit_code}.\n")
     except BaseException as exc:
         error = f"{type(exc).__name__}: {exc}"
         if process is not None:
             _stop_process_tree(process)
 
-    outputs = probe_outputs(run["probe"])
+    outputs = store.get_run(run_id)["outputs"]
     if canceled:
         status = "partial" if outputs else "canceled"
         if outputs:

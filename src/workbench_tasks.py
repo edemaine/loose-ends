@@ -313,9 +313,9 @@ def _unit(
     argv: list[str],
     project_root: Path,
     targets: list[dict],
-    probe: dict,
+    additional_resources: Iterable[str] = (),
 ) -> dict:
-    resources: set[str] = set()
+    resources: set[str] = set(additional_resources)
     for target in targets:
         path = Path(target["path"]).resolve()
         if target["kind"] == "paper":
@@ -333,36 +333,7 @@ def _unit(
         "cwd": str(project_root),
         "targets": targets,
         "resources": sorted(resources),
-        "probe": probe,
     }
-
-
-def _attempt_names(problem: Path) -> list[str]:
-    if not problem.is_dir():
-        return []
-    return sorted(
-        path.name
-        for path in problem.iterdir()
-        if path.is_dir() and ATTEMPT_RE.fullmatch(path.name)
-    )
-
-
-def _draft_paths(manuscripts: Path) -> list[str]:
-    if not manuscripts.is_dir():
-        return []
-    return sorted(
-        str(path.resolve())
-        for path in manuscripts.glob("*/draft-*")
-        if path.is_dir() and DRAFT_RE.fullmatch(path.name)
-    )
-
-
-def _file_marker(path: Path) -> list[int] | None:
-    try:
-        stat = path.stat()
-    except OSError:
-        return None
-    return [stat.st_mtime_ns, stat.st_size]
 
 
 def _require(targets: list[dict], allowed: set[str], action: str) -> None:
@@ -416,11 +387,6 @@ def build_plan(
                     argv=argv,
                     project_root=project_root,
                     targets=[target],
-                    probe={
-                        "kind": "analysis",
-                        "paper": str(path),
-                        "before": _file_marker(path / "analysis" / "manifest.json"),
-                    },
                 )
             )
 
@@ -457,21 +423,6 @@ def build_plan(
                     argv=argv,
                     project_root=project_root,
                     targets=paper_targets,
-                    probe={
-                        "kind": action,
-                        "problems": [item["path"] for item in paper_targets],
-                        "before": {
-                            item["path"]: _file_marker(
-                                Path(item["path"])
-                                / (
-                                    common.TRIAGE_RESULT
-                                    if action == "triage"
-                                    else common.LITERATURE_RESULT
-                                )
-                            )
-                            for item in paper_targets
-                        },
-                    },
                 )
             )
 
@@ -483,7 +434,6 @@ def build_plan(
         )
         for target in targets:
             problem = Path(target["path"])
-            before = _attempt_names(problem)
             argv = [
                 python,
                 "-u",
@@ -508,11 +458,6 @@ def build_plan(
                     argv=argv,
                     project_root=project_root,
                     targets=[target],
-                    probe={
-                        "kind": "solve",
-                        "problem": str(problem),
-                        "before": before,
-                    },
                 )
             )
 
@@ -544,11 +489,6 @@ def build_plan(
                     argv=argv,
                     project_root=project_root,
                     targets=[target],
-                    probe={
-                        "kind": "review",
-                        "attempt": str(attempt),
-                        "before": _file_marker(attempt / "review-result.json"),
-                    },
                 )
             )
 
@@ -583,11 +523,7 @@ def build_plan(
                 argv=argv,
                 project_root=project_root,
                 targets=targets,
-                probe={
-                    "kind": "write",
-                    "manuscripts": str(manuscripts),
-                    "before": _draft_paths(manuscripts),
-                },
+                additional_resources=(f"manuscript:{manuscripts.resolve()}",),
             )
         )
 
@@ -625,11 +561,6 @@ def build_plan(
                 argv=argv,
                 project_root=project_root,
                 targets=targets,
-                probe={
-                    "kind": "write",
-                    "manuscripts": str(manuscripts),
-                    "before": _draft_paths(manuscripts),
-                },
             )
         )
 
@@ -652,51 +583,3 @@ def build_plan(
         "warnings": list(dict.fromkeys(warnings)),
         "units": units,
     }
-
-
-def probe_outputs(probe: dict) -> list[str]:
-    kind = probe.get("kind")
-    outputs: list[Path] = []
-    if kind == "analysis":
-        path = Path(probe["paper"]) / "analysis"
-        after = _file_marker(path / "manifest.json")
-        if after is not None and after != probe.get("before"):
-            outputs.append(path)
-    elif kind == "triage":
-        for value in probe.get("problems", []):
-            path = Path(value)
-            after = _file_marker(path / common.TRIAGE_RESULT)
-            if after is not None and after != probe.get("before", {}).get(value):
-                outputs.append(path)
-    elif kind == "literature":
-        for value in probe.get("problems", []):
-            path = Path(value)
-            after = _file_marker(path / common.LITERATURE_RESULT)
-            if after is not None and after != probe.get("before", {}).get(value):
-                outputs.append(path)
-    elif kind == "solve":
-        problem = Path(probe["problem"])
-        before = set(probe.get("before", []))
-        if problem.is_dir():
-            outputs.extend(
-                path
-                for path in problem.iterdir()
-                if path.is_dir()
-                and ATTEMPT_RE.fullmatch(path.name)
-                and path.name not in before
-                and (path / "solver-result.json").is_file()
-            )
-    elif kind == "review":
-        attempt = Path(probe["attempt"])
-        after = _file_marker(attempt / "review-result.json")
-        if after is not None and after != probe.get("before"):
-            outputs.append(attempt)
-    elif kind == "write":
-        manuscripts = Path(probe["manuscripts"])
-        before = set(probe.get("before", []))
-        outputs.extend(
-            Path(value)
-            for value in _draft_paths(manuscripts)
-            if value not in before
-        )
-    return sorted({str(path.resolve()) for path in outputs})

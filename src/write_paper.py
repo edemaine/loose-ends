@@ -1454,6 +1454,16 @@ def _install_draft(
         raise common.CodexError(
             f"could not install paper draft; staging preserved at {staging}: {exc}"
         ) from exc
+    common.report_artifacts(
+        destination / name
+        for name in (
+            "main.pdf",
+            "main.tex",
+            "references.bib",
+            "readiness.md",
+            "paper-result.json",
+        )
+    )
     return DraftRef(destination, draft_number, result)
 
 
@@ -1743,6 +1753,12 @@ def run_paper_review(
             raise common.CodexError(
                 f"could not install paper review; staging preserved at {staging}: {exc}"
             ) from exc
+        common.report_artifacts(
+            (
+                draft.directory / "paper-critique.md",
+                draft.directory / "paper-review.json",
+            )
+        )
     except (common.CodexError, OSError) as exc:
         raise common.CodexError(
             common.preserved_workspace_message(exc, workspace)

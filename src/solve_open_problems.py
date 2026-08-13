@@ -484,6 +484,13 @@ def _install_attempt(
             f"could not install solver attempt; staging preserved at "
             f"{staging}: {exc}"
         ) from exc
+    common.report_artifacts(
+        [
+            destination / "attempt.md",
+            destination / "solver-result.json",
+            *(destination / source.relative_to(workspace) for source in artifacts),
+        ]
+    )
     return destination
 
 

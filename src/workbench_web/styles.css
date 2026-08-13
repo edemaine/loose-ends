@@ -251,6 +251,12 @@ button { color: inherit; }
 .file-link:hover, .entity-card:hover { border-color: var(--accent); }
 .file-link strong, .entity-card strong { display: block; color: var(--heading); }
 .file-link small, .entity-card small { display: block; margin-top: 3px; color: var(--muted); overflow-wrap: anywhere; }
+.artifact-row { display: flex; align-items: center; gap: 8px; margin-top: 6px; border: 1px solid var(--accent); border-radius: 8px; background: var(--accent-soft); }
+.artifact-main { min-width: 0; flex: 1; border: 0; background: transparent; padding: 9px; color: inherit; text-align: left; text-decoration: none; cursor: pointer; }
+.artifact-main strong { display: block; color: var(--accent); }
+.artifact-main small { display: block; margin-top: 3px; color: var(--muted); overflow-wrap: anywhere; }
+.artifact-file { flex: none; margin-right: 9px; color: var(--accent); font-size: 11px; font-weight: 800; text-decoration: none; }
+.artifact-main:hover strong, .artifact-file:hover { text-decoration: underline; }
 .draft-card { color: var(--ink); font: inherit; text-align: left; cursor: pointer; }
 .draft-card.active { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-ring); }
 .source-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 10px; margin-bottom: 18px; }

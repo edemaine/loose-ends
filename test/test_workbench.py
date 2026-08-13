@@ -1,6 +1,7 @@
 from pathlib import Path
 from io import BytesIO
 import json
+import os
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
@@ -29,7 +30,6 @@ from workbench_tasks import (
     PlanError,
     build_plan,
     populate_dry_run_previews,
-    probe_outputs,
 )
 import workbench_worker
 
@@ -64,7 +64,7 @@ def make_paper(root: Path) -> Path:
     return paper
 
 
-def fake_plan(argv: list[str], *, probe: dict | None = None) -> dict:
+def fake_plan(argv: list[str], *, resources: list[str] | None = None) -> dict:
     return {
         "action": "solve",
         "title": "Fake task",
@@ -74,7 +74,7 @@ def fake_plan(argv: list[str], *, probe: dict | None = None) -> dict:
                 "argv": argv,
                 "cwd": str(PROJECT_ROOT),
                 "targets": [],
-                "probe": probe or {},
+                "resources": resources or [],
             }
         ],
     }
@@ -203,6 +203,11 @@ class WorkbenchPlanningTests(unittest.TestCase):
         self.assertIn("awaiting-review attempt", app)
         self.assertIn("input.indeterminate", app)
         self.assertIn("jobDetails: new Map()", app)
+        self.assertIn("function outputRoute(path)", app)
+        self.assertIn('detail: critiqueFiles.has(filename) ? "critique" : "attempt"', app)
+        self.assertIn('if (filename.startsWith("triage")) detail = "triage"', app)
+        self.assertIn('else if (filename.startsWith("literature")) detail = "literature"', app)
+        self.assertIn('node("a", "artifact-file", "Open file")', app)
         self.assertIn("preserveActivityDetail", app)
         self.assertIn("refreshVisibleRunLogs", app)
         self.assertIn("Running dry-run previews", app)
@@ -510,6 +515,27 @@ class WorkbenchPlanningTests(unittest.TestCase):
             )
             self.assertEqual(len(plan["units"]), 2)
 
+    def test_write_plan_allows_artifacts_under_manuscript_root(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = make_paper(root)
+            manuscripts = root / "manuscripts"
+            plan = build_plan(
+                {
+                    "action": "write",
+                    "targets": [{"kind": "paper", "path": str(paper)}],
+                    "options": {},
+                },
+                project_root=PROJECT_ROOT,
+                allowed_roots=[root],
+                manuscripts=manuscripts,
+                catalog_version=1,
+            )
+            self.assertIn(
+                f"manuscript:{manuscripts.resolve()}",
+                plan["units"][0]["resources"],
+            )
+
     def test_planner_rejects_targets_outside_configured_roots(self):
         with TemporaryDirectory() as temporary, TemporaryDirectory() as outside:
             root = Path(temporary)
@@ -590,20 +616,22 @@ class WorkbenchStoreTests(unittest.TestCase):
             )
             self.assertEqual(store.get_job(job["id"])["status"], "succeeded")
 
-    def test_partial_solver_output_is_discovered_and_not_blindly_retried(self):
+    def test_reported_artifact_makes_failed_run_partial_and_not_retryable(self):
         with TemporaryDirectory() as temporary:
             state = Path(temporary)
             problem = state / "OP-001"
             problem.mkdir()
             code = (
-                "from pathlib import Path; import json; "
+                "from pathlib import Path; import os; "
                 f"p=Path({str(problem)!r})/'attempt-001'; p.mkdir(); "
-                "(p/'solver-result.json').write_text('{}'); raise SystemExit(2)"
+                "f=p/'solver-result.json'; f.write_text('{}'); "
+                "Path(os.environ['LOOSE_ENDS_ARTIFACT_LOG']).open('a').write(str(f.resolve())+'\\n'); "
+                "raise SystemExit(2)"
             )
             store = WorkbenchStore(state / "workbench.sqlite3", state)
             plan = fake_plan(
                 [sys.executable, "-u", "-c", code],
-                probe={"kind": "solve", "problem": str(problem), "before": []},
+                resources=[f"paper:{state}"],
             )
             job = store.create_job({"action": "solve"}, plan)
             run = job["runs"][0]
@@ -612,9 +640,52 @@ class WorkbenchStoreTests(unittest.TestCase):
 
             saved = store.get_run(run["id"])
             self.assertEqual(saved["status"], "partial")
-            self.assertEqual(saved["outputs"], [str((problem / "attempt-001").resolve())])
+            self.assertEqual(
+                saved["outputs"],
+                [str((problem / "attempt-001" / "solver-result.json").resolve())],
+            )
             with self.assertRaisesRegex(ValueError, "installed output"):
                 store.retry_run(run["id"])
+
+    def test_worker_persists_artifacts_while_process_is_still_running(self):
+        with TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            first = state / "first.md"
+            second = state / "second.md"
+            code = (
+                "from pathlib import Path; import os, time; "
+                f"first=Path({str(first)!r}); second=Path({str(second)!r}); "
+                "log=Path(os.environ['LOOSE_ENDS_ARTIFACT_LOG']); "
+                "first.write_text('first'); log.open('a').write(str(first.resolve())+'\\n'); "
+                "time.sleep(1.0); second.write_text('second'); "
+                "log.open('a').write(str(second.resolve())+'\\n'); time.sleep(0.5)"
+            )
+            store = WorkbenchStore(state / "workbench.sqlite3", state)
+            job = store.create_job(
+                {"action": "solve"},
+                fake_plan(
+                    [sys.executable, "-u", "-c", code],
+                    resources=[f"paper:{state}"],
+                ),
+            )
+            run = job["runs"][0]
+            store.mark_starting(run["id"])
+            worker = threading.Thread(
+                target=workbench_worker.run_worker,
+                args=(store.database, run["id"]),
+            )
+            worker.start()
+            deadline = time.time() + 4
+            while not store.get_run(run["id"])["outputs"] and time.time() < deadline:
+                time.sleep(0.05)
+            during = store.get_run(run["id"])
+            self.assertEqual(during["outputs"], [str(first.resolve())])
+            self.assertEqual(during["status"], "running")
+            worker.join(5)
+            self.assertFalse(worker.is_alive())
+            saved = store.get_run(run["id"])
+            self.assertEqual(saved["outputs"], [str(first.resolve()), str(second.resolve())])
+            self.assertEqual(saved["status"], "succeeded")
 
     def test_stale_heartbeat_becomes_interrupted_and_can_retry(self):
         with TemporaryDirectory() as temporary:
@@ -634,12 +705,48 @@ class WorkbenchStoreTests(unittest.TestCase):
             self.assertEqual(retry["status"], "queued")
             self.assertEqual(retry["retry_of"], run["id"])
 
-    def test_probe_handles_missing_problem_directory(self):
+    def test_complete_artifact_lines_are_recovered_after_worker_interruption(self):
         with TemporaryDirectory() as temporary:
-            path = Path(temporary) / "missing"
+            state = Path(temporary)
+            artifact = state / "result.md"
+            artifact.write_text("result", encoding="utf-8")
+            store = WorkbenchStore(state / "workbench.sqlite3", state)
+            job = store.create_job(
+                {"action": "solve"},
+                fake_plan(
+                    [sys.executable, "-c", "pass"],
+                    resources=[f"paper:{state}"],
+                ),
+            )
+            run = job["runs"][0]
+            artifact_log = Path(run["log_path"]).parent / "artifacts.txt"
+            artifact_log.write_text(
+                f"{artifact.resolve()}\nignored-incomplete",
+                encoding="utf-8",
+            )
+
+            workbench_worker.recover_run_artifacts(store, run)
+            self.assertEqual(store.get_run(run["id"])["outputs"], [str(artifact.resolve())])
+
+    def test_artifact_reporter_is_disabled_without_managed_environment(self):
+        with TemporaryDirectory() as temporary:
+            artifact = Path(temporary) / "result.md"
+            artifact.write_text("result", encoding="utf-8")
+            with patch.dict(os.environ, {}, clear=True):
+                common.report_artifacts([artifact])
+
+    def test_artifact_reporter_appends_absolute_paths(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            log = root / "artifacts.txt"
+            first = root / "first.md"
+            second = root / "second.json"
+            with patch.dict(os.environ, {common.ARTIFACT_LOG_ENV: str(log)}):
+                common.report_artifacts([first, second])
+                common.report_artifacts([first])
             self.assertEqual(
-                probe_outputs({"kind": "solve", "problem": str(path), "before": []}),
-                [],
+                log.read_text(encoding="utf-8").splitlines(),
+                [str(first.resolve()), str(second.resolve()), str(first.resolve())],
             )
 
 

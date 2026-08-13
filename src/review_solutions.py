@@ -517,6 +517,9 @@ def _install_review(
             f"could not install review; staging preserved at {staging}: {exc}"
         ) from exc
     shutil.rmtree(staging)
+    common.report_artifacts(
+        (attempt.directory / "critique.md", attempt.directory / "review-result.json")
+    )
 
 
 def _write_work_record(

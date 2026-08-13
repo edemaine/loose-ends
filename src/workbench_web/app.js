@@ -1376,12 +1376,26 @@ function renderJobDetail(job) {
     if (run.error) section.append(node("div", "error-box", run.error));
     if (run.outputs?.length) {
       const output = node("div", "confirm-block");
-      output.append(node("h3", "", "Installed output"));
+      output.append(node("h3", "", `Installed output · ${run.outputs.length}`));
       run.outputs.forEach(path => {
-        const row = node("div", "file-link");
-        row.append(node("strong", "", path.split(/[\\/]/).pop()));
-        row.append(node("small", "", path));
-        row.addEventListener("click", () => openOutput(path));
+        const row = node("div", "artifact-row");
+        const route = outputRoute(path);
+        const primary = node(route ? "button" : "a", "artifact-main");
+        if (route) {
+          primary.type = "button";
+          primary.addEventListener("click", () => openOutput(path));
+        } else {
+          primary.href = fileUrl(path);
+          primary.target = "_blank";
+          primary.rel = "noopener noreferrer";
+        }
+        primary.append(node("strong", "", path.split(/[\\/]/).pop()));
+        primary.append(node("small", "", path));
+        const exact = node("a", "artifact-file", "Open file");
+        exact.href = fileUrl(path);
+        exact.target = "_blank";
+        exact.rel = "noopener noreferrer";
+        row.append(primary, exact);
         output.append(row);
       });
       section.append(output);
@@ -1467,36 +1481,68 @@ async function mutateRun(runId, action) {
   }
 }
 
-function openOutput(path) {
-  const review = state.catalog.reviews.find(item => item.attemptDirectory === path);
+function normalizedPath(path) {
+  return path.replaceAll("\\", "/").replace(/\/$/, "").toLowerCase();
+}
+
+function pathContains(parent, child) {
+  const root = normalizedPath(parent);
+  const value = normalizedPath(child);
+  return value === root || value.startsWith(`${root}/`);
+}
+
+function outputRoute(path) {
+  const filename = path.split(/[\\/]/).pop()?.toLowerCase() || "";
+  const review = state.catalog.reviews.find(
+    item => item.attemptDirectory && pathContains(item.attemptDirectory, path),
+  );
   if (review) {
-    state.selectedReview = review.itemKey;
-    state.selectedProblem = review.problemKey;
-    setTab("research");
-    return;
+    const critiqueFiles = new Set([
+      "critique.md", "review-result.json", "review-manifest.json",
+      "review-events.jsonl", "review-run.log",
+    ]);
+    return {
+      tab: "research",
+      review,
+      detail: critiqueFiles.has(filename) ? "critique" : "attempt",
+    };
   }
-  const problem = state.catalog.reviews.find(item => `${item.paperDirectory}/${item.problemId}`.replaceAll("\\", "/") === path.replaceAll("\\", "/"));
+  const problem = state.catalog.reviews.find(
+    item => pathContains(`${item.paperDirectory}/${item.problemId}`, path),
+  );
   if (problem) {
-    state.selectedReview = problem.itemKey;
-    state.selectedProblem = problem.problemKey;
-    setTab("research");
-    return;
+    let detail = "attempt";
+    if (filename.startsWith("triage")) detail = "triage";
+    else if (filename.startsWith("literature")) detail = "literature";
+    return { tab: "research", review: problem, detail };
   }
-  const paperPath = path.replace(/[\\/]analysis$/, "");
-  const paper = state.catalog.papers.find(item => item.path === path || item.path === paperPath);
-  if (paper) {
-    state.selectedPaper = paper.key;
-    setTab("papers");
-    return;
-  }
+  const paper = state.catalog.papers.find(
+    item => normalizedPath(item.path) === normalizedPath(path) ||
+      pathContains(`${item.path}/analysis`, path),
+  );
+  if (paper) return { tab: "papers", paper };
   for (const manuscript of state.catalog.manuscripts) {
-    if (manuscript.drafts.some(draft => draft.path === path)) {
-      state.selectedManuscript = manuscript.key;
-      state.selectedDraft = manuscript.drafts.find(draft => draft.path === path)?.key || manuscript.latest.key;
-      setTab("manuscripts");
-      return;
-    }
+    const draft = manuscript.drafts.find(value => pathContains(value.path, path));
+    if (draft) return { tab: "manuscripts", manuscript, draft };
   }
+  return null;
+}
+
+function openOutput(path) {
+  const route = outputRoute(path);
+  if (!route) return false;
+  if (route.tab === "research") {
+    state.selectedReview = route.review.itemKey;
+    state.selectedProblem = route.review.problemKey;
+    state.detailTab = route.detail;
+  } else if (route.tab === "papers") {
+    state.selectedPaper = route.paper.key;
+  } else {
+    state.selectedManuscript = route.manuscript.key;
+    state.selectedDraft = route.draft.key;
+  }
+  setTab(route.tab);
+  return true;
 }
 
 const actionNames = {

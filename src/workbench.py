@@ -29,11 +29,11 @@ import open_problem_common as common
 import review_solutions
 import write_paper
 from workbench_store import ACTIVE_STATUSES, WorkbenchStore
+from workbench_worker import recover_run_artifacts
 from workbench_tasks import (
     PlanError,
     build_plan,
     populate_dry_run_previews,
-    probe_outputs,
 )
 
 try:
@@ -791,13 +791,13 @@ class Scheduler:
         stale = self.store.mark_stale_runs(older_than=12)
         for run_id in stale:
             run = self.store.get_run(run_id)
-            outputs = probe_outputs(run["probe"])
-            if outputs:
+            recover_run_artifacts(self.store, run)
+            run = self.store.get_run(run_id)
+            if run["outputs"]:
                 self.store.update_run(
                     run_id,
                     status="partial",
-                    outputs_json=outputs,
-                    error="worker stopped after installing output",
+                    error="worker stopped after reporting installed output",
                 )
         current_revision = self.store.revision()
         if current_revision != self.revision:

@@ -16,6 +16,7 @@ import stat
 from typing import Iterable, Sequence
 
 import analyze_papers
+from artifact_reporting import ARTIFACT_LOG_ENV, report_artifacts
 import codex_cli
 
 
