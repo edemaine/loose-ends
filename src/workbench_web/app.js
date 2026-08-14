@@ -1040,6 +1040,7 @@ function attemptTagsNode(item, options = {}) {
 
 function appendSideCard(parent, {
   title, meta, tags, active, selectedTarget, onClick, relatedProblem,
+  relatedTask,
 }) {
   const card = node("div", `side-card${active ? " active" : ""}`);
   card.role = "button";
@@ -1053,8 +1054,8 @@ function appendSideCard(parent, {
   const metaNode = node("small", "", meta);
   metaNode.title = meta;
   titleRow.append(titleNode);
-  if (relatedProblem) {
-    titleRow.append(relatedTaskHost({
+  if (relatedTask || relatedProblem) {
+    titleRow.append(relatedTaskHost(relatedTask || {
       paperPath: relatedProblem.paperDirectory,
       problemPath: `${relatedProblem.paperDirectory}/${relatedProblem.problemId}`,
       includePaper: false,
@@ -1422,7 +1423,10 @@ function renderReviewDetail(item) {
   }
   shell.append(actions);
 
-  shell.append(relatedTasksPanel(item));
+  shell.append(relatedTasksPanel({
+    paperPath: item.paperDirectory,
+    problemPath: `${item.paperDirectory}/${item.problemId}`,
+  }));
 
   const problemStatement = node("section", "problem-statement panel");
   problemStatement.append(
@@ -1534,6 +1538,10 @@ function renderPapers() {
     meta: paper.analyzed ? `${paper.problemCount} open problems` : "Not analyzed",
     active: state.selectedPaper === paper.key,
     selectedTarget: paperTarget(paper),
+    relatedTask: {
+      paperPath: paper.path,
+      includePaperDescendants: true,
+    },
     onClick: () => { state.selectedPaper = paper.key; syncNavigation(); },
   }));
   sidebar.append(node("div", "sidebar-heading", `${papers.length} papers`), list);
@@ -1565,6 +1573,10 @@ function renderPapers() {
     addAction(actions, "Write from latest results", "write", [paperTarget(paper)]);
   }
   shell.append(actions);
+  shell.append(relatedTasksPanel({
+    paperPath: paper.path,
+    includePaperDescendants: true,
+  }));
   shell.append(node("section", "section-title", "Files"));
   shell.append(fileGrid(paper.files));
   main.replaceChildren(shell);
@@ -1637,6 +1649,7 @@ function renderManuscripts() {
     title: value.latest.title,
     meta: `${value.drafts.length} draft${value.drafts.length === 1 ? "" : "s"} · ${humanize(value.latest.verdict)}`,
     active: state.selectedManuscript === value.key,
+    relatedTask: { manuscriptPath: value.path },
     onClick: () => {
       state.selectedManuscript = value.key;
       const rememberedDraft = state.manuscriptDraftSelections.get(value.key);
@@ -1672,6 +1685,10 @@ function renderManuscripts() {
       title: value.name,
       meta: `${latest ? "Latest · " : ""}${humanize(value.status)} · ${humanize(value.verdict)}`,
       active: value.key === draft.key,
+      relatedTask: {
+        manuscriptPath: manuscript.path,
+        draftPath: value.path,
+      },
       onClick: () => {
         state.selectedDraft = value.key;
         state.manuscriptDraftSelections.set(manuscript.key, value.key);
@@ -1703,6 +1720,10 @@ function renderManuscripts() {
     shell.append(actions);
     actions.append(open);
   } else shell.append(actions);
+  shell.append(relatedTasksPanel({
+    manuscriptPath: manuscript.path,
+    draftPath: draft.path,
+  }));
   if (draft.abstract) shell.append(summaryPanel("Abstract", draft.abstract));
   if (draft.summary) shell.append(summaryPanel("Paper critic", draft.summary));
   const sources = draft.sources || { papers: [], problems: [] };
@@ -2186,22 +2207,46 @@ function pathContains(parent, child) {
   return value === root || value.startsWith(`${root}/`);
 }
 
-function liveRunRelation(run, paperPath, problemPath = "") {
+function liveRunRelation(
+  run,
+  {
+    paperPath = "",
+    problemPath = "",
+    draftPath = "",
+    manuscriptPath = "",
+  },
+) {
   const paper = normalizedPath(paperPath);
   const problem = normalizedPath(problemPath);
+  const draft = normalizedPath(draftPath);
+  const manuscript = normalizedPath(manuscriptPath);
   let paperWide = false;
+  let paperDescendant = false;
+  let manuscriptWide = false;
   let direct = false;
   (run.targets || []).forEach(target => {
     if (!target || typeof target.path !== "string") return;
     const path = normalizedPath(target.path);
     if (target.kind === "paper" && path === paper) paperWide = true;
-    else if (target.kind === "problem" && problem && path === problem) direct = true;
-    else if (target.kind === "attempt" && problem) {
+    else if (target.kind === "problem") {
+      if (problem && path === problem) direct = true;
+      if (paper && path.split("/").slice(0, -1).join("/") === paper) {
+        paperDescendant = true;
+      }
+    } else if (target.kind === "attempt") {
       const parent = path.split("/").slice(0, -1).join("/");
-      if (parent === problem) direct = true;
+      if (problem && parent === problem) direct = true;
+      if (paper && parent.split("/").slice(0, -1).join("/") === paper) {
+        paperDescendant = true;
+      }
+    } else if (target.kind === "draft") {
+      if (draft && path === draft) direct = true;
+      if (manuscript && path.split("/").slice(0, -1).join("/") === manuscript) {
+        manuscriptWide = true;
+      }
     }
   });
-  return { paperWide, direct };
+  return { paperWide, paperDescendant, manuscriptWide, direct };
 }
 
 function relatedEntryStatus(entry) {
@@ -2215,12 +2260,25 @@ function relatedEntryStatus(entry) {
   return { ...taskStatus("queued"), status: "queued" };
 }
 
-function relatedTaskEntries({ paperPath, problemPath = "", includePaper = true }) {
+function relatedTaskEntries({
+  paperPath = "",
+  problemPath = "",
+  draftPath = "",
+  manuscriptPath = "",
+  includePaper = true,
+  includePaperDescendants = false,
+  includeManuscript = true,
+}) {
   const entries = [];
   state.jobs.forEach(job => {
     const runs = (job.liveRuns || []).filter(run => {
-      const relation = liveRunRelation(run, paperPath, problemPath);
-      return relation.direct || (includePaper && relation.paperWide);
+      const relation = liveRunRelation(run, {
+        paperPath, problemPath, draftPath, manuscriptPath,
+      });
+      return relation.direct ||
+        (includePaper && relation.paperWide) ||
+        (includePaperDescendants && relation.paperDescendant) ||
+        (includeManuscript && relation.manuscriptWide);
     });
     if (runs.length) entries.push({ job, runs });
   });
@@ -2241,9 +2299,13 @@ function openRelatedTask(jobId) {
 
 function fillRelatedTaskHost(host) {
   const entries = relatedTaskEntries({
-    paperPath: host.dataset.relatedPaper,
+    paperPath: host.dataset.relatedPaper || "",
     problemPath: host.dataset.relatedProblem || "",
+    draftPath: host.dataset.relatedDraft || "",
+    manuscriptPath: host.dataset.relatedManuscript || "",
     includePaper: host.dataset.includePaper !== "0",
+    includePaperDescendants: host.dataset.includePaperDescendants === "1",
+    includeManuscript: host.dataset.includeManuscript !== "0",
   });
   host.replaceChildren();
   host.hidden = !entries.length;
@@ -2261,19 +2323,36 @@ function fillRelatedTaskHost(host) {
   host.append(pill);
 }
 
-function relatedTaskHost({ paperPath, problemPath = "", includePaper = true }) {
+function relatedTaskHost({
+  paperPath = "",
+  problemPath = "",
+  draftPath = "",
+  manuscriptPath = "",
+  includePaper = true,
+  includePaperDescendants = false,
+  includeManuscript = true,
+}) {
   const host = node("span", "sidebar-related-tasks");
-  host.dataset.relatedPaper = normalizedPath(paperPath);
+  if (paperPath) host.dataset.relatedPaper = normalizedPath(paperPath);
   if (problemPath) host.dataset.relatedProblem = normalizedPath(problemPath);
+  if (draftPath) host.dataset.relatedDraft = normalizedPath(draftPath);
+  if (manuscriptPath) host.dataset.relatedManuscript = normalizedPath(manuscriptPath);
   host.dataset.includePaper = includePaper ? "1" : "0";
+  host.dataset.includePaperDescendants = includePaperDescendants ? "1" : "0";
+  host.dataset.includeManuscript = includeManuscript ? "1" : "0";
   fillRelatedTaskHost(host);
   return host;
 }
 
 function fillRelatedTasksPanel(panel) {
   const entries = relatedTaskEntries({
-    paperPath: panel.dataset.relatedPaper,
-    problemPath: panel.dataset.relatedProblem,
+    paperPath: panel.dataset.relatedPaper || "",
+    problemPath: panel.dataset.relatedProblem || "",
+    draftPath: panel.dataset.relatedDraft || "",
+    manuscriptPath: panel.dataset.relatedManuscript || "",
+    includePaper: panel.dataset.includePaper !== "0",
+    includePaperDescendants: panel.dataset.includePaperDescendants === "1",
+    includeManuscript: panel.dataset.includeManuscript !== "0",
   });
   panel.replaceChildren();
   panel.hidden = !entries.length;
@@ -2299,16 +2378,29 @@ function fillRelatedTasksPanel(panel) {
   panel.append(heading, list);
 }
 
-function relatedTasksPanel(item) {
+function relatedTasksPanel({
+  paperPath = "",
+  problemPath = "",
+  draftPath = "",
+  manuscriptPath = "",
+  includePaper = true,
+  includePaperDescendants = false,
+  includeManuscript = true,
+}) {
   const panel = node("section", "related-tasks panel");
-  panel.dataset.relatedPaper = normalizedPath(item.paperDirectory);
-  panel.dataset.relatedProblem = normalizedPath(`${item.paperDirectory}/${item.problemId}`);
+  if (paperPath) panel.dataset.relatedPaper = normalizedPath(paperPath);
+  if (problemPath) panel.dataset.relatedProblem = normalizedPath(problemPath);
+  if (draftPath) panel.dataset.relatedDraft = normalizedPath(draftPath);
+  if (manuscriptPath) panel.dataset.relatedManuscript = normalizedPath(manuscriptPath);
+  panel.dataset.includePaper = includePaper ? "1" : "0";
+  panel.dataset.includePaperDescendants = includePaperDescendants ? "1" : "0";
+  panel.dataset.includeManuscript = includeManuscript ? "1" : "0";
   fillRelatedTasksPanel(panel);
   return panel;
 }
 
-function syncResearchRelatedTasks() {
-  if (state.tab !== "research") return;
+function syncRelatedTasks() {
+  if (!["research", "papers", "manuscripts"].includes(state.tab)) return;
   sidebar.querySelectorAll(".sidebar-related-tasks").forEach(fillRelatedTaskHost);
   main.querySelectorAll(".related-tasks").forEach(fillRelatedTasksPanel);
 }
@@ -2856,8 +2948,8 @@ async function refreshJobs({ preserveActivityDetail = false } = {}) {
   const value = await api("/api/jobs");
   state.jobs = value.jobs;
   updateActivityCount();
-  if (navigationReady && state.tab === "research") {
-    syncResearchRelatedTasks();
+  if (navigationReady && ["research", "papers", "manuscripts"].includes(state.tab)) {
+    syncRelatedTasks();
     return;
   }
   if (!navigationReady || state.tab !== "activity") return;
