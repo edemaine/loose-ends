@@ -331,10 +331,62 @@ function taskIsPaused(job) {
   ].includes(job.status);
 }
 
+const unsuccessfulRunStatuses = ["partial", "failed", "canceled", "interrupted"];
+
+function latestJobRuns(job) {
+  const latest = new Map();
+  (job.runs || []).forEach(run => {
+    const key = Number.isInteger(run.unit_index) ? `unit:${run.unit_index}` : `run:${run.id}`;
+    const previous = latest.get(key);
+    if (!previous || Number(run.created_at) >= Number(previous.created_at)) latest.set(key, run);
+  });
+  return [...latest.values()].sort((left, right) =>
+    (Number(left.unit_index) - Number(right.unit_index)) ||
+    (Number(left.created_at) - Number(right.created_at))
+  );
+}
+
+function jobOutcomeCounts(job) {
+  if (Number(job.counts?.total)) {
+    return {
+      succeeded: Number(job.counts.succeeded) || 0,
+      partial: Number(job.counts.partial) || 0,
+      failed: Number(job.counts.failed) || 0,
+      canceled: Number(job.counts.canceled) || 0,
+      interrupted: Number(job.counts.interrupted) || 0,
+    };
+  }
+  const counts = { succeeded: 0, partial: 0, failed: 0, canceled: 0, interrupted: 0 };
+  latestJobRuns(job).forEach(run => {
+    if (run.status in counts) counts[run.status] += 1;
+  });
+  return counts;
+}
+
+function appendRunCountBadge(parent, count, status) {
+  if (!count) return;
+  const value = taskStatus(status);
+  const result = badge(`${count} ${value.label.toLowerCase()}`, value.tone);
+  result.title = `${count} ${value.label.toLowerCase()} run${count === 1 ? "" : "s"}`;
+  parent.append(result);
+}
+
 function taskBadges(job) {
   const values = node("span", "task-badges");
-  values.append(taskIsPaused(job) ? badge("Paused", "paused") : taskStatusBadge(job.status));
-  if (!["succeeded", "partial", "failed", "canceled", "interrupted"].includes(job.status)) {
+  const terminal = ["succeeded", "partial", "failed", "canceled", "interrupted"].includes(job.status);
+  const counts = jobOutcomeCounts(job);
+  const outcomeKinds = [counts.succeeded, ...unsuccessfulRunStatuses.map(status => counts[status])]
+    .filter(Boolean).length;
+  const mixedTerminal = terminal && outcomeKinds > 1;
+  if (taskIsPaused(job)) values.append(badge("Paused", "paused"));
+  else if (mixedTerminal) {
+    unsuccessfulRunStatuses.forEach(status => appendRunCountBadge(values, counts[status], status));
+    appendRunCountBadge(values, counts.succeeded, "succeeded");
+  } else {
+    values.append(taskStatusBadge(job.status));
+    if (!terminal) unsuccessfulRunStatuses.forEach(status => appendRunCountBadge(values, counts[status], status));
+  }
+  if (!terminal) {
     values.append(badge(`Weight ${priorityMultiplier(job.priority_level)}`, "neutral"));
   }
   return values;
@@ -1596,6 +1648,50 @@ function appendRunTargetSummary(parent, presentation) {
   parent.append(summary);
 }
 
+function focusRun(job, run) {
+  state.expandedRuns.add(run.id);
+  renderJobDetail(job);
+  requestAnimationFrame(() => {
+    document.getElementById(`run-${run.id}`)?.scrollIntoView({ block: "center", behavior: "auto" });
+  });
+}
+
+function runAttentionPanel(job) {
+  const runs = latestJobRuns(job).filter(run => unsuccessfulRunStatuses.includes(run.status));
+  if (!runs.length) return null;
+  const panel = node("section", "run-attention panel");
+  const heading = node("div", "run-attention-heading");
+  heading.append(
+    node("h2", "", "Needs attention"),
+    badge(`${runs.length} run${runs.length === 1 ? "" : "s"}`, "failed"),
+  );
+  panel.append(heading);
+  const list = node("div", "run-attention-list");
+  runs.forEach(run => {
+    const presentation = problemRunPresentation(job.action, run);
+    const row = node("div", `run-attention-row status-${taskStatus(run.status).tone}`);
+    const copy = node("div", "run-attention-copy");
+    const title = node("strong", "", presentation.title);
+    title.title = presentation.title;
+    const details = [];
+    if (presentation.targets.length) {
+      details.push(`${presentation.targets.length} selected problem${presentation.targets.length === 1 ? "" : "s"}`);
+    }
+    if (run.exit_code != null && run.exit_code !== 0) details.push(`Exit code ${run.exit_code}`);
+    if (run.error) details.push(run.error);
+    copy.append(title, node("small", "", details.join(" · ") || taskStatus(run.status).label));
+    const actions = node("div", "run-attention-actions");
+    actions.append(button("Show run", () => focusRun(job, run), "button"));
+    if (["failed", "canceled", "interrupted"].includes(run.status) && !(run.outputs || []).length) {
+      actions.append(button("Retry", () => mutateRun(run.id, "retry"), "button primary"));
+    }
+    row.append(taskStatusBadge(run.status), copy, actions);
+    list.append(row);
+  });
+  panel.append(list);
+  return panel;
+}
+
 async function loadJob(id) {
   try {
     const job = await api(`/api/jobs/${id}`);
@@ -1639,8 +1735,12 @@ function renderJobDetail(job) {
   copy.append(badges);
   hero.append(copy, jobSchedulingControls(job));
   shell.append(hero);
+  const attention = runAttentionPanel(job);
+  if (attention) shell.append(attention);
   job.runs.forEach((run, index) => {
-    const section = node("section", "run-card panel");
+    const section = node("section", `run-card panel status-${taskStatus(run.status).tone}`);
+    section.id = `run-${run.id}`;
+    section.dataset.runId = run.id;
     const expanded = state.expandedRuns.has(run.id);
     const presentation = problemRunPresentation(job.action, run);
     const heading = node("div", "run-summary");

@@ -154,6 +154,28 @@ class WorkbenchStore:
             value["scheduling_paused"] = bool(value["scheduling_paused"])
         return value
 
+    @staticmethod
+    def _job_status(run_rows: Iterable[sqlite3.Row]) -> str:
+        latest: dict[int, sqlite3.Row] = {}
+        for row in run_rows:
+            latest[row["unit_index"]] = row
+        statuses = [row["status"] for row in latest.values()]
+        if not statuses:
+            return "failed"
+        if any(value in ACTIVE_STATUSES for value in statuses):
+            return "running"
+        if any(value == "queued" for value in statuses):
+            return "queued"
+        if all(value == "succeeded" for value in statuses):
+            return "succeeded"
+        if any(value in {"succeeded", "partial"} for value in statuses):
+            return "partial"
+        if any(value == "failed" for value in statuses):
+            return "failed"
+        if any(value == "interrupted" for value in statuses):
+            return "interrupted"
+        return "canceled"
+
     def create_job(self, request: dict, plan: dict) -> dict:
         now = time.time()
         job_id = str(uuid.uuid4())
@@ -257,6 +279,7 @@ class WorkbenchStore:
             )
             for item in run_rows
         ]
+        job["status"] = self._job_status(run_rows)
         return job
 
     def list_jobs(self, *, limit: int = 1000) -> list[dict]:
@@ -280,6 +303,10 @@ class WorkbenchStore:
                         SUM(status = 'queued') AS queued,
                         SUM(status IN ('starting', 'running', 'cancel_requested')) AS active,
                         SUM(status = 'succeeded') AS succeeded,
+                        SUM(status = 'partial') AS partial,
+                        SUM(status = 'failed') AS failed,
+                        SUM(status = 'canceled') AS canceled,
+                        SUM(status = 'interrupted') AS interrupted,
                         SUM(status IN ('partial', 'failed', 'canceled', 'interrupted')) AS unsuccessful,
                         COUNT(*) AS total
                     FROM latest WHERE position = 1 GROUP BY job_id
@@ -630,26 +657,7 @@ class WorkbenchStore:
                 """,
                 (job_id,),
             ).fetchall()
-            latest: dict[int, sqlite3.Row] = {}
-            for row in rows:
-                latest[row["unit_index"]] = row
-            statuses = [row["status"] for row in latest.values()]
-            if not statuses:
-                status = "failed"
-            elif any(value in ACTIVE_STATUSES for value in statuses):
-                status = "running"
-            elif any(value == "queued" for value in statuses):
-                status = "queued"
-            elif all(value == "succeeded" for value in statuses):
-                status = "succeeded"
-            elif any(value == "partial" for value in statuses):
-                status = "partial"
-            elif any(value == "failed" for value in statuses):
-                status = "failed"
-            elif any(value == "interrupted" for value in statuses):
-                status = "interrupted"
-            else:
-                status = "canceled"
+            status = self._job_status(rows)
             now = time.time()
             finished = now if status in TERMINAL_STATUSES else None
             connection.execute(

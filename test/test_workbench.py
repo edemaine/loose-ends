@@ -272,6 +272,13 @@ class WorkbenchPlanningTests(unittest.TestCase):
         self.assertIn("function taskSidebarMeta(job)", app)
         self.assertIn('`${done}/${total} done`', app)
         self.assertIn('pieces.push(`${active} running`)', app)
+        self.assertIn("function latestJobRuns(job)", app)
+        self.assertIn("function appendRunCountBadge(parent, count, status)", app)
+        self.assertIn("const mixedTerminal = terminal && outcomeKinds > 1", app)
+        self.assertIn("function runAttentionPanel(job)", app)
+        self.assertIn('node("h2", "", "Needs attention")', app)
+        self.assertIn('button("Show run", () => focusRun(job, run)', app)
+        self.assertIn("section.dataset.runId = run.id", app)
         self.assertIn("expandedRuns: new Set()", app)
         self.assertIn('node("div", "run-expanded")', app)
         self.assertIn("preserveActivityDetail", app)
@@ -826,10 +833,42 @@ class WorkbenchStoreTests(unittest.TestCase):
                     "queued": 1,
                     "active": 0,
                     "succeeded": 0,
+                    "partial": 0,
+                    "failed": 0,
+                    "canceled": 0,
+                    "interrupted": 0,
                     "unsuccessful": 0,
                     "total": 1,
                 },
             )
+
+    def test_mixed_success_and_failure_is_partial_with_detailed_counts(self):
+        with TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            store = WorkbenchStore(state / "workbench.sqlite3", state)
+            job = store.create_job(
+                {"action": "solve"},
+                fake_plan([sys.executable, "-c", "pass"], unit_count=2),
+            )
+            first, second = job["runs"]
+            store.update_run(
+                first["id"], status="succeeded", finished_at=time.time()
+            )
+            store.update_run(
+                second["id"], status="failed", finished_at=time.time()
+            )
+
+            self.assertEqual(store.get_job(job["id"])["status"], "partial")
+            counts = store.list_jobs()[0]["counts"]
+            self.assertEqual(counts["succeeded"], 1)
+            self.assertEqual(counts["failed"], 1)
+            self.assertEqual(counts["partial"], 0)
+            self.assertEqual(counts["unsuccessful"], 1)
+            with store.connect() as connection:
+                connection.execute(
+                    "UPDATE jobs SET status = 'failed' WHERE id = ?", (job["id"],)
+                )
+            self.assertEqual(store.get_job(job["id"])["status"], "partial")
 
     def test_worker_persists_console_and_success(self):
         with TemporaryDirectory() as temporary:
