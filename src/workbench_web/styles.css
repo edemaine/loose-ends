@@ -371,7 +371,8 @@ button { color: inherit; }
 .field.checkbox { display: flex; grid-column: 1 / -1; align-items: flex-start; gap: 9px; }
 .field.checkbox input { width: auto; margin-top: 4px; accent-color: var(--accent); }
 .target-list { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 12px; }
-.target-chip { border-radius: 999px; background: var(--accent-soft); color: var(--accent); padding: 4px 7px; font-size: 10px; font-weight: 750; }
+.target-chip { display: inline-flex; border-radius: 999px; background: var(--accent-soft); color: var(--accent); padding: 4px 7px; font-size: 10px; font-weight: 750; text-decoration: none; }
+.target-link:hover, .target-link:focus-visible { background: var(--accent); color: var(--accent-contrast); outline: none; }
 .advanced { grid-column: 1 / -1; border: 1px solid var(--line); border-radius: 11px; padding: 10px 12px; }
 .advanced summary { color: var(--muted); font-size: 12px; font-weight: 800; cursor: pointer; }
 .advanced .form-grid { margin-top: 14px; }

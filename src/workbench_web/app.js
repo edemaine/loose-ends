@@ -1707,16 +1707,18 @@ function jobRenderFingerprint(job) {
 function problemRunPresentation(action, run) {
   const attempts = (run.targets || []).filter(target => target.kind === "attempt");
   if (action === "review" && attempts.length === 1) {
-    return { title: targetDisplayLabel(attempts[0]), targets: [] };
+    return { title: targetDisplayLabel(attempts[0]), targets: [], targetValues: [] };
   }
   const targets = (run.targets || []).filter(target => target.kind === "problem");
   if (action !== "literature" || !targets.length) {
-    return { title: run.label, targets: [] };
+    return { title: run.label, targets: [], targetValues: [] };
   }
   const paperPaths = new Set(targets.map(target =>
     normalizedPath(target.path).split("/").slice(0, -1).join("/"),
   ));
-  if (paperPaths.size !== 1) return { title: run.label, targets: [] };
+  if (paperPaths.size !== 1) {
+    return { title: run.label, targets: [], targetValues: [] };
+  }
   const paperPath = paperPaths.values().next().value;
   const paper = state.catalog.papers.find(value => normalizedPath(value.path) === paperPath);
   const review = state.catalog.reviews.find(value => normalizedPath(value.paperDirectory) === paperPath);
@@ -1731,6 +1733,7 @@ function problemRunPresentation(action, run) {
     title: paperTitle,
     summary: `${count} · ${labels.join(" · ")}`,
     targets: labels,
+    targetValues: targets,
   };
 }
 
@@ -1818,7 +1821,7 @@ function renderJobDetail(job) {
   const targets = job.plan?.targets || job.request?.targets || [];
   if (targets.length) {
     const targetList = node("div", "target-list task-targets");
-    targets.forEach(value => targetList.append(node("span", "target-chip", targetDisplayLabel(value))));
+    targets.forEach(value => targetList.append(targetChip(value)));
     scope.append(targetList);
   }
   copy.append(scope, node("p", "", `Created ${formatTime(job.created_at)}`));
@@ -1901,7 +1904,7 @@ function renderJobDetail(job) {
         const selected = node("div", "confirm-block");
         selected.append(node("h3", "", "Selected problems"));
         const targetList = node("div", "target-list run-targets");
-        presentation.targets.forEach(label => targetList.append(node("span", "target-chip", label)));
+        presentation.targetValues.forEach(value => targetList.append(targetChip(value)));
         selected.append(targetList);
         details.append(selected);
       }
@@ -2216,23 +2219,108 @@ function outputRouteLabel(route) {
   return "Go to problem";
 }
 
-function openOutput(path) {
-  const route = outputRoute(path);
-  if (!route) return false;
+function targetRoute(target) {
+  if (!target || typeof target.path !== "string") return null;
+  const path = normalizedPath(target.path);
+  if (target.kind === "attempt") {
+    const review = state.catalog.reviews.find(item =>
+      item.attemptDirectory && normalizedPath(item.attemptDirectory) === path
+    );
+    return review ? { tab: "research", review, detail: "attempt" } : null;
+  }
+  if (target.kind === "problem") {
+    const problem = state.catalog.reviews.find(item =>
+      normalizedPath(`${item.paperDirectory}/${item.problemId}`) === path
+    );
+    if (!problem) return null;
+    const review = reviewModel.attemptsForProblem(
+      state.catalog.reviews,
+      problem.problemKey,
+    )[0] || problem;
+    return { tab: "research", review, detail: "attempt" };
+  }
+  if (target.kind === "paper") {
+    const paper = state.catalog.papers.find(item => normalizedPath(item.path) === path);
+    return paper ? { tab: "papers", paper } : null;
+  }
+  if (target.kind === "draft") {
+    for (const manuscript of state.catalog.manuscripts) {
+      const draft = manuscript.drafts.find(item => normalizedPath(item.path) === path);
+      if (draft) return { tab: "manuscripts", manuscript, draft };
+    }
+  }
+  return null;
+}
+
+function routeHref(route) {
+  const parameters = new URLSearchParams();
   if (route.tab === "research") {
+    reviewModel.identityToSearchParams(parameters, route.review);
+    if (route.detail && route.detail !== "attempt") parameters.set("detail", route.detail);
+  } else if (route.tab === "papers") {
+    parameters.set("paper", route.paper.urlKey || route.paper.path);
+  } else if (route.tab === "manuscripts") {
+    parameters.set("manuscript", route.manuscript.urlKey || route.manuscript.path);
+    if (route.draft && route.draft.key !== route.manuscript.latest.key) {
+      parameters.set("draft", route.draft.name);
+    }
+  }
+  const query = parameters.toString();
+  return `${viewPaths[route.tab]}${query ? `?${query}` : ""}`;
+}
+
+function openRoute(route) {
+  if (route.tab === "research") {
+    state.search = "";
+    state.paperSort = "alphabetical";
+    state.researchFilters = reviewModel.createDefaultFilters();
     state.selectedReview = route.review.itemKey;
     state.selectedProblem = route.review.problemKey;
     state.detailTab = route.detail;
+    state.revealSidebarSelection = true;
+    state.revealSidebarSecondarySelection = true;
   } else if (route.tab === "papers") {
+    state.search = "";
+    state.paperSort = "alphabetical";
     state.selectedPaper = route.paper.key;
+    state.revealSidebarSelection = true;
   } else {
+    state.search = "";
     state.selectedManuscript = route.manuscript.key;
     state.selectedDraft = route.draft.key;
     state.manuscriptDraftSelections.set(route.manuscript.key, route.draft.key);
+    state.revealSidebarSelection = true;
     state.revealSidebarSecondarySelection = true;
   }
   setTab(route.tab);
   return true;
+}
+
+function routeLink(route, label, className) {
+  const link = node("a", className, label);
+  link.href = routeHref(route);
+  link.addEventListener("click", event => {
+    if (
+      event.defaultPrevented || event.button !== 0 || event.metaKey ||
+      event.ctrlKey || event.shiftKey || event.altKey
+    ) return;
+    event.preventDefault();
+    openRoute(route);
+  });
+  return link;
+}
+
+function targetChip(target) {
+  const route = targetRoute(target);
+  if (!route) return node("span", "target-chip", targetDisplayLabel(target));
+  const link = routeLink(route, targetDisplayLabel(target), "target-chip target-link");
+  link.title = `Open ${target.kind}`;
+  return link;
+}
+
+function openOutput(path) {
+  const route = outputRoute(path);
+  return route ? openRoute(route) : false;
 }
 
 const actionNames = {
