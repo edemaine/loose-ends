@@ -30,7 +30,7 @@ REVIEW_MODEL_PATH = (
 REVIEW_TOKENS_PATH = (
     Path(__file__).resolve().parent / "workbench_web" / "review_tokens.css"
 )
-DEFAULT_PRIORITY = "high,medium"
+DEFAULT_PRIORITY = "high,medium,low,none"
 PRIORITY_RANK = {
     "high": 0,
     "medium": 1,
@@ -943,7 +943,7 @@ def render_human_review_html(
             "initialPriorities": sorted(
                 initial_priorities
                 if initial_priorities is not None
-                else {"high", "medium"}
+                else set(review_solutions.HUMAN_PRIORITY_LEVELS)
             )
         }
     )
@@ -2289,7 +2289,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""examples:
-  Build and open the high- and medium-priority dashboard:
+  Build and open a dashboard containing every priority:
     python src/human_review.py papers/edemaine
 
   Show only the newest selected attempt for each problem:
@@ -2318,7 +2318,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "comma-separated reviewed-attempt priority levels initially "
             "shown in HTML, or included in terminal output "
-            "(default: high,medium)"
+            "(default: high,medium,low,none)"
         ),
     )
     parser.add_argument(

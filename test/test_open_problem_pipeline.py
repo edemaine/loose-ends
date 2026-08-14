@@ -1560,9 +1560,14 @@ class OpenProblemPipelineTests(unittest.TestCase):
                     ]
                 )
             self.assertEqual(returncode, 0)
+            empty_dashboard = empty_output.read_text(encoding="utf-8")
             self.assertIn(
                 '"attemptStatus": "unattempted"',
-                empty_output.read_text(encoding="utf-8"),
+                empty_dashboard,
+            )
+            self.assertIn(
+                '"initialPriorities": ["high", "low", "medium", "none"]',
+                empty_dashboard,
             )
 
     def test_human_review_converts_project_root_only_once(self):

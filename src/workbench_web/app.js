@@ -61,7 +61,7 @@ const viewPaths = Object.freeze({
   activity: "/activity",
 });
 const tabUrlStoragePrefix = "loose-ends-workbench:tab-url:";
-const initialPriorities = ["high", "medium"];
+const initialPriorities = [...reviewModel.priorityLevels];
 const pageScrollPositions = new Map();
 const sidebarControlNodes = new Map();
 let renderedUrl = "";

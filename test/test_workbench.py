@@ -330,6 +330,8 @@ class WorkbenchPlanningTests(unittest.TestCase):
         self.assertIn("function appendHighlightedJson(pre, value)", viewer)
         self.assertIn('span.className = `json-${kind}`', viewer)
         self.assertIn("function filtersFromSearchParams", model)
+        self.assertIn("function createDefaultFilters(initialPriorities = priorityLevels)", model)
+        self.assertIn("const initialPriorities = [...reviewModel.priorityLevels]", app)
         self.assertIn('["attempt", "Attempt (current)"]', model)
         self.assertIn('triage: "triage"', model)
         self.assertIn('const triage = filters.triage || "all"', model)

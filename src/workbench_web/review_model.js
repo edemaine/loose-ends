@@ -110,7 +110,7 @@
     return value === "unreviewed" ? "attempted, awaiting review" : humanize(value);
   }
 
-  function createDefaultFilters(initialPriorities = ["high", "medium"]) {
+  function createDefaultFilters(initialPriorities = priorityLevels) {
     return {
       attemptStatus: "all",
       triage: "all",
@@ -475,7 +475,7 @@
     return parts.join(" · ");
   }
 
-  function filtersFromSearchParams(parameters, initialPriorities = ["high", "medium"]) {
+  function filtersFromSearchParams(parameters, initialPriorities = priorityLevels) {
     const filters = createDefaultFilters(initialPriorities);
     Object.entries(filterParameters).forEach(([key, parameter]) => {
       const requested = parameters.get(parameter);
@@ -495,7 +495,7 @@
     return filters;
   }
 
-  function filtersToSearchParams(parameters, filters, initialPriorities = ["high", "medium"]) {
+  function filtersToSearchParams(parameters, filters, initialPriorities = priorityLevels) {
     const defaults = createDefaultFilters(initialPriorities);
     Object.entries(filterParameters).forEach(([key, parameter]) => {
       parameters.delete(parameter);
