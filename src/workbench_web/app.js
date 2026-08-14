@@ -27,6 +27,8 @@ const state = {
   selectedJob: "",
   detailTab: "attempt",
   detailCache: new Map(),
+  detailCacheVersions: new Map(),
+  detailLoads: new Map(),
   selection: new Map(),
   jobDetails: new Map(),
   runLogs: new Map(),
@@ -73,6 +75,7 @@ let sessionRefresh = null;
 let workerLimitDraft = null;
 let workerLimitTimer = null;
 let workerLimitSaving = false;
+let renderScrollTarget = null;
 const priorityLevels = [
   [-3, "⅛×"],
   [-2, "¼×"],
@@ -180,11 +183,17 @@ function restorePageScroll(url, preferredScroll) {
 
 function syncNavigation({ replace = false, preserveScroll = false } = {}) {
   if (!navigationReady) return;
+  const preservedScrollY = window.scrollY;
   rememberCurrentScroll();
+  const previousUrl = currentUrl();
+  renderScrollTarget = preserveScroll
+    ? preservedScrollY
+    : pageScrollPositions.get(scrollPositionKey(previousUrl)) ?? 0;
   render();
+  renderScrollTarget = null;
   const url = currentUrl();
   const scrollY = preserveScroll
-    ? window.scrollY
+    ? preservedScrollY
     : pageScrollPositions.get(scrollPositionKey(url)) ?? 0;
   const method = replace || url === renderedUrl ? "replaceState" : "pushState";
   history[method](historyPayload(scrollY), "", url);
@@ -238,7 +247,12 @@ function applyLocation({ scrollY } = {}) {
       job => job.id === state.selectedJob,
     );
   }
+  const requestedScroll = Number.isFinite(scrollY)
+    ? scrollY
+    : pageScrollPositions.get(scrollPositionKey(location.href)) ?? 0;
+  renderScrollTarget = requestedScroll;
   render();
+  renderScrollTarget = null;
   const canonicalUrl = currentUrl();
   const restoredScroll = Number.isFinite(scrollY)
     ? scrollY
@@ -453,7 +467,7 @@ async function refreshSession() {
     state.catalog = value.catalog;
     state.jobs = value.jobs;
     state.settings = value.settings || state.settings;
-    state.detailCache.clear();
+    invalidateReviewDetails();
     if (navigationReady) {
       syncNavigation({ replace: true, preserveScroll: true });
       connectEvents();
@@ -1218,15 +1232,61 @@ function renderResearch() {
     main.replaceChildren(document.getElementById("empty-template").content.cloneNode(true));
     return;
   }
-  renderReviewDetail(state.detailCache.get(summary.itemKey) || summary);
-  if (!state.detailCache.has(summary.itemKey)) {
-    api(`/api/review-detail?${new URLSearchParams({ key: summary.itemKey })}`)
-      .then(detail => {
-        state.detailCache.set(summary.itemKey, detail);
-        if (state.selectedReview === summary.itemKey && state.tab === "research") renderReviewDetail(detail);
-      })
-      .catch(error => showNotice(error.message, true));
+  const cachedDetail = state.detailCache.get(summary.itemKey);
+  renderReviewDetail(cachedDetail || summary);
+  if (!cachedDetail && Number.isFinite(renderScrollTarget) && renderScrollTarget > 0) {
+    const shell = main.querySelector(".main-inner");
+    if (shell) shell.style.minHeight = `${renderScrollTarget + window.innerHeight}px`;
   }
+  loadReviewDetail(summary);
+}
+
+function invalidateReviewDetails() {
+  const valid = new Set(state.catalog.reviews.map(item => item.itemKey));
+  state.detailCacheVersions.clear();
+  state.detailLoads.clear();
+  for (const key of state.detailCache.keys()) {
+    if (!valid.has(key)) state.detailCache.delete(key);
+  }
+}
+
+function renderReviewDetailPreservingScroll(detail) {
+  const scrollY = window.scrollY;
+  rememberCurrentScroll();
+  renderReviewDetail(detail);
+  restorePageScroll(renderedUrl || currentUrl(), scrollY);
+}
+
+function loadReviewDetail(summary) {
+  const version = Number(state.catalog.version) || 0;
+  if (
+    state.detailCache.has(summary.itemKey) &&
+    state.detailCacheVersions.get(summary.itemKey) === version
+  ) return;
+  const existing = state.detailLoads.get(summary.itemKey);
+  if (existing?.version === version) return;
+
+  const load = { version };
+  state.detailLoads.set(summary.itemKey, load);
+  load.promise = api(`/api/review-detail?${new URLSearchParams({ key: summary.itemKey })}`)
+    .then(detail => {
+      if (state.detailLoads.get(summary.itemKey) !== load) return;
+      state.detailCache.set(summary.itemKey, detail);
+      state.detailCacheVersions.set(summary.itemKey, version);
+      if (state.selectedReview === summary.itemKey && state.tab === "research") {
+        renderReviewDetailPreservingScroll(detail);
+      }
+    })
+    .catch(error => {
+      if (state.detailLoads.get(summary.itemKey) === load) {
+        showNotice(error.message, true);
+      }
+    })
+    .finally(() => {
+      if (state.detailLoads.get(summary.itemKey) === load) {
+        state.detailLoads.delete(summary.itemKey);
+      }
+    });
 }
 
 function markdown(value, missing = "No content available.") {
@@ -2527,7 +2587,7 @@ async function confirmTask() {
 
 async function refreshCatalog() {
   state.catalog = await api("/api/catalog");
-  state.detailCache.clear();
+  invalidateReviewDetails();
   if (navigationReady) syncNavigation({ replace: true, preserveScroll: true });
   else render();
 }
