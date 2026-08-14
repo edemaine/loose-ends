@@ -339,9 +339,9 @@ def _unit(
         if target["kind"] == "paper":
             resources.add(f"paper:{path}")
         elif target["kind"] == "problem":
-            resources.add(f"paper:{path.parent}")
+            resources.add(f"problem:{path}")
         elif target["kind"] == "attempt":
-            resources.add(f"paper:{path.parent.parent}")
+            resources.add(f"problem:{path.parent}")
         elif target["kind"] == "draft":
             resources.add(f"manuscript:{path.parent}")
     return {

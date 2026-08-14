@@ -26,6 +26,68 @@ DEFAULT_WORKER_LIMIT = 2
 MAX_WORKER_LIMIT = 64
 
 
+def _resource_identity(resource: str) -> tuple[str, str]:
+    """Return a comparable resource kind and path across slash conventions."""
+    kind, separator, value = resource.partition(":")
+    if not separator:
+        return "", resource
+    windows_path = "\\" in value or (
+        len(value) >= 2 and value[0].isalpha() and value[1] == ":"
+    )
+    path = value.replace("\\", "/").rstrip("/")
+    if windows_path:
+        path = path.casefold()
+    return kind, path
+
+
+def _resources_conflict(left: Iterable[str], right: Iterable[str]) -> bool:
+    """Whether two sets overlap, including paper/child-problem locks."""
+    left_identities = [_resource_identity(resource) for resource in left]
+    right_identities = [_resource_identity(resource) for resource in right]
+    for left_kind, left_path in left_identities:
+        for right_kind, right_path in right_identities:
+            if left_kind == right_kind and left_path == right_path:
+                return True
+            if left_kind == "paper" and right_kind == "problem":
+                if right_path.rpartition("/")[0] == left_path:
+                    return True
+            elif left_kind == "problem" and right_kind == "paper":
+                if left_path.rpartition("/")[0] == right_path:
+                    return True
+    return False
+
+
+def _run_resources(row: sqlite3.Row) -> set[str]:
+    """Get precise locks, refining paper-wide locks saved by older versions."""
+    stored = set(json.loads(row["resources_json"]))
+    targets = json.loads(row["targets_json"])
+    if not isinstance(targets, list):
+        return stored
+
+    derived: set[str] = set()
+    recognized = False
+    for target in targets:
+        if not isinstance(target, dict) or not isinstance(target.get("path"), str):
+            continue
+        path = target["path"].replace("\\", "/").rstrip("/")
+        if target.get("kind") == "paper":
+            derived.add(f"paper:{path}")
+            recognized = True
+        elif target.get("kind") == "problem":
+            derived.add(f"problem:{path}")
+            recognized = True
+        elif target.get("kind") == "attempt":
+            parent, separator, _name = path.rpartition("/")
+            if separator:
+                derived.add(f"problem:{parent}")
+                recognized = True
+    if not recognized:
+        return stored
+    return {
+        resource for resource in stored if not resource.startswith("paper:")
+    } | derived
+
+
 class WorkbenchStore:
     """Small SQLite-backed store safe to share with detached workers."""
 
@@ -444,8 +506,8 @@ class WorkbenchStore:
             for row in rows:
                 if row["job_id"] in eligible:
                     continue
-                resources = set(json.loads(row["resources_json"]))
-                if active_resources.intersection(resources):
+                resources = _run_resources(row)
+                if _resources_conflict(active_resources, resources):
                     continue
                 eligible[row["job_id"]] = row
             if not eligible:
@@ -507,12 +569,13 @@ class WorkbenchStore:
         placeholders = ",".join("?" for _ in ACTIVE_STATUSES)
         with self.connect() as connection:
             rows = connection.execute(
-                f"SELECT resources_json FROM runs WHERE status IN ({placeholders})",
+                f"""SELECT resources_json, targets_json FROM runs
+                WHERE status IN ({placeholders})""",
                 tuple(ACTIVE_STATUSES),
             ).fetchall()
         resources: set[str] = set()
         for row in rows:
-            resources.update(json.loads(row["resources_json"]))
+            resources.update(_run_resources(row))
         return resources
 
     def mark_starting(self, run_id: str) -> bool:

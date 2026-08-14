@@ -672,6 +672,28 @@ class WorkbenchPlanningTests(unittest.TestCase):
             )
             self.assertEqual(len(plan["units"]), 2)
 
+    def test_problem_plan_locks_only_its_problem(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = make_paper(root)
+            problem = (paper / "OP-001").resolve()
+            plan = build_plan(
+                {
+                    "action": "solve",
+                    "targets": [{"kind": "problem", "path": str(problem)}],
+                    "options": {},
+                },
+                project_root=PROJECT_ROOT,
+                allowed_roots=[root],
+                manuscripts=root / "manuscripts",
+                catalog_version=1,
+            )
+
+            self.assertIn(f"problem:{problem}", plan["units"][0]["resources"])
+            self.assertNotIn(
+                f"paper:{problem.parent}", plan["units"][0]["resources"]
+            )
+
     def test_write_plan_allows_artifacts_under_manuscript_root(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -748,6 +770,101 @@ class WorkbenchPlanningTests(unittest.TestCase):
 
 
 class WorkbenchStoreTests(unittest.TestCase):
+    @staticmethod
+    def _targeted_plan(
+        path: Path, *, kind: str, resource: str
+    ) -> dict:
+        plan = fake_plan(
+            [sys.executable, "-c", "pass"], resources=[resource]
+        )
+        plan["units"][0]["targets"] = [{"kind": kind, "path": str(path)}]
+        return plan
+
+    def test_different_problems_in_one_paper_can_run_together(self):
+        with TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            paper = state / "paper"
+            first_problem = paper / "OP-001"
+            second_problem = paper / "OP-002"
+            store = WorkbenchStore(state / "workbench.sqlite3", state)
+            # Paper locks here simulate queued jobs created before problem locks
+            # were introduced; target metadata should refine them on read.
+            store.create_job(
+                {"action": "solve"},
+                self._targeted_plan(
+                    first_problem,
+                    kind="problem",
+                    resource=f"paper:{paper}",
+                ),
+            )
+            store.create_job(
+                {"action": "solve"},
+                self._targeted_plan(
+                    second_problem,
+                    kind="problem",
+                    resource=f"paper:{paper}",
+                ),
+            )
+
+            first = store.claim_next_run(set())
+            store.update_run(
+                first["id"], status="running", heartbeat_at=time.time()
+            )
+
+            self.assertIsNotNone(store.claim_next_run(store.active_resources()))
+
+    def test_same_problem_runs_conflict(self):
+        with TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            problem = state / "paper" / "OP-001"
+            store = WorkbenchStore(state / "workbench.sqlite3", state)
+            for _ in range(2):
+                store.create_job(
+                    {"action": "solve"},
+                    self._targeted_plan(
+                        problem,
+                        kind="problem",
+                        resource=f"problem:{problem}",
+                    ),
+                )
+
+            first = store.claim_next_run(set())
+            store.update_run(
+                first["id"], status="running", heartbeat_at=time.time()
+            )
+
+            self.assertIsNone(store.claim_next_run(store.active_resources()))
+
+    def test_paper_run_conflicts_with_problem_run(self):
+        with TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            paper = state / "paper"
+            problem = paper / "OP-001"
+            store = WorkbenchStore(state / "workbench.sqlite3", state)
+            store.create_job(
+                {"action": "analyze"},
+                self._targeted_plan(
+                    paper,
+                    kind="paper",
+                    resource=f"paper:{paper}",
+                ),
+            )
+            store.create_job(
+                {"action": "solve"},
+                self._targeted_plan(
+                    problem,
+                    kind="problem",
+                    resource=f"problem:{problem}",
+                ),
+            )
+
+            first = store.claim_next_run(set())
+            store.update_run(
+                first["id"], status="running", heartbeat_at=time.time()
+            )
+
+            self.assertIsNone(store.claim_next_run(store.active_resources()))
+
     def test_weighted_scheduler_shares_starts_proportionally(self):
         with TemporaryDirectory() as temporary:
             state = Path(temporary)
