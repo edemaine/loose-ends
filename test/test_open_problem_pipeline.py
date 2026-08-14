@@ -1724,6 +1724,10 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 "# A substantive solution note\n\nThe detailed proof is here.\n",
                 encoding="utf-8",
             )
+            (workspace / "certificate.txt").write_text(
+                "Checked independently.\n",
+                encoding="utf-8",
+            )
             common.write_json(
                 workspace / "agent-result.json",
                 {
@@ -1740,7 +1744,8 @@ class OpenProblemPipelineTests(unittest.TestCase):
                         }
                     ],
                     "artifacts": [
-                        "[solution.md](C:/tmp/.solve-run/solution.md:1)"
+                        f"[Proof write-up]({workspace.as_posix()}/solution.md:1)",
+                        f"[Certificate]({workspace.as_posix()}/certificate.txt:1)",
                     ],
                     "warnings": [],
                 },
@@ -1786,7 +1791,14 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 result["checkable_claims"][0]["support"],
                 "C-001 supplies a proof.",
             )
-            self.assertEqual(result["artifacts"], [])
+            self.assertEqual(result["artifacts"], ["artifacts/certificate.txt"])
+            self.assertTrue(
+                (
+                    outcome.attempt.directory
+                    / "artifacts"
+                    / "certificate.txt"
+                ).is_file()
+            )
             attempt = (outcome.attempt.directory / "attempt.md").read_text(
                 encoding="utf-8"
             )

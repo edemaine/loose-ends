@@ -199,22 +199,46 @@ def _validated_artifact_paths(workspace: Path, values: object) -> list[Path]:
     paths: list[Path] = []
     seen: set[str] = set()
     for value in values:
-        normalized = value.replace("\\", "/")
-        if _core_output_artifact(normalized):
+        relative = _artifact_relative_path(workspace, value)
+        if relative is None:
+            raise common.CodexError(
+                f"solver response has unsafe artifact path: {value!r}"
+            )
+        normalized = relative.as_posix()
+        if normalized in CORE_OUTPUT_PATHS:
             continue
-        relative = PurePosixPath(normalized)
         if (
             relative.is_absolute()
             or not relative.parts
-            or relative.parts[0] != "artifacts"
             or ".." in relative.parts
             or normalized in seen
         ):
             raise common.CodexError(
                 f"solver response has unsafe artifact path: {value!r}"
             )
+        if relative.parts[0] == "artifacts":
+            path = workspace.joinpath(*relative.parts)
+        elif len(relative.parts) == 1:
+            source = workspace / relative.name
+            if not source.is_file():
+                raise common.CodexError(
+                    f"solver-listed artifact does not exist: {value}"
+                )
+            path = workspace / "artifacts" / relative.name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if not path.exists():
+                shutil.copyfile(source, path)
+            relative = PurePosixPath("artifacts", relative.name)
+            normalized = relative.as_posix()
+        else:
+            raise common.CodexError(
+                f"solver response has unsafe artifact path: {value!r}"
+            )
+        if normalized in seen:
+            raise common.CodexError(
+                f"solver response has unsafe artifact path: {value!r}"
+            )
         seen.add(normalized)
-        path = workspace.joinpath(*relative.parts)
         if not path.is_file():
             raise common.CodexError(
                 f"solver-listed artifact does not exist: {value}"
@@ -223,15 +247,39 @@ def _validated_artifact_paths(workspace: Path, values: object) -> list[Path]:
     return paths
 
 
-def _core_output_artifact(value: str) -> bool:
-    """Recognize a core Markdown output mistakenly listed as an artifact."""
-    if value in CORE_OUTPUT_PATHS:
-        return True
+def _artifact_relative_path(
+    workspace: Path,
+    value: str,
+) -> PurePosixPath | None:
+    """Parse a relative path or a model-generated local Markdown link."""
+    target = value
     match = re.fullmatch(r"\[([^\]]+)\]\((.+)\)", value)
-    if match is None or match.group(1) not in CORE_OUTPUT_PATHS:
-        return False
-    target = re.sub(r":\d+(?::\d+)?$", "", match.group(2))
-    return PurePosixPath(target.replace("\\", "/")).name == match.group(1)
+    if match is not None:
+        target = match.group(2)
+    target = target.strip()
+    if target.startswith("<") and target.endswith(">"):
+        target = target[1:-1]
+    target = re.sub(r":\d+(?::\d+)?$", "", target)
+    normalized = target.replace("\\", "/")
+    roots = {
+        workspace.resolve().as_posix().rstrip("/"),
+        codex_cli.path_for_codex(workspace).replace("\\", "/").rstrip("/"),
+    }
+    folded = normalized.casefold()
+    for root in roots:
+        prefix = root.casefold() + "/"
+        if folded.startswith(prefix):
+            normalized = normalized[len(root) + 1:]
+            break
+    else:
+        if normalized.startswith("/") or re.match(
+            r"^[A-Za-z]:/", normalized
+        ):
+            return None
+    relative = PurePosixPath(normalized)
+    if not relative.parts or relative.is_absolute() or ".." in relative.parts:
+        return None
+    return relative
 
 
 def _normalize_solver_claim_ids(result: dict) -> dict[str, str]:
