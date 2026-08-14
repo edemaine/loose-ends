@@ -70,7 +70,8 @@ Write `attempt.md` in the current working directory. It must include:
 - a detailed derivation or experiment;
 - explicit checks for hidden assumptions and edge cases;
 - a section titled `Checkable claims`, using IDs `C-001`, `C-002`, ... that
-  exactly match the structured response;
+  exactly match the structured response (the hyphen and three-digit padding
+  are mandatory; `C1` is invalid);
 - remaining gaps and an honest bottom line.
 
 Put useful code, data, or auxiliary derivations under `artifacts/`, and list

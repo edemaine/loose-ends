@@ -34,7 +34,8 @@
         "type": "object",
         "properties": {
           "id": {
-            "type": "string"
+            "type": "string",
+            "pattern": "^C-[0-9]{3,}$"
           },
           "type": {
             "type": "string",

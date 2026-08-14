@@ -1706,6 +1706,91 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 ".solve-run-preserved",
             )
 
+    def test_solver_recovers_loose_claim_ids_and_solution_filename(self):
+        with TemporaryDirectory() as temporary:
+            paper = make_analyzed_paper(Path(temporary))
+            problem = common.discover_problem_refs(
+                [paper], problem_ids={"OP-001"}
+            )[0]
+            problem.directory.mkdir(parents=True)
+            workspace = problem.directory / ".solve-run-preserved"
+            workspace.mkdir()
+            (workspace / "solution.md").write_text(
+                "# A substantive solution note\n\nThe detailed proof is here.\n",
+                encoding="utf-8",
+            )
+            common.write_json(
+                workspace / "agent-result.json",
+                {
+                    "claimed_result_type": "partial_result",
+                    "summary": "A lemma was proved.",
+                    "external_sources": [],
+                    "checkable_claims": [
+                        {
+                            "id": "C1",
+                            "type": "lemma",
+                            "statement": "The lemma.",
+                            "support": "C1 supplies a proof.",
+                            "remaining_gap": "The theorem remains.",
+                        }
+                    ],
+                    "artifacts": [
+                        "[solution.md](C:/tmp/.solve-run/solution.md:1)"
+                    ],
+                    "warnings": [],
+                },
+            )
+            write_run_files(workspace)
+            work = solve_open_problems.SolveWork(
+                problem,
+                solve_open_problems.generic_guidance(),
+                1,
+                None,
+            )
+            options = codex_cli.ModelOptions()
+            solve_open_problems._write_work_record(
+                workspace,
+                work,
+                config_digest="config",
+                codex_version="test",
+                options=options,
+                prior_history_digest=common.attempt_history_digest(problem),
+            )
+
+            with patch.object(
+                codex_cli,
+                "run_structured_codex",
+            ) as run:
+                outcome = solve_open_problems.solve_work(
+                    work,
+                    codex="codex",
+                    codex_version="test",
+                    prompt_template="prompt",
+                    schema_path=Path("schema"),
+                    config_digest="config",
+                    options=options,
+                    launch_interval=0,
+                )
+
+            run.assert_not_called()
+            result = common.read_json(
+                outcome.attempt.directory / "solver-result.json"
+            )
+            self.assertEqual(result["checkable_claims"][0]["id"], "C-001")
+            self.assertEqual(
+                result["checkable_claims"][0]["support"],
+                "C-001 supplies a proof.",
+            )
+            self.assertEqual(result["artifacts"], [])
+            attempt = (outcome.attempt.directory / "attempt.md").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("The detailed proof is here.", attempt)
+            self.assertIn("### C-001", attempt)
+            self.assertTrue(
+                any("solution.md" in warning for warning in result["warnings"])
+            )
+
     def test_solver_recovers_markdown_blocked_by_windows_sandbox(self):
         with TemporaryDirectory() as temporary:
             paper = make_analyzed_paper(Path(temporary))

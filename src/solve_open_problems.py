@@ -30,7 +30,8 @@ DEFAULT_REVIEW_PROMPT_PATH = review_solutions.DEFAULT_PROMPT_PATH
 DEFAULT_REVIEW_SCHEMA_PATH = review_solutions.DEFAULT_SCHEMA_PATH
 SOLUTION_STATUSES = common.CLAIMED_RESULT_TYPES
 CLAIM_ID_RE = re.compile(r"^C-[0-9]{3,}$")
-CORE_OUTPUT_PATHS = {"attempt.md"}
+LOOSE_CLAIM_ID_RE = re.compile(r"^C[-_ ]?0*([1-9][0-9]*)$")
+CORE_OUTPUT_PATHS = {"attempt.md", "solution.md"}
 WORK_RECORD_FILE = "work-record.json"
 
 
@@ -199,7 +200,7 @@ def _validated_artifact_paths(workspace: Path, values: object) -> list[Path]:
     seen: set[str] = set()
     for value in values:
         normalized = value.replace("\\", "/")
-        if normalized in CORE_OUTPUT_PATHS:
+        if _core_output_artifact(normalized):
             continue
         relative = PurePosixPath(normalized)
         if (
@@ -220,6 +221,84 @@ def _validated_artifact_paths(workspace: Path, values: object) -> list[Path]:
             )
         paths.append(path)
     return paths
+
+
+def _core_output_artifact(value: str) -> bool:
+    """Recognize a core Markdown output mistakenly listed as an artifact."""
+    if value in CORE_OUTPUT_PATHS:
+        return True
+    match = re.fullmatch(r"\[([^\]]+)\]\((.+)\)", value)
+    if match is None or match.group(1) not in CORE_OUTPUT_PATHS:
+        return False
+    target = re.sub(r":\d+(?::\d+)?$", "", match.group(2))
+    return PurePosixPath(target.replace("\\", "/")).name == match.group(1)
+
+
+def _normalize_solver_claim_ids(result: dict) -> dict[str, str]:
+    """Canonicalize unambiguous spellings such as C1 to C-001."""
+    claims = result.get("checkable_claims")
+    if not isinstance(claims, list):
+        return {}
+    changes: dict[str, str] = {}
+    normalized_ids: set[str] = set()
+    for claim in claims:
+        if not isinstance(claim, dict):
+            continue
+        claim_id = claim.get("id")
+        canonical = claim_id if isinstance(claim_id, str) else None
+        if isinstance(claim_id, str) and not CLAIM_ID_RE.fullmatch(claim_id):
+            match = LOOSE_CLAIM_ID_RE.fullmatch(claim_id)
+            canonical = (
+                f"C-{int(match.group(1)):03d}" if match is not None else None
+            )
+        if canonical is None or canonical in normalized_ids:
+            continue
+        normalized_ids.add(canonical)
+        if canonical != claim_id:
+            changes[claim_id] = canonical
+            claim["id"] = canonical
+    if changes:
+        if isinstance(result.get("summary"), str):
+            result["summary"] = _replace_claim_ids(
+                result["summary"], changes
+            )
+        for claim in claims:
+            if not isinstance(claim, dict):
+                continue
+            for field in ("statement", "support", "remaining_gap"):
+                if isinstance(claim.get(field), str):
+                    claim[field] = _replace_claim_ids(claim[field], changes)
+        for source in result.get("external_sources", []):
+            if not isinstance(source, dict):
+                continue
+            for field in ("title", "used_for", "verification"):
+                if isinstance(source.get(field), str):
+                    source[field] = _replace_claim_ids(
+                        source[field], changes
+                    )
+        if isinstance(result.get("warnings"), list):
+            result["warnings"] = [
+                _replace_claim_ids(warning, changes)
+                for warning in result["warnings"]
+            ]
+    if changes and isinstance(result.get("warnings"), list):
+        rendered = ", ".join(
+            f"{old} -> {new}" for old, new in changes.items()
+        )
+        result["warnings"].append(
+            f"Driver normalized solver claim IDs: {rendered}."
+        )
+    return changes
+
+
+def _replace_claim_ids(contents: str, changes: dict[str, str]) -> str:
+    for old, new in changes.items():
+        contents = re.sub(
+            rf"(?<![A-Za-z0-9_-]){re.escape(old)}(?![A-Za-z0-9_-])",
+            new,
+            contents,
+        )
+    return contents
 
 
 def validate_solver_result(
@@ -256,6 +335,7 @@ def validate_solver_result(
         isinstance(value, str) for value in warnings
     ):
         raise common.CodexError("solver response has invalid warnings")
+    claim_id_changes = _normalize_solver_claim_ids(result)
     claims = result.get("checkable_claims")
     if not isinstance(claims, list):
         raise common.CodexError("solver response has no checkable_claims array")
@@ -300,10 +380,15 @@ def validate_solver_result(
             f"{claimed_result_type} response contains no checkable claims"
         )
     if require_markdown:
+        attempt_path = workspace / "attempt.md"
         contents = common.validate_markdown(
-            workspace / "attempt.md",
+            attempt_path,
             description="solver attempt",
         )
+        normalized_contents = _replace_claim_ids(contents, claim_id_changes)
+        if normalized_contents != contents:
+            attempt_path.write_text(normalized_contents, encoding="utf-8")
+            contents = normalized_contents
         missing_ids = [
             claim_id for claim_id in claim_ids if claim_id not in contents
         ]
@@ -317,7 +402,62 @@ def validate_solver_result(
         path.relative_to(workspace).as_posix()
         for path in artifacts
     ]
+    if claim_id_changes or result != common.read_json(
+        result_path,
+        description="solver response",
+    ):
+        common.write_json(result_path, result)
     return result, artifacts
+
+
+def recover_alternate_attempt_markdown(
+    work: SolveWork,
+    workspace: Path,
+) -> bool:
+    """Use a substantive solution.md when the solver misnamed attempt.md."""
+    attempt_path = workspace / "attempt.md"
+    source_path = workspace / "solution.md"
+    if attempt_path.is_file() or not source_path.is_file():
+        return False
+    result_path = workspace / "agent-result.json"
+    result, _ = validate_solver_result(
+        result_path,
+        workspace,
+        require_markdown=False,
+    )
+    contents = common.validate_markdown(
+        source_path,
+        description="solver solution",
+    ).rstrip()
+    missing_claims = [
+        claim for claim in result["checkable_claims"]
+        if claim["id"] not in contents
+    ]
+    if missing_claims:
+        lines = ["", "", "## Checkable claims", ""]
+        for claim in missing_claims:
+            lines.extend(
+                [
+                    f"### {claim['id']} — {claim['type']}",
+                    "",
+                    f"**Statement.** {claim['statement'].strip()}",
+                    "",
+                    f"**Support.** {claim['support'].strip()}",
+                    "",
+                    f"**Remaining gap.** {claim['remaining_gap'].strip()}",
+                    "",
+                ]
+            )
+        contents += "\n".join(lines).rstrip()
+    warning = (
+        "Driver recovery: used the solver-written solution.md as attempt.md"
+        " and supplied any missing structured claim labels."
+    )
+    if warning not in result["warnings"]:
+        result["warnings"].append(warning)
+    common.write_json(result_path, result)
+    attempt_path.write_text(contents.rstrip() + "\n", encoding="utf-8")
+    return True
 
 
 def _recovered_attempt_markdown(work: SolveWork, result: dict) -> str:
@@ -576,6 +716,7 @@ def recover_solver_work(
             continue
         assert record is not None
         codex_cli.normalize_workspace_access(workspace, codex)
+        recover_alternate_attempt_markdown(work, workspace)
         recover_missing_attempt_markdown(work, workspace)
         if not (workspace / "attempt.md").is_file():
             continue
@@ -680,6 +821,7 @@ def solve_work(
             web_search=web_search,
             launch_interval=launch_interval,
         )
+        recover_alternate_attempt_markdown(work, workspace)
         recover_missing_attempt_markdown(work, workspace)
         result, artifacts = validate_solver_result(result_path, workspace)
         destination = _install_attempt(
