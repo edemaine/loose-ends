@@ -237,6 +237,7 @@ class CodexCliTests(unittest.TestCase):
         ):
             completed, stopped, timed_out = codex_cli._run_codex_process(
                 ["codex"],
+                prompt="test prompt",
                 workspace=Path("."),
                 environment={},
                 events=events,
@@ -268,6 +269,7 @@ class CodexCliTests(unittest.TestCase):
         ):
             _, stopped, timed_out = codex_cli._run_codex_process(
                 ["codex"],
+                prompt="test prompt",
                 workspace=Path("."),
                 environment={},
                 events=StringIO(),
@@ -298,6 +300,7 @@ class CodexCliTests(unittest.TestCase):
             completed, structured, timed_out = (
                 codex_cli._run_codex_process(
                     ["codex"],
+                    prompt="test prompt",
                     workspace=Path("."),
                     environment={},
                     events=StringIO(),

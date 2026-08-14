@@ -963,6 +963,47 @@ class WorkbenchStoreTests(unittest.TestCase):
                 },
             )
 
+    def test_job_list_includes_only_latest_nonterminal_runs(self):
+        with TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            first_problem = state / "paper" / "OP-001"
+            second_problem = state / "paper" / "OP-002"
+            plan = fake_plan(
+                [sys.executable, "-c", "pass"], unit_count=2
+            )
+            plan["units"][0]["targets"] = [
+                {"kind": "problem", "path": str(first_problem)}
+            ]
+            plan["units"][1]["targets"] = [
+                {"kind": "problem", "path": str(second_problem)}
+            ]
+            store = WorkbenchStore(state / "workbench.sqlite3", state)
+            job = store.create_job({"action": "solve"}, plan)
+            first, second = job["runs"]
+            store.update_run(
+                first["id"], status="succeeded", finished_at=time.time()
+            )
+
+            listed = store.list_jobs()[0]
+
+            self.assertEqual(
+                listed["liveRuns"],
+                [
+                    {
+                        "id": second["id"],
+                        "job_id": job["id"],
+                        "unit_index": 1,
+                        "label": "Fake run 2",
+                        "status": "queued",
+                        "targets": [
+                            {"kind": "problem", "path": str(second_problem)}
+                        ],
+                        "created_at": second["created_at"],
+                        "started_at": None,
+                    }
+                ],
+            )
+
     def test_mixed_success_and_failure_is_partial_with_detailed_counts(self):
         with TemporaryDirectory() as temporary:
             state = Path(temporary)

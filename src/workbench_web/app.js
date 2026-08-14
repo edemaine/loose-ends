@@ -950,18 +950,29 @@ function attemptTagsNode(item, options = {}) {
   return tags;
 }
 
-function appendSideCard(parent, { title, meta, tags, active, selectedTarget, onClick }) {
+function appendSideCard(parent, {
+  title, meta, tags, active, selectedTarget, onClick, relatedProblem,
+}) {
   const card = node("div", `side-card${active ? " active" : ""}`);
   card.role = "button";
   card.tabIndex = 0;
   if (selectedTarget) card.append(selectionCheckbox(selectedTarget));
   else card.append(node("span"));
   const copy = node("span");
+  const titleRow = node("span", "side-card-title-row");
   const titleNode = node("strong", "", title);
   titleNode.title = title;
   const metaNode = node("small", "", meta);
   metaNode.title = meta;
-  copy.append(titleNode);
+  titleRow.append(titleNode);
+  if (relatedProblem) {
+    titleRow.append(relatedTaskHost({
+      paperPath: relatedProblem.paperDirectory,
+      problemPath: `${relatedProblem.paperDirectory}/${relatedProblem.problemId}`,
+      includePaper: false,
+    }));
+  }
+  copy.append(titleRow);
   if (tags) copy.append(tags);
   copy.append(metaNode);
   card.append(copy);
@@ -973,6 +984,7 @@ function appendSideCard(parent, { title, meta, tags, active, selectedTarget, onC
     }
   });
   parent.append(card);
+  return card;
 }
 
 function filteredReviews() {
@@ -1140,11 +1152,18 @@ function renderResearch() {
   const listScroll = node("div", "problem-scroll");
   listScroll.append(node("div", "sidebar-heading queue-summary", reviewModel.queueSummary(reviews, state.researchFilters)));
   for (const group of paperGroups) {
-    listScroll.append(node(
-      "div",
-      "sidebar-heading paper-heading",
-      reviewModel.paperTitleWithYear(group.paperTitle, group.publicationTimestamp),
-    ));
+    const paperHeading = node("div", "sidebar-heading paper-heading");
+    const paperHeadingLabel = reviewModel.paperTitleWithYear(
+      group.paperTitle,
+      group.publicationTimestamp,
+    );
+    const paperHeadingTitle = node("span", "paper-heading-title", paperHeadingLabel);
+    paperHeadingTitle.title = paperHeadingLabel;
+    paperHeading.append(
+      paperHeadingTitle,
+      relatedTaskHost({ paperPath: group.paperDirectory }),
+    );
+    listScroll.append(paperHeading);
     const list = node("div", "side-list");
     group.problems.forEach(item => {
       appendSideCard(list, {
@@ -1155,6 +1174,7 @@ function renderResearch() {
         tags: attemptTagsNode(item, { includeKnown: true }),
         active: state.selectedProblem === item.problemKey,
         selectedTarget: problemTarget(item),
+        relatedProblem: item,
         onClick: () => {
           state.selectedProblem = item.problemKey;
           state.selectedReview = reviewModel.attemptsForProblem(reviews, item.problemKey)[0]?.itemKey || item.itemKey;
@@ -1263,6 +1283,8 @@ function renderReviewDetail(item) {
     addAction(actions, "Write this result", "write", [attempt]);
   }
   shell.append(actions);
+
+  shell.append(relatedTasksPanel(item));
 
   const problemStatement = node("section", "problem-statement panel");
   problemStatement.append(
@@ -1961,6 +1983,133 @@ function pathContains(parent, child) {
   return value === root || value.startsWith(`${root}/`);
 }
 
+function liveRunRelation(run, paperPath, problemPath = "") {
+  const paper = normalizedPath(paperPath);
+  const problem = normalizedPath(problemPath);
+  let paperWide = false;
+  let direct = false;
+  (run.targets || []).forEach(target => {
+    if (!target || typeof target.path !== "string") return;
+    const path = normalizedPath(target.path);
+    if (target.kind === "paper" && path === paper) paperWide = true;
+    else if (target.kind === "problem" && problem && path === problem) direct = true;
+    else if (target.kind === "attempt" && problem) {
+      const parent = path.split("/").slice(0, -1).join("/");
+      if (parent === problem) direct = true;
+    }
+  });
+  return { paperWide, direct };
+}
+
+function relatedEntryStatus(entry) {
+  const statuses = new Set(entry.runs.map(run => run.status));
+  for (const status of ["running", "starting", "cancel_requested"]) {
+    if (statuses.has(status)) return { ...taskStatus(status), status };
+  }
+  if (statuses.has("queued") && taskIsPaused(entry.job)) {
+    return { label: "Paused", tone: "paused", active: false, status: "paused" };
+  }
+  return { ...taskStatus("queued"), status: "queued" };
+}
+
+function relatedTaskEntries({ paperPath, problemPath = "", includePaper = true }) {
+  const entries = [];
+  state.jobs.forEach(job => {
+    const runs = (job.liveRuns || []).filter(run => {
+      const relation = liveRunRelation(run, paperPath, problemPath);
+      return relation.direct || (includePaper && relation.paperWide);
+    });
+    if (runs.length) entries.push({ job, runs });
+  });
+  const rank = { running: 0, starting: 1, cancel_requested: 2, queued: 3, paused: 4 };
+  return entries.sort((left, right) => {
+    const leftStatus = relatedEntryStatus(left);
+    const rightStatus = relatedEntryStatus(right);
+    const leftRank = rank[leftStatus.status] ?? 5;
+    const rightRank = rank[rightStatus.status] ?? 5;
+    return leftRank - rightRank || Number(right.job.created_at) - Number(left.job.created_at);
+  });
+}
+
+function openRelatedTask(jobId) {
+  state.selectedJob = jobId;
+  setTab("activity");
+}
+
+function fillRelatedTaskHost(host) {
+  const entries = relatedTaskEntries({
+    paperPath: host.dataset.relatedPaper,
+    problemPath: host.dataset.relatedProblem || "",
+    includePaper: host.dataset.includePaper !== "0",
+  });
+  host.replaceChildren();
+  host.hidden = !entries.length;
+  if (!entries.length) return;
+  const status = relatedEntryStatus(entries[0]);
+  const label = `${status.label}${entries.length > 1 ? ` · ${entries.length}` : ""}`;
+  const pill = button(label, event => {
+    event.stopPropagation();
+    openRelatedTask(entries[0].job.id);
+  }, `badge sidebar-task-pill ${status.tone}`);
+  pill.title = entries.map(entry => {
+    const value = relatedEntryStatus(entry);
+    return `${value.label}: ${taskActionTitle(entry.job.action)}`;
+  }).join("\n");
+  host.append(pill);
+}
+
+function relatedTaskHost({ paperPath, problemPath = "", includePaper = true }) {
+  const host = node("span", "sidebar-related-tasks");
+  host.dataset.relatedPaper = normalizedPath(paperPath);
+  if (problemPath) host.dataset.relatedProblem = normalizedPath(problemPath);
+  host.dataset.includePaper = includePaper ? "1" : "0";
+  fillRelatedTaskHost(host);
+  return host;
+}
+
+function fillRelatedTasksPanel(panel) {
+  const entries = relatedTaskEntries({
+    paperPath: panel.dataset.relatedPaper,
+    problemPath: panel.dataset.relatedProblem,
+  });
+  panel.replaceChildren();
+  panel.hidden = !entries.length;
+  if (!entries.length) return;
+  const heading = node("div", "related-tasks-heading");
+  heading.append(
+    node("h2", "", "Related tasks"),
+    badge(`${entries.length} task${entries.length === 1 ? "" : "s"}`, "neutral"),
+  );
+  const list = node("div", "related-task-list");
+  entries.forEach(entry => {
+    const status = relatedEntryStatus(entry);
+    const row = button("", () => openRelatedTask(entry.job.id), "related-task-row");
+    const copy = node("span", "related-task-copy");
+    copy.append(
+      node("strong", "", taskActionTitle(entry.job.action)),
+      node("small", "", `${taskScopeSummary(entry.job)} · ${taskSidebarMeta(entry.job)}`),
+    );
+    row.append(node("span", `badge ${status.tone}`, status.label), copy, node("span", "related-task-arrow", "›"));
+    row.setAttribute("aria-label", `Open ${taskActionTitle(entry.job.action)} task`);
+    list.append(row);
+  });
+  panel.append(heading, list);
+}
+
+function relatedTasksPanel(item) {
+  const panel = node("section", "related-tasks panel");
+  panel.dataset.relatedPaper = normalizedPath(item.paperDirectory);
+  panel.dataset.relatedProblem = normalizedPath(`${item.paperDirectory}/${item.problemId}`);
+  fillRelatedTasksPanel(panel);
+  return panel;
+}
+
+function syncResearchRelatedTasks() {
+  if (state.tab !== "research") return;
+  sidebar.querySelectorAll(".sidebar-related-tasks").forEach(fillRelatedTaskHost);
+  main.querySelectorAll(".related-tasks").forEach(fillRelatedTasksPanel);
+}
+
 function outputRoute(path) {
   const filename = path.split(/[\\/]/).pop()?.toLowerCase() || "";
   const review = state.catalog.reviews.find(
@@ -2081,7 +2230,7 @@ function taskScopeSummary(job) {
   const pieces = [targetCountLabel(targets)];
   const papers = targetPaperCount(targets);
   if (papers) pieces.push(`${papers} paper${papers === 1 ? "" : "s"}`);
-  const units = job.plan?.units?.length || new Set(job.runs.map(run => run.unit_index)).size;
+  const units = job.plan?.units?.length || new Set((job.runs || []).map(run => run.unit_index)).size;
   if (units) pieces.push(`${units} run${units === 1 ? "" : "s"}`);
   return pieces.join(" · ");
 }
@@ -2387,6 +2536,10 @@ async function refreshJobs({ preserveActivityDetail = false } = {}) {
   const value = await api("/api/jobs");
   state.jobs = value.jobs;
   updateActivityCount();
+  if (navigationReady && state.tab === "research") {
+    syncResearchRelatedTasks();
+    return;
+  }
   if (!navigationReady || state.tab !== "activity") return;
   rememberSidebarScroll();
   renderActivity({ preserveDetail: preserveActivityDetail });

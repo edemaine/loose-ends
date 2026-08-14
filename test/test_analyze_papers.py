@@ -254,9 +254,11 @@ class AnalyzePaperTests(unittest.TestCase):
             self.assertIn("--json", command)
             self.assertIn("workspace-write", command)
             self.assertNotIn("--add-dir", command)
+            self.assertEqual(command[-1], "-")
+            self.assertEqual(run.call_args.kwargs["encoding"], "utf-8")
             self.assertIn(
                 analyze_papers.STAGED_PAPER_DIRECTORY,
-                command[-1],
+                run.call_args.kwargs["input"],
             )
 
     @patch.object(analyze_papers.subprocess, "run")

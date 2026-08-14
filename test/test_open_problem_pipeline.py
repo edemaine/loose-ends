@@ -2390,6 +2390,8 @@ class OpenProblemPipelineTests(unittest.TestCase):
         self.assertIn("sandbox_workspace_write.network_access=false", command)
         self.assertIn("apps._default.enabled=false", command)
         self.assertIn("agents.enabled=false", command)
+        self.assertNotIn("prompt", command)
+        self.assertEqual(command[-1], "-")
 
 
 if __name__ == "__main__":

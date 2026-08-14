@@ -152,7 +152,8 @@ button { color: inherit; }
 .filter-footer { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--muted); font-size: 9px; }
 .filter-reset { border: 0; background: transparent; color: var(--accent); padding: 2px; font-size: 9px; font-weight: 800; cursor: pointer; }
 .problem-scroll, .manuscript-scroll { flex: 1 1 auto; min-height: 100px; overflow: auto; margin-top: 4px; padding-right: 2px; scrollbar-gutter: stable; }
-.paper-heading { margin-top: 9px; color: var(--accent); letter-spacing: .04em; text-transform: none; }
+.paper-heading { display: flex; align-items: center; justify-content: space-between; gap: 5px; margin-top: 9px; color: var(--accent); letter-spacing: .04em; text-transform: none; }
+.paper-heading-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .attempt-switcher, .draft-switcher { flex: none; max-height: 155px; overflow: hidden; margin-top: 5px; padding-top: 2px; border-top: 1px solid var(--line); }
 .attempt-switcher > .sidebar-heading, .draft-switcher > .sidebar-heading { margin-top: 3px; }
 .attempt-list, .draft-list { display: grid; gap: 2px; max-height: 125px; overflow: auto; padding-right: 2px; scrollbar-gutter: stable; }
@@ -174,12 +175,18 @@ button { color: inherit; }
 .side-card:hover { border-color: var(--line); background: var(--surface); }
 .side-card.active { border-color: var(--accent); background: var(--surface); box-shadow: 0 0 0 2px var(--accent-ring); }
 .side-card > span { min-width: 0; }
+.side-card-title-row { display: flex; min-width: 0; align-items: flex-start; justify-content: space-between; gap: 5px; }
+.side-card-title-row > strong { min-width: 0; flex: 1; }
 .side-card input { width: 13px; height: 13px; margin: 2px 0 0; accent-color: var(--accent); }
 .side-card strong { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; color: var(--heading); font-size: 12px; line-height: 1.22; }
 .side-card small { display: block; overflow: hidden; margin-top: 1px; color: var(--muted); font-size: 9px; line-height: 1.2; text-overflow: ellipsis; white-space: nowrap; }
 .side-card > span > .badge { margin-top: 3px; padding: 2px 5px; font-size: 8px; }
 .task-badges { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 3px; }
 .side-card > span > .task-badges .badge { padding: 2px 5px; font-size: 8px; }
+.sidebar-related-tasks { display: inline-flex; flex: none; }
+.sidebar-related-tasks[hidden] { display: none; }
+.sidebar-task-pill { flex: none; border: 0; padding: 2px 5px; font: inherit; font-size: 7px; line-height: 1.25; cursor: pointer; white-space: nowrap; }
+.sidebar-task-pill:hover, .sidebar-task-pill:focus-visible { filter: brightness(1.2); outline: 1px solid currentColor; }
 .attempt-tags { display: flex; min-width: 0; flex-wrap: wrap; gap: 2px; margin-top: 2px; }
 .attempt-tag { max-width: 100%; overflow: hidden; border-radius: 999px; background: var(--low-bg); color: var(--low); padding: 1px 4px; font-size: 8px; font-weight: 800; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
 .attempt-tag.claim { background: var(--accent-soft); color: var(--accent); }
@@ -229,6 +236,18 @@ button { color: inherit; }
 .panel p { margin: 0; }
 .panel > .markdown { border: 0; background: transparent; padding: 0; }
 .problem-statement { margin-top: 16px; box-shadow: none; }
+.related-tasks { margin: -6px 0 16px; padding: 10px; box-shadow: none; }
+.related-tasks[hidden] { display: none; }
+.related-tasks-heading { display: flex; align-items: center; gap: 6px; margin-bottom: 7px; }
+.related-tasks-heading h2 { margin: 0; font-size: 14px; }
+.related-task-list { display: grid; gap: 4px; }
+.related-task-row { width: 100%; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--ink); padding: 6px 8px; text-align: left; cursor: pointer; }
+.related-task-row:hover, .related-task-row:focus-visible { border-color: var(--accent); outline: none; }
+.related-task-copy { min-width: 0; }
+.related-task-copy strong, .related-task-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.related-task-copy strong { color: var(--heading); font-size: 11px; }
+.related-task-copy small { margin-top: 1px; color: var(--muted); font-size: 9px; }
+.related-task-arrow { color: var(--accent); font-size: 18px; line-height: 1; }
 .attempt-path { display: block; margin-top: 7px; color: var(--muted); overflow-wrap: anywhere; font: 11px/1.4 ui-monospace, "Cascadia Code", Consolas, monospace; }
 .plain-list, .claim-list { margin: 7px 0 0; padding-left: 20px; }
 .plain-list li + li, .claim-list li + li { margin-top: 5px; }

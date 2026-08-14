@@ -808,6 +808,7 @@ def _stop_codex_process(process: subprocess.Popen) -> None:
 def _run_codex_process(
     command: list[str],
     *,
+    prompt: str,
     workspace: Path,
     environment: dict[str, str],
     events,
@@ -821,12 +822,26 @@ def _run_codex_process(
     popen_options: dict = {
         "cwd": workspace,
         "env": environment,
+        "stdin": subprocess.PIPE,
         "stdout": events,
         "stderr": log,
         "text": True,
+        "encoding": "utf-8",
     }
     popen_options.update(windowless_popen_options())
     process = subprocess.Popen(command, **popen_options)
+    if process.stdin is None:
+        _stop_codex_process(process)
+        raise CodexError("could not open Codex prompt input")
+    try:
+        process.stdin.write(prompt)
+    except BrokenPipeError:
+        pass
+    finally:
+        try:
+            process.stdin.close()
+        except BrokenPipeError:
+            pass
     started_at = time.monotonic()
     completed_at: float | None = None
     structured_result_complete = False
@@ -944,7 +959,10 @@ def build_exec_command(
                 'service_tier="fast"',
             )
         )
-    command.append(prompt)
+    # Windows has a comparatively small process command-line limit.  Prompts
+    # can exceed it, especially for manuscript-writing agents, so keep the
+    # prompt off argv and tell Codex to read it from standard input.
+    command.append("-")
     return command
 
 
@@ -1007,9 +1025,11 @@ def run_structured_codex(
                         command,
                         cwd=workspace,
                         env=environment,
+                        input=prompt,
                         stdout=events,
                         stderr=log,
                         text=True,
+                        encoding="utf-8",
                         check=False,
                     )
                 else:
@@ -1019,6 +1039,7 @@ def run_structured_codex(
                         timed_out,
                     ) = _run_codex_process(
                         command,
+                        prompt=prompt,
                         workspace=workspace,
                         environment=environment,
                         events=events,

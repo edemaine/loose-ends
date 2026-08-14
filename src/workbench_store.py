@@ -375,10 +375,36 @@ class WorkbenchStore:
                     """
                 )
             }
+            live_runs: dict[str, list[dict]] = {}
+            for run_row in connection.execute(
+                """
+                WITH latest AS (
+                    SELECT id, job_id, unit_index, label, status, targets_json,
+                        created_at, started_at,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY job_id, unit_index
+                            ORDER BY created_at DESC
+                        ) AS position
+                    FROM runs
+                )
+                SELECT id, job_id, unit_index, label, status, targets_json,
+                    created_at, started_at
+                FROM latest
+                WHERE position = 1
+                    AND status IN (
+                        'queued', 'starting', 'running', 'cancel_requested'
+                    )
+                ORDER BY job_id, unit_index, created_at
+                """
+            ):
+                run = dict(run_row)
+                run["targets"] = json.loads(run.pop("targets_json"))
+                live_runs.setdefault(run["job_id"], []).append(run)
         jobs = []
         for row in rows:
             job = self._decode(row, ("request_json", "plan_json"))
             job["counts"] = counts.get(job["id"], {})
+            job["liveRuns"] = live_runs.get(job["id"], [])
             jobs.append(job)
         return jobs
 
