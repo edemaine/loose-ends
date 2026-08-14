@@ -20,6 +20,7 @@ const state = {
   sidebarScroll: { research: 0, papers: 0, manuscripts: 0, activity: 0 },
   sidebarSecondaryScroll: { research: 0, manuscripts: 0 },
   paperSort: "alphabetical",
+  manuscriptSort: "latest",
   selectedPaper: "",
   selectedManuscript: "",
   selectedDraft: "",
@@ -85,6 +86,10 @@ const priorityLevels = [
   [2, "4×"],
   [3, "8×"],
 ];
+const manuscriptSortOptions = [
+  ["latest", "Latest drafts"],
+  ["alphabetical", "Alphabetical"],
+];
 
 if ("scrollRestoration" in history) history.scrollRestoration = "manual";
 
@@ -130,6 +135,9 @@ function currentUrl() {
   if (state.search.trim()) parameters.set("q", state.search.trim());
   if (["research", "papers"].includes(state.tab) && state.paperSort !== "alphabetical") {
     parameters.set("sort", state.paperSort);
+  }
+  if (state.tab === "manuscripts" && state.manuscriptSort !== "latest") {
+    parameters.set("sort", state.manuscriptSort);
   }
   if (state.tab === "research") {
     reviewModel.filtersToSearchParams(parameters, state.researchFilters, initialPriorities);
@@ -208,6 +216,7 @@ function applyLocation({ scrollY } = {}) {
   state.revealSidebarSecondarySelection = false;
   state.search = parameters.get("q") || "";
   state.paperSort = reviewModel.normalizePaperSort(parameters.get("sort"));
+  state.manuscriptSort = normalizeManuscriptSort(parameters.get("sort"));
   if (state.tab === "research") {
     state.researchFilters = reviewModel.filtersFromSearchParams(parameters, initialPriorities);
     const identity = reviewModel.identityFromSearchParams(parameters);
@@ -954,6 +963,31 @@ function paperSortControl() {
   return wrapper;
 }
 
+function normalizeManuscriptSort(value) {
+  return manuscriptSortOptions.some(([key]) => key === value)
+    ? value
+    : "latest";
+}
+
+function manuscriptSortControl() {
+  const wrapper = node("label", "paper-sort-control");
+  wrapper.append(node("span", "", "Sort manuscripts"));
+  const select = node("select");
+  select.dataset.manuscriptSort = "";
+  manuscriptSortOptions.forEach(([value, label]) => {
+    const option = node("option", "", label);
+    option.value = value;
+    option.selected = state.manuscriptSort === value;
+    select.append(option);
+  });
+  select.addEventListener("change", () => {
+    state.manuscriptSort = normalizeManuscriptSort(select.value);
+    syncNavigation({ replace: true, preserveScroll: true });
+  });
+  wrapper.append(select);
+  return wrapper;
+}
+
 function attemptTagsNode(item, options = {}) {
   const tags = node("span", "attempt-tags");
   reviewModel.attemptTags(item, options).forEach(value => {
@@ -1099,6 +1133,10 @@ function syncSidebarControls(tab, controls) {
   if (search && search.value !== state.search) search.value = state.search;
   const sort = controls.querySelector("select[data-paper-sort]");
   if (sort && sort.value !== state.paperSort) sort.value = state.paperSort;
+  const manuscriptSort = controls.querySelector("select[data-manuscript-sort]");
+  if (manuscriptSort && manuscriptSort.value !== state.manuscriptSort) {
+    manuscriptSort.value = state.manuscriptSort;
+  }
   if (tab !== "research") return;
 
   const details = controls.querySelector(".research-filters");
@@ -1503,11 +1541,25 @@ function uniqueProblemTargets(paperPath) {
 function renderManuscripts() {
   persistentSidebarControls("manuscripts", () => {
     const controls = node("div", "paper-list-controls");
-    controls.append(sidebarSearch("Search manuscripts…"));
+    controls.append(
+      sidebarSearch("Search manuscripts…"),
+      manuscriptSortControl(),
+    );
     return controls;
   });
   const query = state.search.trim().toLowerCase();
-  const manuscripts = state.catalog.manuscripts.filter(value => !query || `${value.name} ${value.latest.title}`.toLowerCase().includes(query));
+  const manuscripts = state.catalog.manuscripts
+    .filter(value => !query || `${value.name} ${value.latest.title}`.toLowerCase().includes(query))
+    .sort((left, right) => {
+      const alphabetical = String(left.latest.title).localeCompare(
+        String(right.latest.title),
+        undefined,
+        { sensitivity: "base", numeric: true },
+      ) || left.name.localeCompare(right.name, undefined, { sensitivity: "base", numeric: true });
+      if (state.manuscriptSort === "alphabetical") return alphabetical;
+      return (Number(right.latest.createdTimestamp) || 0) -
+        (Number(left.latest.createdTimestamp) || 0) || alphabetical;
+    });
   if (!state.selectedManuscript || !manuscripts.some(value => value.key === state.selectedManuscript)) {
     state.selectedManuscript = manuscripts[0]?.key || "";
   }
@@ -2286,6 +2338,7 @@ function openRoute(route) {
     state.revealSidebarSelection = true;
   } else {
     state.search = "";
+    state.manuscriptSort = "latest";
     state.selectedManuscript = route.manuscript.key;
     state.selectedDraft = route.draft.key;
     state.manuscriptDraftSelections.set(route.manuscript.key, route.draft.key);

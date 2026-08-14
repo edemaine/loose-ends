@@ -513,6 +513,7 @@ class WorkbenchPlanningTests(unittest.TestCase):
                     draft / "manifest.json",
                     {
                         "title": "Test manuscript",
+                        "generated_at": f"2026-08-0{number}T12:00:00+00:00",
                         "input_selectors": [
                             {"kind": "paper", "path": str(paper)}
                         ],
@@ -543,6 +544,10 @@ class WorkbenchPlanningTests(unittest.TestCase):
                 records[0]["latest"]["abstract"],
                 "A *concise* abstract with **strong** $O(n^2)$ work by "
                 "Gourvès, Erdős, François, and a naïve coauthor.",
+            )
+            self.assertGreater(
+                records[0]["latest"]["createdTimestamp"],
+                records[0]["drafts"][0]["createdTimestamp"],
             )
             self.assertEqual(progress, [(0, 2), (1, 2), (2, 2)])
 

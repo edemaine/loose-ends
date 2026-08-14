@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from collections import deque
+from datetime import datetime
 import hashlib
 import ipaddress
 import json
@@ -429,6 +430,13 @@ def _manuscript_inventory(
             result = _read_json(draft / "paper-result.json")
             review = _read_json(draft / "paper-review.json")
             manifest = _read_json(draft / "manifest.json")
+            generated_at = manifest.get("generated_at")
+            try:
+                created_timestamp = datetime.fromisoformat(
+                    str(generated_at).replace("Z", "+00:00")
+                ).timestamp()
+            except (TypeError, ValueError):
+                created_timestamp = draft.stat().st_mtime
             drafts.append(
                 {
                     "key": str(draft.resolve()),
@@ -437,6 +445,7 @@ def _manuscript_inventory(
                     "name": draft.name,
                     "number": int(match.group(1)),
                     "title": result.get("title") or manifest.get("title") or manuscript.name,
+                    "createdTimestamp": created_timestamp,
                     "abstract": _manuscript_abstract(draft / "main.tex"),
                     "status": result.get("status") or manifest.get("status") or "",
                     "verdict": review.get("verdict", "unreviewed"),
