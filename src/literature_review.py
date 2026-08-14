@@ -94,10 +94,9 @@ def render_prompt(
         + "reconstruct or renumber problems from a public copy of the paper.\n\n"
         + registry
         + "\n\n"
-        + "For each structured literature entry, copy its `Title` exactly "
-        + "into `problem_title`. If any required staged input cannot be read, "
-        + "return root status `partial`, explain the failure, and do not guess; "
-        + "the driver will preserve but not install that run.\n"
+        + "If any required staged input cannot be read, return root status "
+        + "`partial`, explain the failure, and do not guess; the driver will "
+        + "preserve but not install that run.\n"
     )
 
 
@@ -112,22 +111,14 @@ def write_literature_schema(
         literature_schema = schema["properties"]["literature"]
         entry_schema = literature_schema["items"]
         entry_properties = entry_schema["properties"]
-        required = entry_schema["required"]
     except (KeyError, TypeError) as exc:
         raise common.CodexError(
             "literature schema cannot be specialized by problem registry"
         ) from exc
-    problem_titles = [problem.title for problem in problems]
     problem_ids = [problem.id for problem in problems]
     literature_schema["minItems"] = len(problems)
     literature_schema["maxItems"] = len(problems)
     entry_properties["problem_id"]["enum"] = problem_ids
-    entry_properties["problem_title"] = {
-        "type": "string",
-        "enum": problem_titles,
-    }
-    if "problem_title" not in required:
-        required.append("problem_title")
     output = workspace / "literature-output-schema.json"
     common.write_json(output, schema)
     return output
@@ -270,7 +261,6 @@ def validate_literature_result(
     if not isinstance(entries, list):
         raise common.CodexError("literature response has no literature array")
     requested = {problem.id for problem in problems}
-    required_titles = {problem.id: problem.title for problem in problems}
     by_id: dict[str, dict] = {}
     synthesized: list[str] = []
     status_repairs: list[str] = []
@@ -287,14 +277,9 @@ def validate_literature_result(
             raise common.CodexError(
                 f"literature response duplicates problem {problem_id}"
             )
-        problem_title = entry.get("problem_title")
-        if problem_title != required_titles[problem_id]:
-            raise common.CodexError(
-                f"literature response has wrong problem title for "
-                f"{problem_id}: {problem_title!r}; expected "
-                f"{required_titles[problem_id]!r}"
-            )
-        del entry["problem_title"]
+        # Older specialized runs echoed the title as a redundant guard. Strip
+        # it when recovering one of those otherwise valid completed responses.
+        entry.pop("problem_title", None)
         resolution = entry.get("resolution_status")
         confidence = entry.get("confidence")
         if resolution not in RESOLUTION_STATUSES:
@@ -575,10 +560,6 @@ def recover_paper_literature(
             workspace / "agent-result.json",
             workspace / "events.jsonl",
             workspace / "run.log",
-            *(
-                workspace / f"literature-{problem.id}.md"
-                for problem in problems
-            ),
         ]
         if not all(path.is_file() for path in required):
             continue

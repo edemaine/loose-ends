@@ -848,7 +848,6 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 entries = [
                     {
                         "problem_id": "OP-001",
-                        "problem_title": problems[0].title,
                         "resolution_status": "resolved",
                         "confidence": "high",
                         "status_summary": "A later theorem resolves OP-001.",
@@ -861,7 +860,6 @@ class OpenProblemPipelineTests(unittest.TestCase):
                     },
                     {
                         "problem_id": "OP-002",
-                        "problem_title": problems[1].title,
                         "resolution_status": "partially_resolved",
                         "confidence": "high",
                         "status_summary": "A special case is known.",
@@ -887,9 +885,9 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 self.assertEqual(literature_schema["maxItems"], 2)
                 self.assertEqual(
                     literature_schema["items"]["properties"][
-                        "problem_title"
+                        "problem_id"
                     ]["enum"],
-                    [problem.title for problem in problems],
+                    [problem.id for problem in problems],
                 )
                 self.assertIn(
                     "- ID: OP-001\n  Title: Test conjecture",
@@ -1004,7 +1002,6 @@ class OpenProblemPipelineTests(unittest.TestCase):
             )
             entry = {
                 "problem_id": problem.id,
-                "problem_title": problem.title,
                 "resolution_status": "no_resolution_found",
                 "confidence": "medium",
                 "status_summary": "No exact resolution was located.",
@@ -1037,10 +1034,6 @@ class OpenProblemPipelineTests(unittest.TestCase):
                     "warnings": [],
                 },
             )
-            (workspace / "literature-OP-001.md").write_text(
-                "# Literature OP-001\n\nCompleted report.\n",
-                encoding="utf-8",
-            )
             write_run_files(workspace)
 
             with patch.object(codex_cli, "run_structured_codex") as run:
@@ -1067,6 +1060,9 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 common.literature_result(problem)["sources"][0]["id"],
                 "S0",
             )
+            self.assertTrue(
+                (problem.directory / common.LITERATURE_MARKDOWN).is_file()
+            )
 
     def test_literature_repairs_unsupported_resolved_status(self):
         with TemporaryDirectory() as temporary:
@@ -1084,7 +1080,6 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 )
                 return {
                     "problem_id": problem_id,
-                    "problem_title": problem.title,
                     "resolution_status": "resolved",
                     "confidence": confidence,
                     "status_summary": "A later source resolves the problem.",
@@ -1164,7 +1159,7 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 installed.startswith("> **Driver status correction:**")
             )
 
-    def test_literature_rejects_partial_run_and_wrong_problem_title(self):
+    def test_literature_rejects_partial_run(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
             paper = make_analyzed_paper(root)
@@ -1181,29 +1176,6 @@ class OpenProblemPipelineTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 common.CodexError,
                 "partial run; no reports were installed",
-            ):
-                literature_review.validate_literature_result(
-                    response,
-                    workspace,
-                    [problem],
-                )
-
-            common.write_json(
-                response,
-                {
-                    "status": "complete",
-                    "literature": [
-                        {
-                            "problem_id": problem.id,
-                            "problem_title": "Wrong problem",
-                        }
-                    ],
-                    "warnings": [],
-                },
-            )
-            with self.assertRaisesRegex(
-                common.CodexError,
-                "wrong problem title for OP-001",
             ):
                 literature_review.validate_literature_result(
                     response,
