@@ -388,6 +388,148 @@ class WritePaperTests(unittest.TestCase):
             self.assertEqual(paths, [attempt])
             self.assertEqual(effective, selectors)
 
+    def test_draft_input_pinning_switches_future_revision_selector(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = make_paper(root)
+            first = make_ready_attempt(paper, "OP-001", 1)
+            draft_directory = root / "manuscript" / "draft-001"
+            draft_directory.mkdir(parents=True)
+            record = {
+                "result_id": "R-001",
+                "attempt_path": str(first),
+                "paper_directory": str(paper),
+                "problem_id": "OP-001",
+                "attempt_name": first.name,
+            }
+            common.write_json(
+                draft_directory / "manifest.json",
+                {
+                    "input_selectors": write_paper.input_selectors(
+                        [first.parent]
+                    ),
+                    "input_attempts": [record],
+                },
+            )
+
+            pinned = write_paper.set_input_pinning(
+                draft_directory,
+                pinned=True,
+                problem_directory=first.parent,
+            )
+            latest = make_ready_attempt(paper, "OP-001", 2)
+            draft = write_paper.DraftRef(draft_directory, 1, {})
+            pinned_inputs, pinned_manifest, pinned_selectors, _, _ = (
+                write_paper._revision_inputs(draft)
+            )
+
+            self.assertTrue(pinned["changed"])
+            self.assertEqual(
+                [selector["kind"] for selector in pinned_selectors],
+                ["problem", "pin"],
+            )
+            self.assertEqual(pinned_inputs[0].attempt.directory, first)
+            self.assertEqual(pinned_manifest["input_attempts"], [record])
+
+            unpinned = write_paper.set_input_pinning(
+                draft_directory,
+                pinned=False,
+                problem_directory=first.parent,
+            )
+            unpinned_inputs, _, unpinned_selectors, _, changed = (
+                write_paper._revision_inputs(draft)
+            )
+
+            self.assertTrue(unpinned["changed"])
+            self.assertEqual(unpinned_selectors[0]["kind"], "problem")
+            self.assertEqual(unpinned_inputs[0].attempt.directory, latest)
+            self.assertTrue(changed)
+
+    def test_unpinning_legacy_draft_creates_problem_selectors(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = make_paper(root)
+            attempt = make_ready_attempt(paper, "OP-001", 1)
+            draft_directory = root / "manuscript" / "draft-001"
+            draft_directory.mkdir(parents=True)
+            common.write_json(
+                draft_directory / "manifest.json",
+                {
+                    "input_attempts": [
+                        {
+                            "result_id": "R-001",
+                            "attempt_path": str(attempt),
+                            "paper_directory": str(paper),
+                            "problem_id": "OP-001",
+                            "attempt_name": attempt.name,
+                        }
+                    ]
+                },
+            )
+
+            write_paper.set_input_pinning(draft_directory, pinned=False)
+            manifest = common.read_json(draft_directory / "manifest.json")
+
+            self.assertEqual(manifest["input_selectors"][0]["kind"], "problem")
+            self.assertEqual(
+                write_paper.resolve_manifest_path(
+                    manifest["input_selectors"][0]["path"]
+                ),
+                attempt.parent,
+            )
+
+    def test_problem_pin_overrides_one_paper_scoped_result(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = make_paper(root)
+            first = make_ready_attempt(paper, "OP-001", 1)
+            other = make_ready_attempt(paper, "OP-002", 1)
+            draft_directory = root / "manuscript" / "draft-001"
+            draft_directory.mkdir(parents=True)
+            common.write_json(
+                draft_directory / "manifest.json",
+                {
+                    "input_selectors": write_paper.input_selectors([paper]),
+                    "input_attempts": [
+                        {
+                            "result_id": "R-001",
+                            "attempt_path": str(first),
+                            "paper_directory": str(paper),
+                            "problem_id": "OP-001",
+                            "attempt_name": first.name,
+                        },
+                        {
+                            "result_id": "R-002",
+                            "attempt_path": str(other),
+                            "paper_directory": str(paper),
+                            "problem_id": "OP-002",
+                            "attempt_name": other.name,
+                        },
+                    ],
+                },
+            )
+
+            write_paper.set_input_pinning(
+                draft_directory,
+                pinned=True,
+                problem_directory=first.parent,
+            )
+            latest_first = make_ready_attempt(paper, "OP-001", 2)
+            latest_other = make_ready_attempt(paper, "OP-002", 2)
+            draft = write_paper.DraftRef(draft_directory, 1, {})
+            inputs, _, selectors, _, _ = write_paper._revision_inputs(draft)
+
+            selected = {
+                item.attempt.problem.id: item.attempt.directory for item in inputs
+            }
+            self.assertEqual(selected["OP-001"], first)
+            self.assertNotEqual(selected["OP-001"], latest_first)
+            self.assertEqual(selected["OP-002"], latest_other)
+            self.assertEqual(
+                [selector["kind"] for selector in selectors],
+                ["paper", "pin"],
+            )
+
     def test_invalid_selector_fails_before_recursive_discovery(self):
         selector = {
             "kind": "problem",

@@ -320,8 +320,15 @@ def _manuscript_sources(
         }
     source_papers: dict[str, dict] = {}
     source_problems: dict[tuple[str, str], dict] = {}
+    paper_selectors: set[str] = set()
 
-    def add(paper_value: object, problem_id: object = None) -> None:
+    def add(
+        paper_value: object,
+        problem_id: object = None,
+        *,
+        selector_kind: str | None = None,
+        attempt_name: object = None,
+    ) -> None:
         if not isinstance(paper_value, str) or not paper_value:
             return
         try:
@@ -340,13 +347,22 @@ def _manuscript_sources(
         if not isinstance(problem_id, str) or not problem_id:
             return
         review = problem_lookup.get((paper_key, problem_id), {})
-        source_problems[(paper_key, problem_id)] = {
-            "key": f"{paper_key}::{problem_id}",
-            "paperPath": str(paper.resolve()),
-            "paperTitle": paper_title,
-            "id": problem_id,
-            "title": str(review.get("problemTitle") or problem_id),
-        }
+        problem_key = (paper_key, problem_id)
+        record = source_problems.setdefault(
+            problem_key,
+            {
+                "key": f"{paper_key}::{problem_id}",
+                "paperPath": str(paper.resolve()),
+                "paperTitle": paper_title,
+                "id": problem_id,
+                "title": str(review.get("problemTitle") or problem_id),
+            },
+        )
+        if selector_kind is not None:
+            record["selectorKind"] = selector_kind
+            record["pinned"] = selector_kind in {"attempt", "pin"}
+        if isinstance(attempt_name, str) and attempt_name:
+            record["attemptName"] = attempt_name
 
     selectors = manifest.get("input_selectors", [])
     if isinstance(selectors, list):
@@ -355,7 +371,9 @@ def _manuscript_sources(
                 continue
             value = selector.get("path")
             kind = selector.get("kind")
-            if not isinstance(value, str) or kind not in {"paper", "problem", "attempt"}:
+            if not isinstance(value, str) or kind not in {
+                "paper", "problem", "attempt", "pin"
+            }:
                 continue
             try:
                 path = write_paper.resolve_manifest_path(value)
@@ -363,16 +381,51 @@ def _manuscript_sources(
                 continue
             if kind == "paper":
                 add(str(path))
+                paper_selectors.add(os.path.normcase(str(path)))
             elif kind == "problem":
-                add(str(path.parent), path.name)
+                add(str(path.parent), path.name, selector_kind="problem")
             else:
-                add(str(path.parent.parent), path.parent.name)
+                add(
+                    str(path.parent.parent),
+                    path.parent.name,
+                    selector_kind=kind,
+                    attempt_name=path.name,
+                )
 
     attempts = manifest.get("input_attempts", [])
     if isinstance(attempts, list):
         for attempt in attempts:
             if isinstance(attempt, dict):
-                add(attempt.get("paper_directory"), attempt.get("problem_id"))
+                attempt_name = attempt.get("attempt_name")
+                if not isinstance(attempt_name, str):
+                    attempt_path = attempt.get("attempt_path")
+                    if isinstance(attempt_path, str):
+                        try:
+                            attempt_name = write_paper.resolve_manifest_path(
+                                attempt_path
+                            ).name
+                        except (OSError, ValueError):
+                            attempt_name = None
+                add(
+                    attempt.get("paper_directory"),
+                    attempt.get("problem_id"),
+                    attempt_name=attempt_name,
+                )
+
+    for (paper_key, _problem_id), record in source_problems.items():
+        if "selectorKind" in record:
+            continue
+        if paper_key in paper_selectors:
+            record["selectorKind"] = "paper"
+            record["pinned"] = False
+        else:
+            # Legacy manifests without input_selectors reconstruct exact
+            # attempt selectors during revision, so they are pinned.
+            record["selectorKind"] = "attempt"
+            record["pinned"] = True
+
+    pinned = sum(bool(item.get("pinned")) for item in source_problems.values())
+    tracking = len(source_problems) - pinned
 
     return {
         "papers": sorted(
@@ -386,6 +439,10 @@ def _manuscript_sources(
                 item["id"],
             ),
         ),
+        "pinning": {
+            "pinned": pinned,
+            "tracking": tracking,
+        },
     }
 
 
@@ -1037,6 +1094,7 @@ class WorkbenchApplication:
         self.csrf = secrets.token_urlsafe(24)
         self.plans: dict[str, dict] = {}
         self.plan_lock = threading.Lock()
+        self.manuscript_lock = threading.Lock()
         self.observer = None
 
     def start_watching(self) -> None:
@@ -1102,6 +1160,44 @@ class WorkbenchApplication:
         self.scheduler.schedule()
         self.hub.publish("tasks.changed")
         return job
+
+    def set_manuscript_pinning(self, request: dict) -> dict:
+        draft_value = request.get("draft")
+        pinned = request.get("pinned")
+        problem_value = request.get("problem")
+        if not isinstance(draft_value, str) or not draft_value:
+            raise PlanError("draft is required")
+        if not isinstance(pinned, bool):
+            raise PlanError("pinned must be true or false")
+        if not isinstance(problem_value, str) or not problem_value:
+            raise PlanError("problem is required")
+        draft = Path(draft_value).expanduser().resolve()
+        problem = Path(problem_value).expanduser().resolve()
+        if not _relative_to(draft, self.manuscripts.resolve()):
+            raise PlanError("draft is outside the manuscript directory")
+        if not any(_relative_to(problem, root.resolve()) for root in self.paths):
+            raise PlanError("problem is outside the configured paper directories")
+        try:
+            with self.manuscript_lock:
+                result = write_paper.set_input_pinning(
+                    draft,
+                    pinned=pinned,
+                    problem_directory=problem,
+                )
+                manifest = common.read_json(
+                    draft / "manifest.json",
+                    description=f"draft manifest for {draft}",
+                )
+        except common.CodexError as exc:
+            raise PlanError(str(exc)) from exc
+        catalog = self.catalog.snapshot()
+        result["sources"] = _manuscript_sources(
+            manifest,
+            catalog.get("papers", []),
+            catalog.get("reviews", []),
+        )
+        self.catalog.schedule()
+        return result
 
     def close(self) -> None:
         if self.observer is not None:
@@ -1356,6 +1452,8 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                 self.send_json(settings)
                 self.app.scheduler.schedule()
                 self.app.hub.publish("settings.changed", **settings)
+            elif parsed.path == "/api/manuscripts/pinning":
+                self.send_json(self.app.set_manuscript_pinning(body))
             elif match := re.fullmatch(
                 r"/api/jobs/([0-9a-f-]+)/scheduling", parsed.path
             ):

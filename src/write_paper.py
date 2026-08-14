@@ -217,6 +217,138 @@ def input_selectors(paths: Sequence[Path]) -> list[dict]:
     return selectors
 
 
+def set_input_pinning(
+    draft_directory: Path,
+    *,
+    pinned: bool,
+    problem_directory: Path | None = None,
+) -> dict:
+    """Change only how a completed draft selects inputs for future revisions."""
+    draft = draft_directory.expanduser().resolve()
+    if not draft.is_dir() or DRAFT_RE.fullmatch(draft.name) is None:
+        raise common.CodexError("manuscript input pinning requires a draft-NNN directory")
+    manifest_path = draft / "manifest.json"
+    manifest = common.read_json(
+        manifest_path,
+        description=f"draft manifest for {draft}",
+    )
+    records = manifest.get("input_attempts")
+    if not isinstance(records, list) or not records:
+        raise common.CodexError("draft manifest has no input attempts to pin")
+    attempt_paths: list[Path] = []
+    for record in records:
+        if not isinstance(record, dict) or not isinstance(
+            record.get("attempt_path"), str
+        ):
+            raise common.CodexError("draft manifest has invalid input_attempts")
+        attempt = resolve_manifest_path(record["attempt_path"])
+        if ATTEMPT_RE.fullmatch(attempt.name) is None:
+            raise common.CodexError("draft manifest has invalid input_attempts")
+        attempt_paths.append(attempt)
+
+    selected_problem = (
+        problem_directory.expanduser().resolve()
+        if problem_directory is not None
+        else None
+    )
+    if selected_problem is not None:
+        matching_attempts = [
+            path for path in attempt_paths if path.parent == selected_problem
+        ]
+        if len(matching_attempts) != 1:
+            raise common.CodexError(
+                "the selected problem is not a unique input to this draft"
+            )
+        selected_attempt = matching_attempts[0]
+
+    if pinned and selected_problem is None:
+        selectors = [
+            {"kind": "attempt", "path": _stored_manifest_path(path)}
+            for path in attempt_paths
+        ]
+    else:
+        original = manifest.get("input_selectors")
+        if original is None:
+            original = [
+                {"kind": "attempt", "path": _stored_manifest_path(path)}
+                for path in attempt_paths
+            ]
+        if not isinstance(original, list):
+            raise common.CodexError("draft manifest has invalid input_selectors")
+        selectors = []
+        for selector in original:
+            if (
+                not isinstance(selector, dict)
+                or selector.get("kind") not in {
+                    "paper", "problem", "attempt", "pin"
+                }
+                or not isinstance(selector.get("path"), str)
+            ):
+                raise common.CodexError("draft manifest has invalid input_selectors")
+            kind = selector["kind"]
+            path = resolve_manifest_path(selector["path"])
+            if selected_problem is None and kind == "pin":
+                if pinned:
+                    continue
+                continue
+            if (
+                not pinned
+                and kind == "pin"
+                and (selected_problem is None or path.parent == selected_problem)
+            ):
+                continue
+            if (
+                not pinned
+                and kind == "attempt"
+                and (selected_problem is None or path.parent == selected_problem)
+            ):
+                kind = "problem"
+                path = path.parent
+            selectors.append({"kind": kind, "path": _stored_manifest_path(path)})
+        if pinned and selected_problem is not None:
+            already_exact = any(
+                selector["kind"] in {"attempt", "pin"}
+                and resolve_manifest_path(selector["path"]).parent
+                == selected_problem
+                for selector in selectors
+            )
+            if not already_exact:
+                selectors.append(
+                    {
+                        "kind": "pin",
+                        "path": _stored_manifest_path(selected_attempt),
+                    }
+                )
+
+    effective = []
+    seen: set[tuple[str, str]] = set()
+    for selector in selectors:
+        key = (selector["kind"], os.path.normcase(selector["path"]))
+        if key not in seen:
+            seen.add(key)
+            effective.append(selector)
+    changed = manifest.get("input_selectors") != effective
+    if changed:
+        manifest["input_selectors"] = effective
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=".manifest-pinning-",
+            suffix=".tmp",
+            dir=draft,
+        )
+        os.close(descriptor)
+        temporary = Path(temporary_name)
+        try:
+            common.write_json(temporary, manifest)
+            os.replace(temporary, manifest_path)
+        finally:
+            temporary.unlink(missing_ok=True)
+    return {
+        "pinned": pinned,
+        "changed": changed,
+        "selectorCount": len(effective),
+    }
+
+
 def _selector_paper(selector: dict) -> Path:
     path = _resolve_manifest_path(selector["path"])
     if selector["kind"] == "paper":
@@ -236,7 +368,9 @@ def resolve_input_selectors(
     for selector in selectors:
         if (
             not isinstance(selector, dict)
-            or selector.get("kind") not in {"paper", "problem", "attempt"}
+            or selector.get("kind") not in {
+                "paper", "problem", "attempt", "pin"
+            }
             or not isinstance(selector.get("path"), str)
         ):
             raise common.CodexError("draft manifest has invalid input selectors")
@@ -265,15 +399,16 @@ def resolve_input_selectors(
             effective.append(selector)
 
     attempts: list[Path] = []
+    pins: list[Path] = []
     warnings: list[str] = []
     for selector in effective:
         path = _resolve_manifest_path(selector["path"])
         kind = selector["kind"]
-        if kind == "attempt" and (
+        if kind in {"attempt", "pin"} and (
             not path.is_dir() or not ATTEMPT_RE.fullmatch(path.name)
         ):
             raise common.CodexError(
-                f"draft attempt selector is missing or invalid: {path}"
+                f"draft {kind} selector is missing or invalid: {path}"
             )
         if kind == "problem" and (
             not path.is_dir()
@@ -289,6 +424,9 @@ def resolve_input_selectors(
             raise common.CodexError(
                 f"draft paper selector is missing or invalid: {path}"
             )
+        if kind == "pin":
+            pins.append(path)
+            continue
         if kind == "attempt":
             attempts.append(path)
             continue
@@ -311,6 +449,17 @@ def resolve_input_selectors(
                     "no solver attempts; retained only as an open problem, "
                     "not a result input"
                 )
+    for pin in pins:
+        matching = [
+            index for index, attempt in enumerate(attempts)
+            if attempt.parent == pin.parent
+        ]
+        if not matching:
+            raise common.CodexError(
+                f"draft pin selector has no matching problem input: {pin}"
+            )
+        for index in matching:
+            attempts[index] = pin
     return attempts, warnings, effective
 
 

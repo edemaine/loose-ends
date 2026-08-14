@@ -585,6 +585,46 @@ function attemptTarget(item) {
   );
 }
 
+function catalogAttemptForTarget(value) {
+  if (value.kind !== "attempt") return null;
+  const path = normalizedPath(value.path);
+  return state.catalog.reviews.find(item =>
+    item.attemptDirectory && normalizedPath(item.attemptDirectory) === path
+  ) || null;
+}
+
+function historicalAttemptTarget(value) {
+  const selected = catalogAttemptForTarget(value);
+  if (!selected) return false;
+  const selectedNumber = Number(selected.attemptNumber) || 0;
+  return state.catalog.reviews.some(item =>
+    item.problemKey === selected.problemKey &&
+    (Number(item.attemptNumber) || 0) > selectedNumber
+  );
+}
+
+function problemTargetForAttempt(value) {
+  const item = catalogAttemptForTarget(value);
+  if (item) return problemTarget(item);
+  const path = value.path.replace(/[\\/]+$/, "");
+  const separator = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  return target(
+    "problem",
+    separator >= 0 ? path.slice(0, separator) : path,
+    (value.label || "Problem").replace(/\s+·\s+attempt-\d+.*$/i, ""),
+  );
+}
+
+function taskTargetsForRequest(task) {
+  if (task.action !== "write" || task.options.pinAttempts === true) {
+    return task.targets;
+  }
+  const targets = task.targets.map(value =>
+    value.kind === "attempt" ? problemTargetForAttempt(value) : value
+  );
+  return [...new Map(targets.map(value => [targetKey(value), value])).values()];
+}
+
 function targetDisplayLabel(value) {
   if (value.kind === "attempt") {
     const attemptPath = normalizedPath(value.path);
@@ -1538,6 +1578,34 @@ function uniqueProblemTargets(paperPath) {
   return [...values.values()];
 }
 
+async function setManuscriptPinning(draft, source, pinned, control) {
+  const message = pinned
+    ? `Pin ${source.id} in future revisions of ${draft.name} to ${source.attemptName || "its current attempt"}?`
+    : `Unpin ${source.id} in ${draft.name}? Future revisions will use this problem's latest attempt.`;
+  if (!window.confirm(message)) return;
+  control.disabled = true;
+  try {
+    const result = await api("/api/manuscripts/pinning", {
+      method: "POST",
+      body: {
+        draft: draft.path,
+        problem: `${source.paperPath}/${source.id}`,
+        pinned,
+      },
+    });
+    draft.sources = result.sources;
+    renderManuscripts();
+    showNotice(
+      pinned
+        ? `${source.id} is now pinned to ${source.attemptName || "its current attempt"}.`
+        : `${source.id} will now track its latest attempt.`,
+    );
+  } catch (error) {
+    control.disabled = false;
+    showNotice(error.message, true);
+  }
+}
+
 function renderManuscripts() {
   persistentSidebarControls("manuscripts", () => {
     const controls = node("div", "paper-list-controls");
@@ -1678,7 +1746,27 @@ function renderManuscripts() {
             setTab("research");
           }
         });
-        item.append(label, node("small", "", source.paperTitle));
+        const tracking = source.pinned
+          ? `Pinned to ${source.attemptName || "the recorded attempt"}`
+          : `${source.selectorKind === "paper" ? "Tracks latest through paper selection" : "Tracks latest attempt"}${source.attemptName ? ` · currently ${source.attemptName}` : ""}`;
+        const trackingRow = node("div", "source-tracking-row");
+        trackingRow.append(
+          node("small", `source-tracking${source.pinned ? " pinned" : ""}`, tracking),
+        );
+        const toggle = button(
+          source.pinned ? "Unpin" : "Pin",
+          () => setManuscriptPinning(draft, source, !source.pinned, toggle),
+          "button source-pin-toggle",
+        );
+        toggle.title = source.pinned
+          ? "Follow this problem's latest attempt in future revisions"
+          : "Pin future revisions to this problem's current attempt";
+        trackingRow.append(toggle);
+        item.append(
+          label,
+          node("small", "", source.paperTitle),
+          trackingRow,
+        );
         list.append(item);
       });
       panel.append(list);
@@ -2514,9 +2602,23 @@ function openTask(action, targets) {
   const storageKey = dialogStorageKey(action, targets);
   let saved = {};
   try { saved = JSON.parse(sessionStorage.getItem(storageKey) || "{}"); } catch (_) { saved = {}; }
+  if (
+    action === "write" &&
+    targets.some(value => value.kind === "attempt") &&
+    !Object.hasOwn(saved, "pinAttempts")
+  ) {
+    saved.pinAttempts = targets.some(historicalAttemptTarget);
+  }
   state.dialog = { action, targets, options: saved, storageKey, plan: null };
   renderTaskConfiguration();
   dialog.showModal();
+}
+
+function renderTaskTargetChips(task, container) {
+  container.replaceChildren();
+  taskTargetsForRequest(task).forEach(value => {
+    container.append(node("span", "target-chip", targetDisplayLabel(value)));
+  });
 }
 
 function renderTaskConfiguration(errorMessage = "") {
@@ -2525,7 +2627,7 @@ function renderTaskConfiguration(errorMessage = "") {
   dialogTitle.textContent = actionNames[task.action];
   dialogBody.replaceChildren();
   const targets = node("div", "target-list");
-  task.targets.forEach(value => targets.append(node("span", "target-chip", value.label)));
+  renderTaskTargetChips(task, targets);
   dialogBody.append(targets);
   if (errorMessage) dialogBody.append(node("div", "error-box", errorMessage));
   const grid = node("div", "form-grid");
@@ -2567,6 +2669,19 @@ function renderTaskConfiguration(errorMessage = "") {
     grid.append(checkbox("recoverComplete", "Recover completed workspace", "Install a preserved completed analysis without a new model turn.", options.recoverComplete));
   }
   if (task.action === "write") {
+    if (task.targets.some(value => value.kind === "attempt")) {
+      const pin = checkbox(
+        "pinAttempts",
+        "Pin to attempt",
+        "Otherwise the manuscript tracks each problem and uses its latest attempt when writing or revising.",
+        options.pinAttempts === true,
+      );
+      pin.querySelector("input").addEventListener("change", () => {
+        saveDialogOptions();
+        renderTaskTargetChips(task, targets);
+      });
+      grid.append(pin);
+    }
     grid.append(field("authors", "Authors", { type: "textarea", value: Array.isArray(options.authors) ? options.authors.join("\n") : options.authors || "", help: "One author per line." }));
     grid.append(field("title", "Title direction", { value: options.title || "" }));
     grid.append(field("name", "Manuscript directory name", { value: options.name || "", help: "Leave blank for the derived name." }));
@@ -2645,7 +2760,11 @@ async function reviewTask() {
   try {
     task.plan = await api("/api/plans", {
       method: "POST",
-      body: { action: task.action, targets: task.targets, options: task.options },
+      body: {
+        action: task.action,
+        targets: taskTargetsForRequest(task),
+        options: task.options,
+      },
     });
     renderTaskConfirmation();
   } catch (error) {

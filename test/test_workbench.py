@@ -213,6 +213,10 @@ class WorkbenchPlanningTests(unittest.TestCase):
         self.assertIn("reviewModel.paperTitleWithYear(", app)
         self.assertIn("`${item.problemId}: ${item.problemTitle} · ${item.attemptName}`", app)
         self.assertIn("function targetDisplayLabel(value)", app)
+        self.assertIn("function historicalAttemptTarget(value)", app)
+        self.assertIn("function taskTargetsForRequest(task)", app)
+        self.assertIn('"Pin to attempt"', app)
+        self.assertIn("targets: taskTargetsForRequest(task)", app)
         self.assertIn('action === "review" && attempts.length === 1', app)
         self.assertIn("researchFiltersOpen: false", app)
         self.assertIn("revealSidebarSelection: false", app)
@@ -476,6 +480,8 @@ class WorkbenchPlanningTests(unittest.TestCase):
                     {
                         "paper_directory": str(paper),
                         "problem_id": "OP-001",
+                        "attempt_path": str(paper / "OP-001" / "attempt-001"),
+                        "attempt_name": "attempt-001",
                     }
                 ]
             }
@@ -500,6 +506,50 @@ class WorkbenchPlanningTests(unittest.TestCase):
                 [source["title"] for source in sources["problems"]],
                 ["Test conjecture"],
             )
+            self.assertTrue(sources["problems"][0]["pinned"])
+            self.assertEqual(sources["pinning"], {"pinned": 1, "tracking": 0})
+
+            manifest["input_selectors"] = [
+                {"kind": "problem", "path": str(paper / "OP-001")}
+            ]
+            tracking = workbench._manuscript_sources(
+                manifest,
+                [{"path": str(paper), "title": "Test Paper"}],
+                [
+                    {
+                        "paperDirectory": str(paper),
+                        "problemId": "OP-001",
+                        "problemTitle": "Test conjecture",
+                    }
+                ],
+            )
+            self.assertFalse(tracking["problems"][0]["pinned"])
+            self.assertEqual(
+                tracking["problems"][0]["selectorKind"],
+                "problem",
+            )
+            self.assertEqual(tracking["pinning"], {"pinned": 0, "tracking": 1})
+
+            manifest["input_selectors"] = [
+                {"kind": "paper", "path": str(paper)},
+                {
+                    "kind": "pin",
+                    "path": str(paper / "OP-001" / "attempt-001"),
+                },
+            ]
+            overridden = workbench._manuscript_sources(
+                manifest,
+                [{"path": str(paper), "title": "Test Paper"}],
+                [
+                    {
+                        "paperDirectory": str(paper),
+                        "problemId": "OP-001",
+                        "problemTitle": "Test conjecture",
+                    }
+                ],
+            )
+            self.assertTrue(overridden["problems"][0]["pinned"])
+            self.assertEqual(overridden["problems"][0]["selectorKind"], "pin")
 
     def test_manuscript_inventory_reports_draft_progress(self):
         with TemporaryDirectory() as temporary:
