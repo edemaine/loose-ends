@@ -1302,7 +1302,18 @@ def compile_latex(
         raise common.CodexError("LaTeX build did not create a nonempty main.pdf")
     final_tex_log = workspace / "main.log"
     inspected_log = final_tex_log if final_tex_log.is_file() else log_path
-    log_text = _read_text(inspected_log, "final LaTeX log").lower()
+    try:
+        log_bytes = inspected_log.read_bytes()
+    except OSError as exc:
+        raise common.CodexError(
+            f"could not read final LaTeX log: {exc}"
+        ) from exc
+    if not log_bytes.strip():
+        raise common.CodexError(f"final LaTeX log is empty: {inspected_log}")
+    # TeX and BibTeX logs can contain locale-encoded author names even when
+    # the source is UTF-8.  The diagnostics checked below are ASCII, so retain
+    # them while replacing undecodable name bytes.
+    log_text = log_bytes.decode("utf-8", errors="replace").lower()
     bad_patterns = (
         "there were undefined references",
         "undefined citations",

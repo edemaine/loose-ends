@@ -238,7 +238,16 @@ class AnalyzePaperTests(unittest.TestCase):
             self.assertFalse(manifest["requested_fast_mode"])
             self.assertIsNone(manifest["requested_reasoning_effort"])
 
-            command = commands[0]
+            command = next(
+                candidate
+                for candidate in commands
+                if len(candidate) > 1 and candidate[1] == "exec"
+            )
+            codex_call = next(
+                call
+                for call in run.call_args_list
+                if len(call.args[0]) > 1 and call.args[0][1] == "exec"
+            )
             self.assertIn("--ephemeral", command)
             self.assertIn("--ignore-user-config", command)
             self.assertIn("shell_snapshot", command)
@@ -255,10 +264,10 @@ class AnalyzePaperTests(unittest.TestCase):
             self.assertIn("workspace-write", command)
             self.assertNotIn("--add-dir", command)
             self.assertEqual(command[-1], "-")
-            self.assertEqual(run.call_args.kwargs["encoding"], "utf-8")
+            self.assertEqual(codex_call.kwargs["encoding"], "utf-8")
             self.assertIn(
                 analyze_papers.STAGED_PAPER_DIRECTORY,
-                run.call_args.kwargs["input"],
+                codex_call.kwargs["input"],
             )
 
     @patch.object(analyze_papers.subprocess, "run")

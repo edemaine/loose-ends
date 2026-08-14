@@ -766,6 +766,30 @@ class WritePaperTests(unittest.TestCase):
             self.assertGreater(pdf.stat().st_size, 0)
             self.assertTrue((workspace / "build.log").is_file())
 
+    def test_compile_latex_accepts_locale_encoded_tex_log(self):
+        with TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            (workspace / "main.tex").write_text(
+                "\\documentclass{article}\n",
+                encoding="utf-8",
+            )
+            (workspace / "main.pdf").write_bytes(b"%PDF-test")
+            (workspace / "main.log").write_bytes(
+                b"Author Martin N\xf6llenburg. Output written on main.pdf.\n"
+            )
+            completed = write_paper.subprocess.CompletedProcess(
+                ["latexmk"], 0
+            )
+
+            with patch.object(
+                write_paper.subprocess,
+                "run",
+                return_value=completed,
+            ):
+                pdf = write_paper.compile_latex(workspace, "latexmk")
+
+            self.assertEqual(pdf, workspace / "main.pdf")
+
     def test_max_rounds_runs_critic_guided_revision_and_stops_early(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
