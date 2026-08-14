@@ -555,15 +555,22 @@ function problemTarget(item) {
 }
 
 function attemptTarget(item) {
-  const paperTitle = reviewModel.paperTitleWithYear(
-    item.paperTitle,
-    item.paperPublished,
-  ) || item.paperDirectory;
   return target(
     "attempt",
     item.attemptDirectory,
-    `${paperTitle} · ${item.problemId}/${item.attemptName}`,
+    `${item.problemId}: ${item.problemTitle} · ${item.attemptName}`,
   );
+}
+
+function targetDisplayLabel(value) {
+  if (value.kind === "attempt") {
+    const attemptPath = normalizedPath(value.path);
+    const item = state.catalog.reviews.find(review =>
+      review.attemptDirectory && normalizedPath(review.attemptDirectory) === attemptPath
+    );
+    if (item) return `${item.problemId}: ${item.problemTitle} · ${item.attemptName}`;
+  }
+  return value.label || value.path;
 }
 
 function draftTarget(draft) {
@@ -1616,6 +1623,10 @@ function jobRenderFingerprint(job) {
 }
 
 function problemRunPresentation(action, run) {
+  const attempts = (run.targets || []).filter(target => target.kind === "attempt");
+  if (action === "review" && attempts.length === 1) {
+    return { title: targetDisplayLabel(attempts[0]), targets: [] };
+  }
   const targets = (run.targets || []).filter(target => target.kind === "problem");
   if (action !== "literature" || !targets.length) {
     return { title: run.label, targets: [] };
@@ -1725,7 +1736,7 @@ function renderJobDetail(job) {
   const targets = job.plan?.targets || job.request?.targets || [];
   if (targets.length) {
     const targetList = node("div", "target-list task-targets");
-    targets.forEach(value => targetList.append(node("span", "target-chip", value.label || value.path)));
+    targets.forEach(value => targetList.append(node("span", "target-chip", targetDisplayLabel(value))));
     scope.append(targetList);
   }
   copy.append(scope, node("p", "", `Created ${formatTime(job.created_at)}`));
@@ -2078,7 +2089,7 @@ function taskScopeSummary(job) {
 function taskSidebarTitle(job) {
   const targets = taskTargets(job);
   const scope = targets.length === 1
-    ? targets[0].label || targetCountLabel(targets)
+    ? targetDisplayLabel(targets[0]) || targetCountLabel(targets)
     : targets.length ? targetCountLabel(targets) : job.title;
   return `${humanize(job.action)} · ${scope}`;
 }
