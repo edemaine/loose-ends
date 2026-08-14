@@ -1720,13 +1720,16 @@ class OpenProblemPipelineTests(unittest.TestCase):
             problem.directory.mkdir(parents=True)
             workspace = problem.directory / ".solve-run-preserved"
             workspace.mkdir()
-            (workspace / "solution.md").write_text(
+            (workspace / "partial-result.md").write_text(
                 "# A substantive solution note\n\nThe detailed proof is here.\n",
                 encoding="utf-8",
             )
             (workspace / "certificate.txt").write_text(
                 "Checked independently.\n",
                 encoding="utf-8",
+            )
+            workspace_for_codex = codex_cli.path_for_codex(workspace).replace(
+                "\\", "/"
             )
             common.write_json(
                 workspace / "agent-result.json",
@@ -1744,7 +1747,8 @@ class OpenProblemPipelineTests(unittest.TestCase):
                         }
                     ],
                     "artifacts": [
-                        f"[Proof write-up]({workspace.as_posix()}/solution.md:1)",
+                        f"[Proof write-up](/{workspace_for_codex}"
+                        "/partial-result.md:1)",
                         f"[Certificate]({workspace.as_posix()}/certificate.txt:1)",
                     ],
                     "warnings": [],
@@ -1805,7 +1809,10 @@ class OpenProblemPipelineTests(unittest.TestCase):
             self.assertIn("The detailed proof is here.", attempt)
             self.assertIn("### C-001", attempt)
             self.assertTrue(
-                any("solution.md" in warning for warning in result["warnings"])
+                any(
+                    "partial-result.md" in warning
+                    for warning in result["warnings"]
+                )
             )
 
     def test_solver_recovers_markdown_blocked_by_windows_sandbox(self):

@@ -261,6 +261,8 @@ def _artifact_relative_path(
         target = target[1:-1]
     target = re.sub(r":\d+(?::\d+)?$", "", target)
     normalized = target.replace("\\", "/")
+    if re.match(r"^/[A-Za-z]:/", normalized):
+        normalized = normalized[1:]
     roots = {
         workspace.resolve().as_posix().rstrip("/"),
         codex_cli.path_for_codex(workspace).replace("\\", "/").rstrip("/"),
@@ -464,10 +466,38 @@ def recover_alternate_attempt_markdown(
 ) -> bool:
     """Use a substantive solution.md when the solver misnamed attempt.md."""
     attempt_path = workspace / "attempt.md"
-    source_path = workspace / "solution.md"
-    if attempt_path.is_file() or not source_path.is_file():
+    if attempt_path.is_file():
         return False
     result_path = workspace / "agent-result.json"
+    raw_result = common.read_json(
+        result_path,
+        description="solver response",
+    )
+    source_path = workspace / "solution.md"
+    source_artifact: str | None = None
+    if not source_path.is_file():
+        candidates: list[tuple[str, Path]] = []
+        for value in raw_result.get("artifacts", []):
+            if not isinstance(value, str):
+                continue
+            relative = _artifact_relative_path(workspace, value)
+            if (
+                relative is not None
+                and len(relative.parts) == 1
+                and relative.suffix.casefold() == ".md"
+                and (workspace / relative.name).is_file()
+            ):
+                candidates.append((value, workspace / relative.name))
+        if len(candidates) != 1:
+            return False
+        source_artifact, source_path = candidates[0]
+    if source_artifact is not None:
+        raw_result["artifacts"] = [
+            value
+            for value in raw_result.get("artifacts", [])
+            if value != source_artifact
+        ]
+        common.write_json(result_path, raw_result)
     result, _ = validate_solver_result(
         result_path,
         workspace,
@@ -498,7 +528,8 @@ def recover_alternate_attempt_markdown(
             )
         contents += "\n".join(lines).rstrip()
     warning = (
-        "Driver recovery: used the solver-written solution.md as attempt.md"
+        f"Driver recovery: used the solver-written {source_path.name} as "
+        "attempt.md"
         " and supplied any missing structured claim labels."
     )
     if warning not in result["warnings"]:
