@@ -1297,10 +1297,13 @@ def validate_paper_result(
             raise common.CodexError(f"main.tex omits {required}")
     if not re.search(r"\\title\s*\{", tex):
         raise common.CodexError("main.tex has no title")
-    if authors is not None and not authors and not re.search(
-        r"\\author\s*\{\s*\}", tex
-    ):
-        raise common.CodexError("main.tex must use \\author{} when no author is supplied")
+    if not re.search(r"\\date\s*\{\s*\}", tex):
+        raise common.CodexError("main.tex must always use \\date{}")
+    if authors is not None and not authors:
+        if not re.search(r"\\author\s*\{\s*\}", tex):
+            raise common.CodexError(
+                "main.tex must use \\author{} when no author is supplied"
+            )
     if not re.search(r"\\begin\s*\{abstract\}", tex):
         raise common.CodexError("main.tex has no abstract")
     citation_keys = _tex_citation_keys(tex)

@@ -145,8 +145,10 @@ Write these files in the current working directory:
   if no reliable conversion is available.
 
 Use the requested authors exactly. If the author list is empty, write
-`\author{}` with no placeholder name. Do not copy authors from an originating
-paper into the manuscript author list. Do not modify `inputs/`.
+`\author{}`. Do not copy authors from an originating paper into the manuscript
+author list.
+
+Always write `\date{}`. Do not modify `inputs/`.
 
 Run `latexmk -pdf -interaction=nonstopmode -halt-on-error -file-line-error
 main.tex` and repair LaTeX errors, undefined citations, and undefined references

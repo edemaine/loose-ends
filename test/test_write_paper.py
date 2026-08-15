@@ -210,6 +210,7 @@ def write_manuscript_files(workspace: Path, result_ids: list[str]) -> None:
         "\\usepackage{amsthm}\n"
         "\\title{A Short Result}\n"
         "\\author{}\n"
+        "\\date{}\n"
         "\\begin{document}\n\\maketitle\n"
         "\\begin{abstract}We solve an open problem.\\end{abstract}\n"
         "\\section{Introduction}The problem was posed in \\cite{origin}.\n"
@@ -716,6 +717,22 @@ class WritePaperTests(unittest.TestCase):
                 result["generated_files"],
                 ["figures/overview.svg", "figures/overview.pdf"],
             )
+            anonymized = (workspace / "main.tex").read_text(encoding="utf-8")
+            (workspace / "main.tex").write_text(
+                anonymized.replace(
+                    "\\date{}",
+                    "\\date{Anonymized manuscript}",
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(common.CodexError, r"\\date\{\}"):
+                write_paper.validate_paper_result(
+                    workspace / "agent-result.json",
+                    workspace,
+                    inputs,
+                    authors=[],
+                )
+            (workspace / "main.tex").write_text(anonymized, encoding="utf-8")
             print_only_response = paper_result(["R-001"])
             print_only_response["citations"][0]["url"] = ""
             common.write_json(
