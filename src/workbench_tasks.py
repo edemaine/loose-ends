@@ -362,6 +362,24 @@ def _require(targets: list[dict], allowed: set[str], action: str) -> None:
         )
 
 
+def _single_paper_problem_title(targets: list[dict]) -> str | None:
+    """Return the paper title for a multi-problem, single-paper selection."""
+    if len(targets) < 2 or any(
+        target["kind"] != "problem" for target in targets
+    ):
+        return None
+    papers = {Path(target["path"]).parent for target in targets}
+    if len(papers) != 1:
+        return None
+    paper = next(iter(papers))
+    analysis = common.load_json(paper / "analysis" / "manifest.json") or {}
+    metadata = common.load_json(paper / "metadata.json") or {}
+    for value in (analysis.get("paper_title"), metadata.get("title")):
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return paper.name
+
+
 def build_plan(
     request: dict,
     *,
@@ -588,13 +606,18 @@ def build_plan(
         for key in ("prompt", "reviewPrompt")
         if (value := _text(options, key)) is not None
     }
-    labels = ", ".join(target["label"] for target in targets[:3])
-    if len(targets) > 3:
-        labels += f" and {len(targets) - 3} more"
+    single_paper_title = _single_paper_problem_title(targets)
+    if single_paper_title:
+        scope_title = f"{len(targets)} problems in {single_paper_title}"
+    else:
+        scope_title = ", ".join(target["label"] for target in targets[:3])
+        if len(targets) > 3:
+            scope_title += f" and {len(targets) - 3} more"
     return {
         "id": str(uuid.uuid4()),
         "action": action,
-        "title": f"{action.title()}: {labels}",
+        "title": f"{action.title()}: {scope_title}",
+        "singlePaperTitle": single_paper_title,
         "catalogVersion": catalog_version,
         "priorityLevel": priority_level,
         "targets": targets,

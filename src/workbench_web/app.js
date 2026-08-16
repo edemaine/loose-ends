@@ -2607,12 +2607,25 @@ function targetPaperCount(targets) {
   return papers.size;
 }
 
+function singlePaperProblemScope(job) {
+  const targets = taskTargets(job);
+  const paperTitle = job.plan?.singlePaperTitle;
+  if (
+    targets.length < 2 ||
+    !targets.every(value => value.kind === "problem") ||
+    typeof paperTitle !== "string" ||
+    !paperTitle.trim()
+  ) return "";
+  return `${targetCountLabel(targets)} in ${paperTitle}`;
+}
+
 function taskScopeSummary(job) {
   const targets = taskTargets(job);
   if (!targets.length) return job.title;
-  const pieces = [targetCountLabel(targets)];
+  const paperScope = singlePaperProblemScope(job);
+  const pieces = [paperScope || targetCountLabel(targets)];
   const papers = targetPaperCount(targets);
-  if (papers) pieces.push(`${papers} paper${papers === 1 ? "" : "s"}`);
+  if (papers && !paperScope) pieces.push(`${papers} paper${papers === 1 ? "" : "s"}`);
   const units = job.plan?.units?.length || new Set((job.runs || []).map(run => run.unit_index)).size;
   if (units) pieces.push(`${units} run${units === 1 ? "" : "s"}`);
   return pieces.join(" · ");
@@ -2620,9 +2633,9 @@ function taskScopeSummary(job) {
 
 function taskSidebarTitle(job) {
   const targets = taskTargets(job);
-  const scope = targets.length === 1
+  const scope = singlePaperProblemScope(job) || (targets.length === 1
     ? targetDisplayLabel(targets[0]) || targetCountLabel(targets)
-    : targets.length ? targetCountLabel(targets) : job.title;
+    : targets.length ? targetCountLabel(targets) : job.title);
   return `${humanize(job.action)} · ${scope}`;
 }
 

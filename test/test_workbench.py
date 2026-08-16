@@ -274,6 +274,8 @@ class WorkbenchPlanningTests(unittest.TestCase):
         self.assertIn("open.href = artifactViewUrl(pdf)", app)
         self.assertIn('node("a", "artifact-action", "Raw")', app)
         self.assertIn("function taskScopeSummary(job)", app)
+        self.assertIn("function singlePaperProblemScope(job)", app)
+        self.assertIn("job.plan?.singlePaperTitle", app)
         self.assertIn("function problemRunPresentation(action, run)", app)
         self.assertIn('`${targets.length} selected problem', app)
         self.assertIn("title: paperTitle", app)
@@ -704,6 +706,38 @@ class WorkbenchPlanningTests(unittest.TestCase):
             self.assertEqual(argv[argv.index("--review") + 1], "all")
             self.assertIn("Try small cases.", argv)
             self.assertIn("Check the boundary case.", argv)
+
+    def test_multi_problem_plan_title_includes_single_paper_title(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = make_paper(root)
+            manifest_path = paper / "analysis" / "manifest.json"
+            manifest = common.read_json(manifest_path)
+            manifest["open_problems"].append(
+                {
+                    "id": "OP-002",
+                    "title": "Second",
+                    "explicitness": "explicit",
+                }
+            )
+            common.write_json(manifest_path, manifest)
+            plan = build_plan(
+                {
+                    "action": "solve",
+                    "targets": [
+                        {"kind": "problem", "path": str(paper / "OP-001")},
+                        {"kind": "problem", "path": str(paper / "OP-002")},
+                    ],
+                    "options": {},
+                },
+                project_root=PROJECT_ROOT,
+                allowed_roots=[root],
+                manuscripts=root / "manuscripts",
+                catalog_version=1,
+            )
+
+            self.assertEqual(plan["singlePaperTitle"], "Test Paper")
+            self.assertEqual(plan["title"], "Solve: 2 problems in Test Paper")
 
     def test_planner_rejects_priority_outside_displayed_range(self):
         with TemporaryDirectory() as temporary:
