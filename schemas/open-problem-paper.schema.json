@@ -100,7 +100,7 @@
     },
     "generated_files": {
       "type": "array",
-      "description": "Generated root outputs and optional files beneath figures/. Every listed SVG must have a listed same-stem PDF.",
+      "description": "Generated root outputs and optional files beneath figures/ or code/. Every listed SVG beneath figures/ must have a listed same-stem PDF.",
       "items": {"type": "string"}
     },
     "warnings": {

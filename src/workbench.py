@@ -494,6 +494,27 @@ def _manuscript_inventory(
                 ).timestamp()
             except (TypeError, ValueError):
                 created_timestamp = draft.stat().st_mtime
+            draft_files = [
+                path
+                for path in (
+                    draft / "main.pdf",
+                    draft / "main.tex",
+                    draft / "readiness.md",
+                    draft / "paper-critique.md",
+                    draft / "paper-review.json",
+                )
+                if path.is_file()
+            ]
+            for directory_name in ("figures", "code"):
+                generated_directory = draft / directory_name
+                if generated_directory.is_dir():
+                    draft_files.extend(
+                        sorted(
+                            path
+                            for path in generated_directory.rglob("*")
+                            if path.is_file()
+                        )
+                    )
             drafts.append(
                 {
                     "key": str(draft.resolve()),
@@ -514,17 +535,7 @@ def _manuscript_inventory(
                         paper_lookup=paper_lookup,
                         problem_lookup=problem_lookup,
                     ),
-                    "files": [
-                        str(path.resolve())
-                        for path in (
-                            draft / "main.pdf",
-                            draft / "main.tex",
-                            draft / "readiness.md",
-                            draft / "paper-critique.md",
-                            draft / "paper-review.json",
-                        )
-                        if path.is_file()
-                    ],
+                    "files": [str(path.resolve()) for path in draft_files],
                 }
             )
             draft_current += 1

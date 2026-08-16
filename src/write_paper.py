@@ -728,6 +728,7 @@ def _copy_draft(
     for name in names:
         _copy_path(source / name, destination / name)
     _copy_path(source / "figures", destination / "figures")
+    _copy_path(source / "code", destination / "code")
 
 
 def stage_paper_context(
@@ -991,7 +992,7 @@ def _generated_files(workspace: Path, values: object) -> list[Path]:
             or normalized in seen
             or (
                 normalized not in standard_outputs
-                and relative.parts[0] != "figures"
+                and relative.parts[0] not in {"figures", "code"}
             )
         ):
             raise common.CodexError(
@@ -1007,7 +1008,10 @@ def _generated_files(workspace: Path, values: object) -> list[Path]:
             paths.append(path)
     for normalized in seen:
         relative = PurePosixPath(normalized)
-        if relative.suffix.casefold() != ".svg":
+        if (
+            relative.parts[0] != "figures"
+            or relative.suffix.casefold() != ".svg"
+        ):
             continue
         pdf = relative.with_suffix(".pdf").as_posix()
         if pdf not in seen:
@@ -1492,16 +1496,17 @@ def _draft_digest(draft: DraftRef) -> str:
     ]
     main_pdf = draft.directory / "main.pdf"
     files.append(("main.pdf", main_pdf))
-    figures = draft.directory / "figures"
-    if figures.is_dir():
-        files.extend(
-            (
-                path.relative_to(draft.directory).as_posix(),
-                path,
+    for directory_name in ("figures", "code"):
+        directory = draft.directory / directory_name
+        if directory.is_dir():
+            files.extend(
+                (
+                    path.relative_to(draft.directory).as_posix(),
+                    path,
+                )
+                for path in sorted(directory.rglob("*"))
+                if path.is_file()
             )
-            for path in figures.rglob("*")
-            if path.is_file()
-        )
     return common.files_digest(files)
 
 
@@ -1620,7 +1625,7 @@ def _install_draft(
         raise common.CodexError(
             f"could not install paper draft; staging preserved at {staging}: {exc}"
         ) from exc
-    common.report_artifacts(
+    installed_artifacts = [
         destination / name
         for name in (
             "main.pdf",
@@ -1629,7 +1634,12 @@ def _install_draft(
             "readiness.md",
             "paper-result.json",
         )
+    ]
+    installed_artifacts.extend(
+        destination / source.relative_to(workspace)
+        for source in generated
     )
+    common.report_artifacts(installed_artifacts)
     return DraftRef(destination, draft_number, result)
 
 
@@ -1700,8 +1710,12 @@ def run_author_round(
         )
         result = codex_cli.validated_result(report)
         generated = [
-            path for path in report.files
-            if path.is_relative_to(workspace / "figures")
+            path
+            for path in report.files
+            if any(
+                path.is_relative_to(workspace / directory_name)
+                for directory_name in ("figures", "code")
+            )
         ]
         compile_latex(workspace, latexmk)
         draft = _install_draft(

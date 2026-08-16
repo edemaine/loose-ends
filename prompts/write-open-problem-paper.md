@@ -142,7 +142,13 @@ Write these files in the current working directory:
   welcome, but for every `figures/name.svg` you must also generate and list
   `figures/name.pdf`, and `main.tex` must include the PDF version. Convert SVG
   with an available command-line tool such as Inkscape, or omit the SVG source
-  if no reliable conversion is available.
+  if no reliable conversion is available;
+- optional supporting source code, data, build instructions, machine-readable
+  results, and reproducibility material beneath `code/` only. Keep the
+  directory self-contained and remove stale machine-local paths. When a
+  computation is part of the proof, prefer a one-command verifier plus the
+  exact inputs, outputs, environment description, and cryptographic hashes
+  needed to authenticate the reported results.
 
 In every Markdown file, delimit all mathematical notation explicitly. Use
 `\(...\)` for inline mathematics and `\[...\]` for display mathematics.
@@ -161,9 +167,10 @@ Write the structured response to `agent-result.json`. In every result's
 `manuscript_labels`, list the literal keys appearing
 inside the corresponding LaTeX `\label{...}` commands (for example,
 `thm:main-result`), not displayed names such as “Theorem 3.2” or theorem
-titles. In `generated_files`, list any optional files beneath `figures/`. You
-may also list the required root outputs `main.tex`, `references.bib`,
-`readiness.md`, and the compiled `main.pdf`; the driver independently rebuilds
-and installs `main.pdf`, so it records only optional figure files as extra
-generated artifacts. List both the SVG and matching same-stem PDF whenever you
-generate an SVG.
+titles. In `generated_files`, list any optional files beneath `figures/` or
+`code/`. You may also list the required root outputs `main.tex`,
+`references.bib`, `readiness.md`, and the compiled `main.pdf`; the driver
+independently rebuilds
+and installs `main.pdf`, so it records only optional figure and code files as
+extra generated artifacts. List both the SVG and matching same-stem PDF
+whenever you generate an SVG beneath `figures/`.

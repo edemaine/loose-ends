@@ -263,7 +263,13 @@ def validate(*, workspace: Path, expectations: Mapping[str, object]) -> common.V
             relative = common.safe_relative_path(value)
             item_path = f"agent-result.json#/generated_files/{index}"
             normalized = relative.as_posix() if relative is not None else ""
-            if relative is None or normalized in seen_generated or (normalized not in STANDARD_OUTPUTS and (not relative.parts or relative.parts[0] != "figures")):
+            if relative is None or normalized in seen_generated or (
+                normalized not in STANDARD_OUTPUTS
+                and (
+                    not relative.parts
+                    or relative.parts[0] not in {"figures", "code"}
+                )
+            ):
                 reporter.error("E_GENERATED_PATH", f"invalid or duplicate generated file {value!r}", path=item_path)
                 continue
             seen_generated.add(normalized)
@@ -274,7 +280,12 @@ def validate(*, workspace: Path, expectations: Mapping[str, object]) -> common.V
                 files.append(path)
         for normalized in sorted(seen_generated):
             relative = PurePosixPath(normalized)
-            if relative.suffix.casefold() == ".svg" and relative.with_suffix(".pdf").as_posix() not in seen_generated:
+            if (
+                relative.parts[0] == "figures"
+                and relative.suffix.casefold() == ".svg"
+                and relative.with_suffix(".pdf").as_posix()
+                not in seen_generated
+            ):
                 reporter.error("E_SVG_PDF", f"generated SVG requires matching PDF: {normalized}", path="agent-result.json#/generated_files")
     return common.ValidationReport(result=result, files=files, issues=reporter.issues)
 

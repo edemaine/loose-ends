@@ -585,6 +585,12 @@ class WorkbenchPlanningTests(unittest.TestCase):
                     "\\end{abstract}\n",
                     encoding="utf-8",
                 )
+                code = draft / "code"
+                code.mkdir()
+                (code / "verify.py").write_text(
+                    "print('verified')\n",
+                    encoding="utf-8",
+                )
             papers = [{"path": str(paper), "title": "Test Paper"}]
             progress = []
 
@@ -608,6 +614,10 @@ class WorkbenchPlanningTests(unittest.TestCase):
                 records[0]["drafts"][0]["createdTimestamp"],
             )
             self.assertEqual(progress, [(0, 2), (1, 2), (2, 2)])
+            self.assertIn(
+                str((manuscript / "draft-002" / "code" / "verify.py").resolve()),
+                records[0]["latest"]["files"],
+            )
 
     def test_event_hub_exposes_bootstrap_sequence(self):
         hub = EventHub()

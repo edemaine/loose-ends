@@ -9,11 +9,12 @@ literature context is staged read-only under:
 
 {{CONTEXT_DIRECTORY}}
 
-Read `inputs/index.json`, the entire manuscript, its bibliography and
-`readiness.md`, and all evidence for every `R-###`. Independently verify the
-paper as written. The earlier solver and paper writer are evidence, not truth.
-Try to falsify each main theorem and check it against the exact original
-problem before accepting it.
+Read `inputs/index.json`, the entire manuscript, its bibliography,
+`readiness.md`, any supporting `figures/` and `code/` directories, and all
+evidence for every `R-###`. Independently verify the paper as written. The
+earlier solver and paper writer are evidence, not truth. Try to falsify each
+main theorem and check it against the exact original problem before accepting
+it.
 
 Assess each `R-###` according to the result the manuscript actually advertises
 under its stated scope. If every advertised theorem and limitation is

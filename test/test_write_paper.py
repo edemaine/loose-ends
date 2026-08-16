@@ -289,6 +289,59 @@ class WritePaperTests(unittest.TestCase):
                 ],
             )
 
+    def test_stages_manuscript_code_for_revision_and_review(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = make_paper(root)
+            attempt = make_ready_attempt(paper, "OP-001")
+            inputs = write_paper.load_paper_inputs([attempt])
+            draft_directory = root / "manuscript" / "draft-001"
+            code = draft_directory / "code"
+            code.mkdir(parents=True)
+            (code / "verify.py").write_text(
+                "print('verified')\n",
+                encoding="utf-8",
+            )
+            workspace = root / "workspace"
+            workspace.mkdir()
+
+            context = write_paper.stage_paper_context(
+                workspace,
+                inputs,
+                manuscript=write_paper.DraftRef(draft_directory, 1, {}),
+            )
+
+            self.assertEqual(
+                (context / "manuscript" / "code" / "verify.py").read_text(
+                    encoding="utf-8"
+                ),
+                "print('verified')\n",
+            )
+
+    def test_manuscript_code_changes_invalidate_review_digest(self):
+        with TemporaryDirectory() as temporary:
+            draft_directory = Path(temporary) / "draft-001"
+            draft_directory.mkdir()
+            for name in (
+                "main.tex",
+                "references.bib",
+                "readiness.md",
+                "paper-result.json",
+                "manifest.json",
+                "main.pdf",
+            ):
+                (draft_directory / name).write_text(name, encoding="utf-8")
+            code = draft_directory / "code"
+            code.mkdir()
+            verifier = code / "verify.py"
+            verifier.write_text("print(1)\n", encoding="utf-8")
+            draft = write_paper.DraftRef(draft_directory, 1, {})
+            before = write_paper._draft_digest(draft)
+
+            verifier.write_text("print(2)\n", encoding="utf-8")
+
+            self.assertNotEqual(before, write_paper._draft_digest(draft))
+
     def test_legacy_pinned_revision_can_refresh_to_whole_paper(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -695,6 +748,12 @@ class WritePaperTests(unittest.TestCase):
             )
             figure = figures / "overview.pdf"
             figure.write_bytes(b"%PDF-figure")
+            code = workspace / "code"
+            code.mkdir()
+            verifier = code / "verify.py"
+            verifier.write_text("print('verified')\n", encoding="utf-8")
+            raw_results = code / "raw-results.json"
+            raw_results.write_text('{"verified": true}\n', encoding="utf-8")
             response = paper_result(["R-001"])
             response["generated_files"] = [
                 "main.tex",
@@ -703,6 +762,8 @@ class WritePaperTests(unittest.TestCase):
                 "main.pdf",
                 "figures/overview.svg",
                 "figures/overview.pdf",
+                "code/verify.py",
+                "code/raw-results.json",
             ]
             common.write_json(
                 workspace / "agent-result.json",
@@ -717,10 +778,15 @@ class WritePaperTests(unittest.TestCase):
             )
 
             self.assertEqual(result["status"], "draft_complete")
-            self.assertEqual(files, [svg, figure])
+            self.assertEqual(files, [svg, figure, verifier, raw_results])
             self.assertEqual(
                 result["generated_files"],
-                ["figures/overview.svg", "figures/overview.pdf"],
+                [
+                    "figures/overview.svg",
+                    "figures/overview.pdf",
+                    "code/verify.py",
+                    "code/raw-results.json",
+                ],
             )
             anonymized = (workspace / "main.tex").read_text(encoding="utf-8")
             (workspace / "main.tex").write_text(
@@ -968,6 +1034,12 @@ class WritePaperTests(unittest.TestCase):
                 if kwargs["schema_path"].name == "open-problem-paper.schema.json":
                     calls["writer"] += 1
                     write_manuscript_files(workspace, ["R-001"])
+                    code = workspace / "code"
+                    code.mkdir()
+                    (code / "verify.py").write_text(
+                        f"print('verified round {calls['writer']}')\n",
+                        encoding="utf-8",
+                    )
                     addressed = []
                     if calls["writer"] == 2:
                         self.assertTrue(
@@ -989,10 +1061,9 @@ class WritePaperTests(unittest.TestCase):
                                 "explanation": "Expanded the proof.",
                             }
                         ]
-                    common.write_json(
-                        workspace / "agent-result.json",
-                        paper_result(["R-001"], addressed=addressed),
-                    )
+                    response = paper_result(["R-001"], addressed=addressed)
+                    response["generated_files"] = ["code/verify.py"]
+                    common.write_json(workspace / "agent-result.json", response)
                 else:
                     calls["reviewer"] += 1
                     if calls["reviewer"] == 1:
@@ -1120,6 +1191,12 @@ class WritePaperTests(unittest.TestCase):
             )
             self.assertTrue(
                 (manuscript / "draft-002" / "main.pdf").is_file()
+            )
+            self.assertEqual(
+                (manuscript / "draft-002" / "code" / "verify.py").read_text(
+                    encoding="utf-8"
+                ),
+                "print('verified round 2')\n",
             )
             self.assertFalse(
                 (manuscript / "draft-002" / "paper.pdf").exists()
