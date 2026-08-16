@@ -21,6 +21,9 @@ Write exactly these three Markdown files in the current working directory:
 2. `results.md`
 3. `open-problems.md`
 
+In every Markdown file, delimit all mathematical notation explicitly. Use
+`\(...\)` for inline mathematics and `\[...\]` for display mathematics.
+
 Do not modify the paper directory or its source files.
 
 ## `summary.md`

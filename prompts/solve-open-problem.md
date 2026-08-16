@@ -62,6 +62,9 @@ unchecked experiment as a proof. Make progress auditable by stating exact
 claims and supplying derivations, verification methods, or reproducible
 code/data.
 
+In every Markdown file, delimit all mathematical notation explicitly. Use
+`\(...\)` for inline mathematics and `\[...\]` for display mathematics.
+
 Write `attempt.md` in the current working directory. It must include:
 
 - the original problem and your initial strategic assessment;

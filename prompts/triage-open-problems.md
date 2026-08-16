@@ -26,6 +26,9 @@ This is research triage, not a quota. Classify every requested problem:
 Do not favor a fixed number of problems. It is valid to classify all, some, or
 none as `attempt`.
 
+In every Markdown file, delimit all mathematical notation explicitly. Use
+`\(...\)` for inline mathematics and `\[...\]` for display mathematics.
+
 For each problem, propose zero or more nonbinding `suggested_approaches`.
 Identify distinct promising ideas, useful modes such as proof,
 counterexample search, computation, or reformulation, why each idea is

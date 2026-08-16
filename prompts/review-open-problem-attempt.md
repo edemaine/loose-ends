@@ -64,6 +64,9 @@ Classify the attempt on four independent axes:
 - `verification_confidence` records how much independent checking the review
   managed to perform, not novelty confidence.
 
+In every Markdown file, delimit all mathematical notation explicitly. Use
+`\(...\)` for inline mathematics and `\[...\]` for display mathematics.
+
 Write `critique.md` in the current working directory with:
 
 - a concise reconstruction of the approach;

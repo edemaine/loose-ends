@@ -65,6 +65,9 @@ instead be stated in the manuscript's own mathematical or bibliographic terms.
 Treat leaked workflow language as an exposition finding and do not return
 `ready_for_expert_review` until it is removed or rewritten.
 
+In every Markdown file, delimit all mathematical notation explicitly. Use
+`\(...\)` for inline mathematics and `\[...\]` for display mathematics.
+
 Write `paper-critique.md` in the current working directory. Include a concise
 assessment, result-by-result and theorem-by-theorem verification, citation and
 novelty checks, self-containment and presentation checks, and concrete repairs.

@@ -49,6 +49,9 @@ the specific theorem or technique, its relevance, and its limitations; do not
 produce a bare bibliography. Include useful papers even when they do not settle
 the problem.
 
+In every Markdown file, delimit all mathematical notation explicitly. Use
+`\(...\)` for inline mathematics and `\[...\]` for display mathematics.
+
 Write one substantive Markdown report named `literature-OP-NNN.md` in the
 current working directory for every requested ID. It should include the status
 assessment, exact formulation audit, sources with links, residual problem, and

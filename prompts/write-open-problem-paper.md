@@ -144,6 +144,9 @@ Write these files in the current working directory:
   with an available command-line tool such as Inkscape, or omit the SVG source
   if no reliable conversion is available.
 
+In every Markdown file, delimit all mathematical notation explicitly. Use
+`\(...\)` for inline mathematics and `\[...\]` for display mathematics.
+
 Use the requested authors exactly. If the author list is empty, write
 `\author{}`. Do not copy authors from an originating paper into the manuscript
 author list.
