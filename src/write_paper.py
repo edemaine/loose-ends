@@ -20,6 +20,8 @@ import analyze_papers
 import codex_cli
 import open_problem_common as common
 import review_solutions
+from validation import paper as paper_validation
+from validation import paper_review as paper_review_validation
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -1136,6 +1138,7 @@ def validate_paper_result(
     previous: DraftRef | None = None,
     authors: Sequence[str] | None = None,
 ) -> tuple[dict, list[Path]]:
+    """Validate and normalize pre-checker paper output for recovery/tests."""
     result = common.read_json(result_path, description="paper response")
     status = result.get("status")
     if status not in PAPER_STATUSES:
@@ -1664,22 +1667,42 @@ def run_author_round(
             previous=previous,
             revision_instruction=revision_instruction,
         )
-        result_path = codex_cli.run_structured_codex(
+        expectations = {
+            "result_ids": [item.result_id for item in inputs],
+            "claim_ids_by_result": {
+                item.result_id: [
+                    claim["id"]
+                    for claim in item.attempt.solver_result.get(
+                        "checkable_claims", []
+                    )
+                ]
+                for item in inputs
+            },
+            "previous_finding_ids": sorted(_previous_finding_ids(previous)),
+            "historical_finding_ids": sorted(
+                _previous_addressed_finding_ids(previous)
+            ),
+            "authors": list(authors),
+        }
+        report = codex_cli.run_validated_codex(
             codex=codex,
             workspace=workspace,
             prompt=prompt,
             schema_path=schema_path,
+            validator=codex_cli.OutputValidator(
+                Path(paper_validation.__file__).resolve(),
+                paper_validation.validate,
+                expectations,
+            ),
             options=options,
             web_search=web_search,
             launch_interval=launch_interval,
         )
-        result, generated = validate_paper_result(
-            result_path,
-            workspace,
-            inputs,
-            previous=previous,
-            authors=authors,
-        )
+        result = codex_cli.validated_result(report)
+        generated = [
+            path for path in report.files
+            if path.is_relative_to(workspace / "figures")
+        ]
         compile_latex(workspace, latexmk)
         draft = _install_draft(
             manuscript_directory,
@@ -1711,6 +1734,7 @@ def validate_paper_review(
     workspace: Path,
     inputs: Sequence[PaperInput],
 ) -> dict:
+    """Validate pre-checker paper-review output for recovery/tests."""
     result = common.read_json(result_path, description="paper-review response")
     verdict = result.get("verdict")
     if verdict not in PAPER_VERDICTS:
@@ -1863,16 +1887,33 @@ def run_paper_review(
             include_manuscript_review=False,
         )
         prompt = render_reviewer_prompt(prompt_template, context=context)
-        result_path = codex_cli.run_structured_codex(
+        expectations = {
+            "result_ids": [item.result_id for item in inputs],
+            "claim_ids": sorted(
+                {
+                    claim["id"]
+                    for item in inputs
+                    for claim in item.attempt.solver_result.get(
+                        "checkable_claims", []
+                    )
+                }
+            ),
+        }
+        report = codex_cli.run_validated_codex(
             codex=codex,
             workspace=workspace,
             prompt=prompt,
             schema_path=schema_path,
+            validator=codex_cli.OutputValidator(
+                Path(paper_review_validation.__file__).resolve(),
+                paper_review_validation.validate,
+                expectations,
+            ),
             options=options,
             web_search=web_search,
             launch_interval=launch_interval,
         )
-        result = validate_paper_review(result_path, workspace, inputs)
+        result = codex_cli.validated_result(report)
         staging = Path(
             tempfile.mkdtemp(prefix=".paper-review-install-", dir=draft.directory)
         )
@@ -2353,6 +2394,7 @@ def main(argv: list[str] | None = None) -> int:
             schema_text,
             options,
             web_search=args.web_search,
+            validation_source=Path(paper_validation.__file__).resolve(),
         )
         review_prompt_path = args.review_prompt_template.expanduser().resolve()
         review_schema_path = args.review_schema.expanduser().resolve()
@@ -2378,6 +2420,9 @@ def main(argv: list[str] | None = None) -> int:
             review_schema_text,
             review_options,
             web_search=review_web_search,
+            validation_source=Path(
+                paper_review_validation.__file__
+            ).resolve(),
         )
     except (
         common.CodexError,

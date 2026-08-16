@@ -346,6 +346,9 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 prompt,
                 schema_text,
                 options,
+                validation_source=Path(
+                    triage_open_problems.triage_validation.__file__
+                ),
             )
 
             def fake_triage(**kwargs):
@@ -580,6 +583,9 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 solver_prompt,
                 solver_schema,
                 solver_options,
+                validation_source=Path(
+                    solve_open_problems.solver_validation.__file__
+                ),
             )
 
             def fake_solver(**kwargs):
@@ -673,6 +679,9 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 review_prompt,
                 review_schema,
                 review_options,
+                validation_source=Path(
+                    review_solutions.solution_review_validation.__file__
+                ),
             )
 
             def fake_review(**kwargs):
@@ -802,6 +811,9 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 schema_text,
                 options,
                 web_search="live",
+                validation_source=Path(
+                    literature_review.literature_validation.__file__
+                ),
             )
 
             def source(role):
@@ -879,6 +891,12 @@ class OpenProblemPipelineTests(unittest.TestCase):
                         "warnings": [],
                     },
                 )
+                for entry in entries:
+                    (workspace / f"literature-{entry['problem_id']}.md").write_text(
+                        f"# Literature {entry['problem_id']}\n\n"
+                        f"{entry['status_summary']}\n",
+                        encoding="utf-8",
+                    )
                 constrained = common.read_json(kwargs["schema_path"])
                 literature_schema = constrained["properties"]["literature"]
                 self.assertEqual(literature_schema["minItems"], 2)
@@ -987,6 +1005,9 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 schema_text,
                 options,
                 web_search="live",
+                validation_source=Path(
+                    literature_review.literature_validation.__file__
+                ),
             )
             input_digests = {
                 problem.id: common.literature_input_digest(problem)
@@ -1902,6 +1923,9 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 codex_cli.ModelOptions(
                     codex_cli.DEFAULT_MODEL,
                     codex_cli.DEFAULT_REASONING_EFFORT,
+                ),
+                validation_source=Path(
+                    triage_open_problems.triage_validation.__file__
                 ),
             )
             for problem in problems:

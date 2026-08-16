@@ -16,6 +16,7 @@ from typing import Callable, Iterable, Sequence
 
 import codex_cli
 import open_problem_common as common
+from validation import solution_review as solution_review_validation
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -255,6 +256,7 @@ def validate_review_result(
     *,
     require_markdown: bool = True,
 ) -> dict:
+    """Validate and normalize pre-checker review output for recovery."""
     result = common.read_json(result_path, description="review response")
     if result.get("correctness") not in CORRECTNESS_LEVELS:
         raise common.CodexError("review response has invalid correctness")
@@ -679,19 +681,31 @@ def review_attempt(
             workspace,
             attempt,
         )
-        result_path = codex_cli.run_structured_codex(
+        claims = attempt.solver_result.get("checkable_claims", [])
+        expectations = {
+            "claim_ids": [claim["id"] for claim in claims],
+            "claimed_result_type": common.claimed_result_type(
+                attempt.solver_result
+            ),
+        }
+        report = codex_cli.run_validated_codex(
             codex=codex,
             workspace=workspace,
             prompt=prompt,
             schema_path=attempt_schema_path,
+            validator=codex_cli.OutputValidator(
+                Path(solution_review_validation.__file__).resolve(),
+                solution_review_validation.validate,
+                expectations,
+            ),
             options=options,
             web_search=web_search,
             launch_interval=launch_interval,
             timeout_seconds=timeout_seconds,
             completion_grace_seconds=COMPLETION_GRACE_SECONDS,
         )
-        recover_missing_critique(attempt, workspace)
-        result = validate_review_result(result_path, workspace, attempt)
+        result = codex_cli.validated_result(report)
+        result["human_priority"] = derive_human_priority(result)
         _install_review(
             attempt,
             workspace=workspace,
@@ -874,7 +888,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--schema",
         type=Path,
         default=DEFAULT_SCHEMA_PATH,
-        help=f"final-response JSON schema (default: {DEFAULT_SCHEMA_PATH})",
+        help=f"agent-result JSON schema (default: {DEFAULT_SCHEMA_PATH})",
     )
     codex_cli.add_model_arguments(parser)
     codex_cli.add_web_search_argument(parser, default="live")
@@ -957,6 +971,9 @@ def main(argv: list[str] | None = None) -> int:
             schema_text,
             options,
             web_search=args.web_search,
+            validation_source=Path(
+                solution_review_validation.__file__
+            ).resolve(),
         )
     except (
         common.CodexError,

@@ -54,6 +54,6 @@ current working directory for every requested ID. It should include the status
 assessment, exact formulation audit, sources with links, residual problem, and
 solver briefing. Do not modify `inputs/`.
 
-Your final response must be only the JSON object required by the supplied
-schema. The `literature` array must contain every requested problem exactly
+Write the structured response to `agent-result.json`. The `literature` array
+must contain every requested problem exactly
 once and no other problem.

@@ -19,6 +19,7 @@ from typing import Callable, Sequence
 import codex_cli
 import open_problem_common as common
 import review_solutions
+from validation import solver as solver_validation
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -357,6 +358,7 @@ def validate_solver_result(
     *,
     require_markdown: bool = True,
 ) -> tuple[dict, list[Path]]:
+    """Validate and normalize pre-checker solver output for recovery."""
     result = common.read_json(result_path, description="solver response")
     claimed_result_type = result.get("claimed_result_type")
     if claimed_result_type not in SOLUTION_STATUSES:
@@ -891,18 +893,25 @@ def solve_work(
             work=work,
             context_directory=context,
         )
-        result_path = codex_cli.run_structured_codex(
+        report = codex_cli.run_validated_codex(
             codex=codex,
             workspace=workspace,
             prompt=prompt,
             schema_path=schema_path,
+            validator=codex_cli.OutputValidator(
+                Path(solver_validation.__file__).resolve(),
+                solver_validation.validate,
+                {},
+            ),
             options=options,
             web_search=web_search,
             launch_interval=launch_interval,
         )
-        recover_alternate_attempt_markdown(work, workspace)
-        recover_missing_attempt_markdown(work, workspace)
-        result, artifacts = validate_solver_result(result_path, workspace)
+        result = codex_cli.validated_result(report)
+        artifacts = [
+            path for path in report.files
+            if path != workspace / "attempt.md"
+        ]
         destination = _install_attempt(
             work,
             workspace=workspace,
@@ -1164,7 +1173,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--schema",
         type=Path,
         default=DEFAULT_SCHEMA_PATH,
-        help=f"solver final-response schema (default: {DEFAULT_SCHEMA_PATH})",
+        help=f"solver agent-result schema (default: {DEFAULT_SCHEMA_PATH})",
     )
     codex_cli.add_prompt_arguments(
         parser,
@@ -1176,7 +1185,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--review-schema",
         type=Path,
         default=DEFAULT_REVIEW_SCHEMA_PATH,
-        help=f"critic final-response schema (default: {DEFAULT_REVIEW_SCHEMA_PATH})",
+        help=f"critic agent-result schema (default: {DEFAULT_REVIEW_SCHEMA_PATH})",
     )
     codex_cli.add_model_arguments(parser)
     codex_cli.add_model_arguments(parser, prefix="review")
@@ -1260,6 +1269,7 @@ def main(argv: list[str] | None = None) -> int:
             schema_text,
             options,
             web_search=args.web_search,
+            validation_source=Path(solver_validation.__file__).resolve(),
         )
         work_items, without_work, literature_resolved = build_work(
             problems,
@@ -1286,6 +1296,9 @@ def main(argv: list[str] | None = None) -> int:
             review_schema_text,
             review_options,
             web_search=args.review_web_search or args.web_search,
+            validation_source=Path(
+                review_solutions.solution_review_validation.__file__
+            ).resolve(),
         )
     except (
         common.CodexError,

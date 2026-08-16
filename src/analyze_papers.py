@@ -20,6 +20,7 @@ from typing import Iterable
 
 import artifact_reporting
 import codex_cli
+from validation import analysis as analysis_validation
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -147,6 +148,7 @@ def analysis_config_digest(
         prompt,
         schema_text,
         codex_cli.ModelOptions(model, reasoning_effort, fast),
+        validation_source=Path(analysis_validation.__file__).resolve(),
     )
 
 
@@ -228,7 +230,7 @@ def analysis_is_current(
 
 
 def validate_agent_result(result_path: Path, workspace: Path) -> dict:
-    """Validate the structured final response and three Markdown artifacts."""
+    """Validate a pre-checker workspace during legacy recovery."""
     try:
         result = json.loads(result_path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
@@ -440,11 +442,16 @@ def analyze_paper(
     ).resolve()
     staged_paper = stage_paper_inputs(paper_directory, workspace)
     prompt = render_prompt(prompt_template, staged_paper)
-    result_path = codex_cli.run_structured_codex(
+    report = codex_cli.run_validated_codex(
         codex=codex,
         workspace=workspace,
         prompt=prompt,
         schema_path=schema_path,
+        validator=codex_cli.OutputValidator(
+            Path(analysis_validation.__file__).resolve(),
+            analysis_validation.validate,
+            {},
+        ),
         options=codex_cli.ModelOptions(
             model,
             reasoning_effort,
@@ -454,7 +461,7 @@ def analyze_paper(
     )
 
     try:
-        agent_result = validate_agent_result(result_path, workspace)
+        agent_result = codex_cli.validated_result(report)
         results = result_count(workspace)
         open_problems = len(agent_result["open_problems"])
         manifest = build_manifest(
@@ -692,7 +699,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--schema",
         type=Path,
         default=DEFAULT_SCHEMA_PATH,
-        help=f"final-response JSON schema (default: {DEFAULT_SCHEMA_PATH})",
+        help=f"agent-result JSON schema (default: {DEFAULT_SCHEMA_PATH})",
     )
     return parser
 

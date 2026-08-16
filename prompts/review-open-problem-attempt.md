@@ -74,5 +74,4 @@ Write `critique.md` in the current working directory with:
 - concrete next steps for mathematical verification or repair.
 
 Do not include a novelty or provenance assessment. Do not modify `inputs/`.
-Your final response must be only the JSON object required by the supplied
-schema.
+Write the structured response to `agent-result.json`.

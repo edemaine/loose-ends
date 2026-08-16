@@ -16,6 +16,7 @@ from typing import Sequence
 
 import codex_cli
 import open_problem_common as common
+from validation import literature as literature_validation
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -247,6 +248,7 @@ def validate_literature_result(
     workspace: Path,
     problems: Sequence[common.ProblemRef],
 ) -> tuple[dict, dict[str, dict]]:
+    """Validate and repair pre-checker literature output for recovery."""
     result = common.read_json(result_path, description="literature response")
     if result.get("status") not in {"complete", "partial"}:
         raise common.CodexError("literature response has invalid run status")
@@ -662,20 +664,23 @@ def search_paper_literature(
             workspace,
             problems,
         )
-        result_path = codex_cli.run_structured_codex(
+        expectations = {"problem_ids": [problem.id for problem in problems]}
+        report = codex_cli.run_validated_codex(
             codex=codex,
             workspace=workspace,
             prompt=prompt,
             schema_path=attempt_schema_path,
+            validator=codex_cli.OutputValidator(
+                Path(literature_validation.__file__).resolve(),
+                literature_validation.validate,
+                expectations,
+            ),
             options=options,
             web_search=web_search,
             launch_interval=launch_interval,
         )
-        root_result, entries = validate_literature_result(
-            result_path,
-            workspace,
-            problems,
-        )
+        root_result = codex_cli.validated_result(report)
+        entries = {entry["problem_id"]: entry for entry in root_result["literature"]}
         outcomes: list[LiteratureOutcome] = []
         for problem in problems:
             entry = entries[problem.id]
@@ -902,6 +907,7 @@ def main(argv: list[str] | None = None) -> int:
             schema_text,
             options,
             web_search=args.web_search,
+            validation_source=Path(literature_validation.__file__).resolve(),
         )
     except (
         common.CodexError,

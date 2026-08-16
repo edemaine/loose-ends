@@ -154,8 +154,8 @@ Run `latexmk -pdf -interaction=nonstopmode -halt-on-error -file-line-error
 main.tex` and repair LaTeX errors, undefined citations, and undefined references
 before finishing. The driver will compile independently again.
 
-Your final response must be only the JSON object required by the supplied
-schema. In every result's `manuscript_labels`, list the literal keys appearing
+Write the structured response to `agent-result.json`. In every result's
+`manuscript_labels`, list the literal keys appearing
 inside the corresponding LaTeX `\label{...}` commands (for example,
 `thm:main-result`), not displayed names such as “Theorem 3.2” or theorem
 titles. In `generated_files`, list any optional files beneath `figures/`. You

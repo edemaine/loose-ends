@@ -16,12 +16,18 @@ import subprocess
 import sys
 import threading
 import time
+from typing import Callable, Mapping
+
+from validation import common as validation_common
 
 
 REASONING_EFFORTS = ("low", "medium", "high", "xhigh", "max", "ultra")
 WEB_SEARCH_MODES = ("disabled", "indexed", "live")
 DEFAULT_MODEL = "gpt-5.6-sol"
 DEFAULT_REASONING_EFFORT = "xhigh"
+DEFAULT_VALIDATION_PROMPT_PATH = (
+    Path(__file__).resolve().parent.parent / "prompts" / "validate-output.md"
+)
 CODEX_LAUNCH_INTERVAL_SECONDS = 1.0
 MAX_CODEX_START_ATTEMPTS = 3
 CODEX_POLL_INTERVAL_SECONDS = 0.5
@@ -52,6 +58,24 @@ class ModelOptions:
     model: str | None = None
     reasoning_effort: str | None = None
     fast: bool = False
+
+
+@dataclass(frozen=True)
+class OutputValidator:
+    """One task-specific validator and its authoritative dynamic inputs."""
+
+    source: Path
+    validate: Callable[..., validation_common.ValidationReport]
+    expectations: Mapping[str, object]
+
+
+def validated_result(
+    report: validation_common.ValidationReport,
+) -> dict[str, object]:
+    """Return a checked result without relying on assertions at call sites."""
+    if not report.valid or report.result is None:
+        raise CodexError("validator accepted no structured result")
+    return report.result
 
 
 def configure_utf8_stdio() -> None:
@@ -252,6 +276,7 @@ def semantic_config_digest(
     options: ModelOptions,
     *,
     web_search: str = "disabled",
+    validation_source: Path | None = None,
 ) -> str:
     payload = {
         "fast": options.fast,
@@ -263,6 +288,8 @@ def semantic_config_digest(
     # Preserve existing disabled-search digests for analysis and triage.
     if web_search != "disabled":
         payload["web_search"] = web_search
+    if validation_source is not None:
+        payload["validation"] = validation_code_digest(validation_source)
     encoded = json.dumps(
         payload,
         ensure_ascii=False,
@@ -270,6 +297,54 @@ def semantic_config_digest(
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def validation_code_digest(source: Path) -> str:
+    digest = hashlib.sha256()
+    for path in (
+        Path(validation_common.__file__).resolve(),
+        source.resolve(),
+        DEFAULT_VALIDATION_PROMPT_PATH.resolve(),
+    ):
+        digest.update(path.name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def stage_output_validator(workspace: Path, validator: OutputValidator) -> Path:
+    """Stage only the selected checker, shared primitives, and expectations."""
+    directory = workspace / "validation"
+    directory.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(
+        Path(validation_common.__file__).resolve(),
+        directory / "common.py",
+    )
+    shutil.copyfile(validator.source.resolve(), directory / "validate.py")
+    (directory / "__init__.py").write_text("", encoding="utf-8")
+    (directory / validation_common.EXPECTATIONS_FILENAME).write_text(
+        json.dumps(
+            validator.expectations,
+            indent=2,
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return directory
+
+
+def with_validation_instructions(prompt: str) -> str:
+    """Append the shared, repository-owned validation prompt fragment."""
+    try:
+        instructions = DEFAULT_VALIDATION_PROMPT_PATH.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise CodexError(
+            f"could not read validation prompt {DEFAULT_VALIDATION_PROMPT_PATH}: {exc}"
+        ) from exc
+    return prompt.rstrip() + "\n\n" + instructions.strip() + "\n"
 
 
 def resolve_codex_executable(value: str) -> str:
@@ -904,6 +979,7 @@ def build_exec_command(
     result_path: Path,
     options: ModelOptions,
     web_search: str = "disabled",
+    model_writes_result: bool = False,
 ) -> list[str]:
     if web_search not in WEB_SEARCH_MODES:
         raise CodexError(
@@ -936,11 +1012,16 @@ def build_exec_command(
         "never",
         "-C",
         path_for_codex(workspace),
-        "--output-schema",
-        path_for_codex(schema_path),
-        "-o",
-        path_for_codex(result_path),
     ]
+    if not model_writes_result:
+        command.extend(
+            (
+                "--output-schema",
+                path_for_codex(schema_path),
+                "-o",
+                path_for_codex(result_path),
+            )
+        )
     if options.model is not None:
         command.extend(("--model", options.model))
     if options.reasoning_effort is not None:
@@ -980,6 +1061,7 @@ def run_structured_codex(
     launch_interval: float = CODEX_LAUNCH_INTERVAL_SECONDS,
     timeout_seconds: float | None = None,
     completion_grace_seconds: float | None = None,
+    model_writes_result: bool = False,
 ) -> Path:
     """Run one structured Codex turn and return its final-response path."""
     workspace = workspace.resolve()
@@ -998,6 +1080,7 @@ def run_structured_codex(
         result_path=result_path,
         options=options,
         web_search=web_search,
+        model_writes_result=model_writes_result,
     )
     environment = codex_subprocess_environment()
 
@@ -1097,3 +1180,110 @@ def run_structured_codex(
             f"workspace preserved at {workspace}"
         )
     return result_path
+
+
+def _merge_repair_logs(workspace: Path) -> None:
+    pairs = (
+        ("repair-events.jsonl", "events.jsonl", "repair turn events"),
+        ("repair-run.log", "run.log", "repair turn log"),
+    )
+    for source_name, destination_name, heading in pairs:
+        source = workspace / source_name
+        if not source.is_file():
+            continue
+        contents = source.read_text(encoding="utf-8", errors="replace")
+        with (workspace / destination_name).open("a", encoding="utf-8") as output:
+            output.write(f"\n--- {heading} ---\n")
+            output.write(contents)
+        source.unlink()
+
+
+def run_validated_codex(
+    *,
+    codex: str,
+    workspace: Path,
+    prompt: str,
+    schema_path: Path,
+    validator: OutputValidator,
+    options: ModelOptions = ModelOptions(),
+    web_search: str = "disabled",
+    launch_interval: float = CODEX_LAUNCH_INTERVAL_SECONDS,
+    timeout_seconds: float | None = None,
+    completion_grace_seconds: float | None = None,
+    repair_turns: int = 1,
+) -> validation_common.ValidationReport:
+    """Run Codex with in-turn validation and authoritative host rechecking."""
+    workspace = workspace.resolve()
+    try:
+        result_schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise CodexError(f"could not read result schema for validation: {exc}") from exc
+    effective_validator = OutputValidator(
+        validator.source,
+        validator.validate,
+        {**validator.expectations, "result_schema": result_schema},
+    )
+    validation_directory = stage_output_validator(
+        workspace,
+        effective_validator,
+    )
+    # The elevated Windows sandbox applies deny-read ACLs to host-created
+    # workspace content unless it is explicitly staged for the sandbox user.
+    # The model must be able to inspect and execute this validator because the
+    # prompt requires an in-turn `python -m validation.validate` check.
+    grant_sandbox_read_access(validation_directory)
+    resolved_schema = schema_path.resolve()
+    if resolved_schema.is_relative_to(workspace):
+        # Review workflows generate a claim-constrained schema inside the
+        # workspace.  Keep that authoritative schema inspectable as well.
+        grant_sandbox_read_access(resolved_schema)
+    run_structured_codex(
+        codex=codex,
+        workspace=workspace,
+        prompt=with_validation_instructions(prompt),
+        schema_path=schema_path,
+        options=options,
+        web_search=web_search,
+        launch_interval=launch_interval,
+        timeout_seconds=timeout_seconds,
+        completion_grace_seconds=completion_grace_seconds,
+        model_writes_result=True,
+    )
+    report = effective_validator.validate(
+        workspace=workspace,
+        expectations=effective_validator.expectations,
+    )
+    for _ in range(repair_turns):
+        if report.valid or not report.repairable:
+            break
+        repair_prompt = (
+            "The previous Codex turn left generated output that failed the "
+            "authoritative deterministic validator. Preserve all substantive "
+            "work and staged inputs. Fix only the reported output-contract "
+            "issues, run `python -m validation.validate` until it passes, and "
+            "then return a short completion note.\n\n"
+            "Validation issues:\n"
+            + "\n".join(f"- {issue.render()}" for issue in report.issues)
+        )
+        run_structured_codex(
+            codex=codex,
+            workspace=workspace,
+            prompt=repair_prompt,
+            schema_path=schema_path,
+            events_filename="repair-events.jsonl",
+            log_filename="repair-run.log",
+            options=options,
+            web_search=web_search,
+            launch_interval=launch_interval,
+            timeout_seconds=timeout_seconds,
+            completion_grace_seconds=completion_grace_seconds,
+            model_writes_result=True,
+        )
+        _merge_repair_logs(workspace)
+        report = effective_validator.validate(
+            workspace=workspace,
+            expectations=effective_validator.expectations,
+        )
+    if not report.valid:
+        raise CodexError("generated output failed validation:\n" + report.failure_message())
+    return report

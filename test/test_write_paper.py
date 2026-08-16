@@ -228,6 +228,11 @@ def write_manuscript_files(workspace: Path, result_ids: list[str]) -> None:
         + "\n".join(f"## {result_id}\n\nSupported by C-001.\n" for result_id in result_ids),
         encoding="utf-8",
     )
+    (workspace / "main.pdf").write_bytes(b"%PDF-test")
+    (workspace / "main.log").write_text(
+        "Output written on main.pdf.\n",
+        encoding="utf-8",
+    )
 
 
 class WritePaperTests(unittest.TestCase):

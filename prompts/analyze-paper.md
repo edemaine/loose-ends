@@ -88,9 +88,9 @@ Before finishing, cross-check all three files against one another:
 
 - Every referenced `R-###` ID exists.
 - Every `OP-###` ID is unique.
-- The JSON final response lists exactly the open problems present in
+- `agent-result.json` lists exactly the open problems present in
   `open-problems.md`.
 - Inferences are clearly separated from author-stated claims.
 
-Your final response is only the JSON object required by the supplied output
-schema. The substantive analysis belongs in the three Markdown files.
+Write the structured response to `agent-result.json`. The substantive analysis
+belongs in the three Markdown files.

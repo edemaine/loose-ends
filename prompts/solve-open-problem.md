@@ -86,5 +86,4 @@ that does not resolve the full problem. Reserve `solution` and
 review. These values classify only the claim's mathematical scope, not its
 novelty.
 
-Your final response must be only the JSON object required by the supplied
-schema.
+Write the structured response to `agent-result.json`.

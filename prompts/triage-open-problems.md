@@ -47,6 +47,6 @@ working directory for every requested ID. Each report should contain:
 - the suggested approaches, why they may work, and when to abandon them;
 - a short explanation if there are no suggested approaches.
 
-Do not modify `inputs/`. Your final response must be only the JSON object
-required by the supplied schema. The `triages` array must contain every
+Do not modify `inputs/`. Write the structured response to `agent-result.json`.
+The `triages` array must contain every
 requested problem exactly once and no other problem.

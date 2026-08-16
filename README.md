@@ -173,6 +173,30 @@ trees before reading them; this is a local ACL operation and starts no model
 turn.
 If only temporary-workspace cleanup fails after installation, the run remains
 successful and the path is recorded as a warning in `run.log`.
+
+Every newly launched Codex job writes its structured output directly to
+`agent-result.json`. The driver stages only that task's checker as
+`validation/validate.py`, together with the small shared
+`validation/common.py` and `validation/expectations.json`, which contains the
+result schema and invocation-specific expected IDs or other dynamic facts.
+The shared agent instructions live in `prompts/validate-output.md` and are
+appended to every task prompt at runtime, including custom prompt templates.
+Before finishing, the agent runs:
+
+```sh
+python -m validation.validate
+```
+
+The host reruns the same task-specific `validate()` function with its
+authoritative in-memory expectations before installing anything. If that check
+finds only repairable contract errors, the driver allows one additional Codex
+turn in the preserved workspace with the exact diagnostics. New runs require
+canonical IDs such as `C-001` and canonical structured artifact paths such as
+`artifacts/verifier.py`; permissive normalization remains limited to recovery
+of older preserved workspaces. Changes to validation code participate in job
+configuration digests, so cached output is not silently reused under a new
+validation policy.
+
 For example, the current frontier model with extra-high reasoning is:
 
 ```sh

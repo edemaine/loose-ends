@@ -80,5 +80,4 @@ without new research. `ready_for_expert_review` means no known blocking or major
 issue remains; it does not mean publication-ready and never replaces human
 expert review.
 
-Your final response must be only the JSON object required by the supplied
-schema.
+Write the structured response to `agent-result.json`.
