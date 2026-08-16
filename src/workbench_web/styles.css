@@ -274,11 +274,8 @@ button { color: inherit; }
 .run-card.status-failed, .run-card.status-canceled, .run-card.status-interrupted { border-color: color-mix(in srgb, var(--red) 48%, var(--line)); }
 .run-card.status-partial { border-color: color-mix(in srgb, var(--amber) 48%, var(--line)); }
 .run-summary { display: flex; align-items: center; gap: 8px; padding: 8px 10px; }
-.run-toggle { min-width: 0; display: flex; flex: 1; align-items: center; gap: 8px; border: 0; background: transparent; padding: 0; text-align: left; cursor: pointer; }
-.run-toggle:hover .run-heading-copy > strong { color: var(--accent); }
 .run-chevron { flex: none; color: var(--muted); font-size: 20px; line-height: 1; transition: transform .12s ease; }
-.run-toggle[aria-expanded="true"] .run-chevron { transform: rotate(90deg); }
-.run-heading-copy { min-width: 0; display: flex; flex-wrap: wrap; align-items: center; column-gap: 10px; row-gap: 2px; }
+.run-heading-copy { min-width: 0; display: flex; flex: 1; flex-wrap: wrap; align-items: center; column-gap: 10px; row-gap: 2px; }
 .run-heading-copy > strong { min-width: min(280px, 100%); overflow: hidden; color: var(--heading); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
 .run-target-summary { width: 100%; overflow: hidden; color: var(--muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .run-heading-copy .run-timing { font-size: 10px; }
@@ -286,7 +283,12 @@ button { color: inherit; }
 .run-actions { display: flex; flex: none; gap: 5px; }
 .run-actions:empty { display: none; }
 .run-actions .button { padding: 4px 7px; font-size: 10px; }
-.run-artifacts { display: grid; gap: 4px; padding: 0 10px 9px 36px; }
+.run-artifacts { display: grid; gap: 4px; padding: 0 10px 9px; }
+.run-detail-footer { display: flex; padding: 1px 7px 7px; }
+.run-detail-toggle { display: flex; width: 100%; align-items: center; gap: 3px; border: 0; border-radius: 5px; background: transparent; padding: 4px 6px; color: var(--muted); font-size: 9px; font-weight: 750; text-align: left; cursor: pointer; }
+.run-detail-toggle:hover { color: var(--heading); }
+.run-detail-toggle .run-chevron { font-size: 14px; }
+.run-detail-toggle[aria-expanded="true"] .run-chevron { transform: rotate(90deg); }
 .run-expanded { border-top: 1px solid var(--line); padding: 0 12px 8px; }
 .run-targets { display: flex; flex-wrap: wrap; gap: 4px; }
 .confirm-target-summary { margin: -2px 0 8px; color: var(--muted); font-size: 11px; }

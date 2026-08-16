@@ -2001,21 +2001,12 @@ function renderJobDetail(job) {
     const expanded = state.expandedRuns.has(run.id);
     const presentation = problemRunPresentation(job.action, run);
     const heading = node("div", "run-summary");
-    const toggle = button("", () => {
-      if (state.expandedRuns.has(run.id)) state.expandedRuns.delete(run.id);
-      else state.expandedRuns.add(run.id);
-      renderJobDetail(job);
-    }, "run-toggle");
-    toggle.setAttribute("aria-expanded", String(expanded));
-    toggle.setAttribute("aria-label", `${expanded ? "Hide" : "Show"} details for ${presentation.title}`);
-    toggle.append(node("span", "run-chevron", "›"));
     const headingCopy = node("span", "run-heading-copy");
     const title = node("strong", "", `${index + 1}. ${presentation.title}`);
     title.title = presentation.title;
     headingCopy.append(title);
     appendRunTargetSummary(headingCopy, presentation);
     headingCopy.append(runTiming(run));
-    toggle.append(headingCopy);
     const actions = node("div", "run-actions");
     if (["queued", "starting", "running", "cancel_requested"].includes(run.status)) {
       actions.append(button("Cancel", () => mutateRun(run.id, "cancel"), "button danger"));
@@ -2023,7 +2014,7 @@ function renderJobDetail(job) {
     if (["failed", "canceled", "interrupted"].includes(run.status) && !(run.outputs || []).length) {
       actions.append(button("Retry", () => mutateRun(run.id, "retry"), "button primary"));
     }
-    heading.append(toggle, actions);
+    heading.append(headingCopy, actions);
     section.append(heading);
     if (run.error) section.append(node("div", "error-box", run.error));
     if (run.outputs?.length) {
@@ -2059,6 +2050,17 @@ function renderJobDetail(job) {
       });
       section.append(output);
     }
+    const detailFooter = node("div", "run-detail-footer");
+    const toggle = button(`${expanded ? "Hide" : "Show"} command & output`, () => {
+      if (state.expandedRuns.has(run.id)) state.expandedRuns.delete(run.id);
+      else state.expandedRuns.add(run.id);
+      renderJobDetail(job);
+    }, "run-detail-toggle");
+    toggle.setAttribute("aria-expanded", String(expanded));
+    toggle.setAttribute("aria-label", `${expanded ? "Hide" : "Show"} command and output for ${presentation.title}`);
+    toggle.prepend(node("span", "run-chevron", "›"));
+    detailFooter.append(toggle);
+    section.append(detailFooter);
     if (expanded) {
       const details = node("div", "run-expanded");
       if (presentation.targets.length) {
