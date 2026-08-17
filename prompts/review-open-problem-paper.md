@@ -58,6 +58,14 @@ should identify remaining relevant open problems; and the complete paper
 should be understandable without reading another paper. Treat this outline as
 a guideline when a justified alternative organization is clearer.
 
+The user-selected author metadata in `inputs/manuscript/manifest.json` is
+authoritative. When its `authors` list is empty and `main.tex` uses
+`\author{}`, treat the draft as intentionally anonymous or unattributed. Do not
+raise a finding, warning, recommended repair, or adverse verdict because it
+lacks author names, affiliations, contact information, a responsibility
+statement, or PDF author metadata. Authorship administration is outside this
+mathematical paper review.
+
 Check that `main.tex` never exposes the internal pipeline: solver attempts,
 independent reviews or critics, review classifications or verdicts, readiness
 checks, staged inputs, prompts, draft rounds, and IDs such as `R-###`, `C-###`,

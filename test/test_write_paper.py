@@ -698,6 +698,10 @@ class WritePaperTests(unittest.TestCase):
         )
         self.assertIn("literal keys appearing", writer_prompt)
         self.assertIn("print-only source", writer_prompt)
+        self.assertIn(
+            "Authorship administration is outside",
+            reviewer_prompt,
+        )
 
     def test_readiness_issues_warn_but_do_not_block_explicit_inputs(self):
         with TemporaryDirectory() as temporary:
