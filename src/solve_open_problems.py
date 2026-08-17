@@ -34,6 +34,7 @@ CLAIM_ID_RE = re.compile(r"^C-[0-9]{3,}$")
 LOOSE_CLAIM_ID_RE = re.compile(r"^C[-_ ]?0*([1-9][0-9]*)$")
 CORE_OUTPUT_PATHS = {"attempt.md", "solution.md"}
 WORK_RECORD_FILE = "work-record.json"
+COMPLETION_GRACE_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -911,6 +912,7 @@ def solve_work(
             options=options,
             web_search=web_search,
             launch_interval=launch_interval,
+            completion_grace_seconds=COMPLETION_GRACE_SECONDS,
         )
         result = codex_cli.validated_result(report)
         artifacts = [

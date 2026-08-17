@@ -635,6 +635,11 @@ class OpenProblemPipelineTests(unittest.TestCase):
 
             def fake_solver(**kwargs):
                 workspace = kwargs["workspace"]
+                self.assertEqual(
+                    kwargs["completion_grace_seconds"],
+                    solve_open_problems.COMPLETION_GRACE_SECONDS,
+                )
+                self.assertIsNone(kwargs.get("timeout_seconds"))
                 self.assertTrue(
                     (workspace / "inputs" / "paper" / "paper.pdf").is_file()
                 )
