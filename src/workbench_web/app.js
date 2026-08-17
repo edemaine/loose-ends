@@ -463,6 +463,14 @@ function rawFileUrl(path) {
   return `/api/file?${new URLSearchParams({ path, raw: "1" })}`;
 }
 
+function downloadFileUrl(path, name) {
+  return `/api/file?${new URLSearchParams({ path, download: "1", name })}`;
+}
+
+function manuscriptZipUrl(path) {
+  return `/api/manuscript-zip?${new URLSearchParams({ path })}`;
+}
+
 function artifactViewUrl(path) {
   return `/view?${new URLSearchParams({ path })}`;
 }
@@ -1717,9 +1725,14 @@ function renderManuscripts() {
     const open = node("a", "button", "Open PDF");
     open.href = artifactViewUrl(pdf);
     open.target = "_blank";
-    shell.append(actions);
-    actions.append(open);
-  } else shell.append(actions);
+    const downloadPdf = node("a", "button", "Download PDF");
+    downloadPdf.href = downloadFileUrl(pdf, `${manuscript.name}-${draft.name}.pdf`);
+    actions.append(open, downloadPdf);
+  }
+  const downloadZip = node("a", "button", "Download ZIP");
+  downloadZip.href = manuscriptZipUrl(draft.path);
+  actions.append(downloadZip);
+  shell.append(actions);
   shell.append(relatedTasksPanel({
     manuscriptPath: manuscript.path,
     draftPath: draft.path,

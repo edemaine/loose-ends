@@ -10,6 +10,7 @@ import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
+import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -138,8 +139,13 @@ class WorkbenchPlanningTests(unittest.TestCase):
             def _send_asset(self, name):
                 self.sent_asset = name
 
-            def _send_file(self, value, *, raw=False):
-                self.sent_file = (value, raw)
+            def _send_file(
+                self, value, *, raw=False, download=False, filename=None
+            ):
+                self.sent_file = (value, raw, download, filename)
+
+            def _send_manuscript_zip(self, value):
+                self.sent_zip = value
 
             def send_error_json(self, status, message):
                 self.error = (status, message)
@@ -163,7 +169,100 @@ class WorkbenchPlanningTests(unittest.TestCase):
         handler = object.__new__(RecordingHandler)
         handler.path = "/api/file?path=result.md&raw=1"
         handler.do_GET()
-        self.assertEqual(handler.sent_file, ("result.md", True))
+        self.assertEqual(handler.sent_file, ("result.md", True, False, None))
+
+        handler = object.__new__(RecordingHandler)
+        handler.path = (
+            "/api/file?path=main.pdf&download=1&name=paper-draft-001.pdf"
+        )
+        handler.do_GET()
+        self.assertEqual(
+            handler.sent_file,
+            ("main.pdf", False, True, "paper-draft-001.pdf"),
+        )
+
+        handler = object.__new__(RecordingHandler)
+        handler.path = "/api/manuscript-zip?path=manuscripts%2Fpaper%2Fdraft-001"
+        handler.do_GET()
+        self.assertEqual(handler.sent_zip, "manuscripts/paper/draft-001")
+
+    def test_manuscript_downloads_are_scoped_and_named(self):
+        class DownloadHandler(workbench.WorkbenchHandler):
+            def __init__(self, manuscripts):
+                self.server = SimpleNamespace(
+                    app=SimpleNamespace(
+                        manuscripts=manuscripts,
+                        allowed_roots=[manuscripts],
+                    )
+                )
+                self.headers = {}
+                self.wfile = BytesIO()
+                self.status = None
+                self.response_headers = {}
+                self.error = None
+
+            def send_response(self, status):
+                self.status = status
+
+            def send_header(self, key, value):
+                self.response_headers[key] = value
+
+            def end_headers(self):
+                pass
+
+            def send_error_json(self, status, message):
+                self.error = (status, message)
+
+        with TemporaryDirectory() as temporary:
+            manuscripts = Path(temporary) / "manuscripts"
+            draft = manuscripts / "example" / "draft-002"
+            (draft / "figures").mkdir(parents=True)
+            (draft / "main.pdf").write_bytes(b"%PDF-test")
+            (draft / "references.bib").write_text("@article{test}", encoding="utf-8")
+            (draft / "figures" / "plot.svg").write_text("<svg/>", encoding="utf-8")
+            sibling = manuscripts / "example" / "draft-001"
+            sibling.mkdir()
+            (sibling / "private.txt").write_text("not this draft", encoding="utf-8")
+
+            handler = DownloadHandler(manuscripts)
+            handler._send_manuscript_zip(str(draft))
+
+            self.assertEqual(handler.status, 200)
+            self.assertEqual(handler.response_headers["Content-Type"], "application/zip")
+            self.assertEqual(
+                handler.response_headers["Content-Disposition"],
+                'attachment; filename="example-draft-002.zip"',
+            )
+            with zipfile.ZipFile(BytesIO(handler.wfile.getvalue())) as archive:
+                self.assertEqual(
+                    set(archive.namelist()),
+                    {
+                        "example-draft-002/main.pdf",
+                        "example-draft-002/references.bib",
+                        "example-draft-002/figures/plot.svg",
+                    },
+                )
+                self.assertEqual(
+                    archive.read("example-draft-002/references.bib"),
+                    b"@article{test}",
+                )
+
+            handler = DownloadHandler(manuscripts)
+            handler._send_file(
+                str(draft / "main.pdf"),
+                download=True,
+                filename="example-draft-002.pdf",
+            )
+            self.assertEqual(handler.status, 200)
+            self.assertEqual(
+                handler.response_headers["Content-Disposition"],
+                'attachment; filename="example-draft-002.pdf"',
+            )
+            self.assertEqual(handler.wfile.getvalue(), b"%PDF-test")
+
+            handler = DownloadHandler(manuscripts)
+            handler._send_manuscript_zip(str(manuscripts.parent))
+            self.assertEqual(handler.error, (404, "manuscript draft is unavailable"))
 
     def test_workbench_assets_use_stable_history_routes_and_shared_model(self):
         app = (PROJECT_ROOT / "src" / "workbench_web" / "app.js").read_text(
@@ -272,6 +371,10 @@ class WorkbenchPlanningTests(unittest.TestCase):
         self.assertIn('node("a", "artifact-action", "View")', app)
         self.assertIn("link.href = artifactViewUrl(path)", app)
         self.assertIn("open.href = artifactViewUrl(pdf)", app)
+        self.assertIn('node("a", "button", "Download PDF")', app)
+        self.assertIn("downloadFileUrl(pdf, `${manuscript.name}-${draft.name}.pdf`)", app)
+        self.assertIn('node("a", "button", "Download ZIP")', app)
+        self.assertIn("downloadZip.href = manuscriptZipUrl(draft.path)", app)
         self.assertIn('node("a", "artifact-action", "Raw")', app)
         self.assertIn("function taskScopeSummary(job)", app)
         self.assertIn("function singlePaperProblemScope(job)", app)

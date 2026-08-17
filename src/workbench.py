@@ -17,11 +17,13 @@ import secrets
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from typing import Iterable
 import unicodedata
 from urllib.parse import parse_qs, unquote, urlsplit
+import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import analyze_papers
@@ -1234,6 +1236,13 @@ def _relative_to(path: Path, root: Path) -> bool:
         return False
 
 
+def _download_filename(value: str, fallback: str) -> str:
+    """Return an ASCII, header-safe basename for a downloaded artifact."""
+    name = re.sub(r'[\x00-\x1f\x7f"\\/]+', "_", value).strip(" .")
+    name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode()
+    return name or fallback
+
+
 LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
 WILDCARD_HOSTS = {"0.0.0.0", "::"}
 
@@ -1416,7 +1425,12 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                 self._send_file(
                     values.get("path", [""])[0],
                     raw=values.get("raw", [""])[0] == "1",
+                    download=values.get("download", [""])[0] == "1",
+                    filename=values.get("name", [""])[0] or None,
                 )
+            elif path == "/api/manuscript-zip":
+                values = parse_qs(parsed.query)
+                self._send_manuscript_zip(values.get("path", [""])[0])
             elif path == "/view":
                 self._send_asset("viewer.html")
             elif path in {
@@ -1510,7 +1524,14 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
         self._headers(200, content_type, len(data))
         self.wfile.write(data)
 
-    def _send_file(self, value: str, *, raw: bool = False) -> None:
+    def _send_file(
+        self,
+        value: str,
+        *,
+        raw: bool = False,
+        download: bool = False,
+        filename: str | None = None,
+    ) -> None:
         if not value:
             self.send_error_json(400, "path is required")
             return
@@ -1522,6 +1543,8 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
         if raw:
             content_type = "text/plain; charset=utf-8"
             disposition = "inline"
+        elif download:
+            disposition = "attachment"
         elif content_type in {"text/html", "image/svg+xml"}:
             content_type = "application/octet-stream"
             disposition = "attachment"
@@ -1548,7 +1571,10 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(length))
         self.send_header("Accept-Ranges", "bytes")
-        self.send_header("Content-Disposition", f'{disposition}; filename="{path.name}"')
+        response_name = _download_filename(filename or path.name, path.name)
+        self.send_header(
+            "Content-Disposition", f'{disposition}; filename="{response_name}"'
+        )
         self.send_header("X-Content-Type-Options", "nosniff")
         if status == 206:
             self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
@@ -1562,6 +1588,50 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                     break
                 self.wfile.write(chunk)
                 remaining -= len(chunk)
+
+    def _send_manuscript_zip(self, value: str) -> None:
+        if not value:
+            self.send_error_json(400, "path is required")
+            return
+        draft = Path(unquote(value)).expanduser().resolve()
+        manuscripts = self.app.manuscripts.resolve()
+        if (
+            not _relative_to(draft, manuscripts)
+            or not draft.is_dir()
+            or DRAFT_RE.fullmatch(draft.name) is None
+        ):
+            self.send_error_json(404, "manuscript draft is unavailable")
+            return
+
+        archive_root = f"{draft.parent.name}-{draft.name}"
+        with tempfile.TemporaryFile() as temporary:
+            with zipfile.ZipFile(
+                temporary, "w", compression=zipfile.ZIP_DEFLATED
+            ) as archive:
+                for candidate in sorted(draft.rglob("*")):
+                    if candidate.is_symlink() or not candidate.is_file():
+                        continue
+                    resolved = candidate.resolve()
+                    if not _relative_to(resolved, draft):
+                        continue
+                    relative = candidate.relative_to(draft)
+                    archive.write(
+                        resolved,
+                        arcname=(Path(archive_root) / relative).as_posix(),
+                    )
+            size = temporary.tell()
+            temporary.seek(0)
+            filename = _download_filename(f"{archive_root}.zip", "manuscript.zip")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Length", str(size))
+            self.send_header(
+                "Content-Disposition", f'attachment; filename="{filename}"'
+            )
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            while chunk := temporary.read(1024 * 1024):
+                self.wfile.write(chunk)
 
     def _send_log(self, run_id: str, query: str) -> None:
         run = self.app.store.get_run(run_id)
