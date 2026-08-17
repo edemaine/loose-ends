@@ -198,6 +198,13 @@ button { color: inherit; }
 .hero { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .hero h1 { margin: 5px 0 6px; color: var(--heading); font: 760 clamp(26px, 3.5vw, 39px)/1.08 ui-serif, Georgia, serif; letter-spacing: -.03em; }
 .hero p { margin: 0; color: var(--muted); }
+.version-warning { display: flex; align-items: center; gap: 10px; margin: 14px 0; border: 1px solid color-mix(in srgb, var(--amber) 55%, var(--line)); border-left: 4px solid var(--amber); border-radius: 9px; background: var(--amber-soft); padding: 10px 12px; color: var(--ink); box-shadow: var(--shadow); }
+.version-warning-mark { width: 22px; height: 22px; display: grid; flex: none; place-items: center; border-radius: 50%; background: var(--amber); color: var(--paper); font-weight: 900; }
+.version-warning-copy { display: grid; min-width: 0; flex: 1; gap: 1px; }
+.version-warning-copy strong { color: var(--heading); font-size: 12px; }
+.version-warning-copy small { color: var(--muted); font-size: 10px; }
+.version-warning-link { flex: none; border-color: color-mix(in srgb, var(--amber) 65%, var(--line)); background: var(--panel); color: var(--heading); text-decoration: none; white-space: nowrap; }
+.version-warning-link:hover, .version-warning-link:focus-visible { border-color: var(--amber); outline: 2px solid color-mix(in srgb, var(--amber) 35%, transparent); }
 .task-scope { margin: 5px 0 6px; color: var(--muted); }
 .task-scope > summary { width: fit-content; color: var(--heading); font-size: 12px; font-weight: 750; cursor: pointer; }
 .task-targets { max-height: 180px; overflow: auto; margin: 8px 0 4px; padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }

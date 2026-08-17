@@ -1393,6 +1393,30 @@ function addAction(parent, label, action, targets, primary = false) {
   parent.append(button(label, () => openTask(action, targets), `button${primary ? " primary" : ""}`));
 }
 
+function olderVersionWarning(kind, currentName, latestName, route, selectLatest) {
+  const warning = node("aside", "version-warning");
+  warning.setAttribute("aria-label", `Older ${kind}`);
+  const mark = node("span", "version-warning-mark", "!");
+  mark.setAttribute("aria-hidden", "true");
+  const copy = node("span", "version-warning-copy");
+  copy.append(
+    node("strong", "", `You’re viewing an older ${kind}.`),
+    node("small", "", `${currentName} is selected; the latest is ${latestName}.`),
+  );
+  const link = node("a", "button version-warning-link", `View latest ${kind}`);
+  link.href = routeHref(route);
+  link.addEventListener("click", event => {
+    if (
+      event.defaultPrevented || event.button !== 0 || event.metaKey ||
+      event.ctrlKey || event.shiftKey || event.altKey
+    ) return;
+    event.preventDefault();
+    selectLatest();
+  });
+  warning.append(mark, copy, link);
+  return warning;
+}
+
 function renderReviewDetail(item) {
   const shell = node("div", "main-inner");
   const selectedSummary = state.catalog.reviews.find(value => value.itemKey === item.itemKey);
@@ -1416,6 +1440,26 @@ function renderReviewDetail(item) {
   copy.append(badges);
   hero.append(copy);
   shell.append(hero);
+
+  const attempts = reviewModel.attemptsForProblem(
+    state.catalog.reviews,
+    item.problemKey,
+  );
+  const latestAttempt = attempts[0];
+  if (latestAttempt && latestAttempt.itemKey !== item.itemKey) {
+    shell.append(olderVersionWarning(
+      "attempt",
+      item.attemptName || "This attempt",
+      latestAttempt.attemptName || "the latest attempt",
+      { tab: "research", review: latestAttempt, detail: state.detailTab },
+      () => {
+        state.selectedReview = latestAttempt.itemKey;
+        state.selectedProblem = latestAttempt.problemKey;
+        state.revealSidebarSecondarySelection = true;
+        syncNavigation();
+      },
+    ));
+  }
 
   if (item.attemptDisplayPath) shell.append(node("code", "attempt-path", item.attemptDisplayPath));
 
@@ -1718,6 +1762,20 @@ function renderManuscripts() {
   copy.append(badges);
   hero.append(copy);
   shell.append(hero);
+  if (draft.key !== manuscript.latest.key) {
+    shell.append(olderVersionWarning(
+      "draft",
+      draft.name,
+      manuscript.latest.name,
+      { tab: "manuscripts", manuscript, draft: manuscript.latest },
+      () => {
+        state.selectedDraft = manuscript.latest.key;
+        state.manuscriptDraftSelections.set(manuscript.key, manuscript.latest.key);
+        state.revealSidebarSecondarySelection = true;
+        syncNavigation();
+      },
+    ));
+  }
   const actions = node("div", "actions");
   addAction(actions, draft.verdict === "unreviewed" ? "Resume review" : "Revise", "revise", [draftTarget(draft)], true);
   const pdf = draft.files.find(path => path.endsWith("main.pdf"));
