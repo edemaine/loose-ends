@@ -1,10 +1,57 @@
 # Loose Ends
 
-Tooling for studying open problems in research papers with large language models.
+Loose Ends is a software tool to use Large Language Models (LLMs)
+to solve open problems from existing research papers, and thereby
+"tie up loose ends".
 
-The research CLI tools use only the Python standard library. The live
-workbench additionally uses `watchdog` for efficient filesystem updates.
-Analyzing papers requires the Codex CLI.
+The goal is to discover which open problems are actually low-hanging fruit.
+LLMs can read and attempt many more problems, much faster, than a human
+researcher could, making it possible to search broadly for overlooked results.
+The hope is that these inspire the humans to pose more interesting follow-up
+questions, and focus on the harder problems where human insight is required.
+Eventually, the idea is for humans and LLMs to work together on open problems.
+
+## Overview
+
+Loose Ends enables the following research workflow:
+
+1. **Fetch papers.** Download PDFs, source, and metadata from arXiv, either by
+   paper ID or author.
+2. **Analyze papers.** Build a technical summary and extract the important
+   results, techniques, and explicit or inferred open problems.
+3. **Triage problems.** Decide which problems and approaches are promising
+   enough to attempt now, which need exploration, and which should be skipped.
+4. **Literature search.** Check whether subsequent work resolved or advanced
+   each problem, and prepare relevant results and techniques for the solver.
+5. **Attempt solutions.** Give selected problems to adaptive LLM research
+   agents with the original paper, analysis, literature, prior attempts, and
+   human directions.
+6. **Review attempts.** Have independent critics assess correctness, coverage,
+   importance, and remaining gaps, while preserving the full research history
+   for later attempts and human inspection.
+7. **Write and revise papers.** Turn selected results into traced, cited LaTeX
+   manuscripts, compile them, critique them independently, and iterate toward
+   expert human review.
+
+This workflow can be followed through two interfaces:
+
+* A local web app called the **workbench**.
+  This is the main interactive interface: it organizes papers, open problems,
+  solution attempts, reviews, and manuscripts; launches and manages these
+  tasks; and shows their progress and results.
+* A collection of composable **command-line tools**.
+  The workbench uses these to do the actual work.
+  You can also use them for scripting, batch processing, and direct control.
+
+The core that makes this all possible is the
+[Codex CLI](https://learn.chatgpt.com/docs/codex/cli).
+You need this installed, along with an OpenAI account
+(and ideally subscription).
+Loose Ends calls Codex to do all the LLM work.
+
+Loose Ends itself is written in Python, plus JavaScript in the web app.
+The research CLI tools use only the Python standard library.
+The workbench additionally uses `watchdog` for efficient filesystem updates.
 
 ## Download arXiv papers
 
