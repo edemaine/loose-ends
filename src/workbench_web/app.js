@@ -2096,17 +2096,23 @@ function runLogText(value) {
 function updateRunLogNodes(runId, value) {
   main.querySelectorAll("[data-run-log]").forEach(log => {
     if (log.dataset.runLog !== runId) return;
-    log.textContent = runLogText(value);
-    log.scrollTop = log.scrollHeight;
+    const nextText = runLogText(value);
+    const previousText = log.textContent || "";
+    if (previousText === nextText) return;
+    const wasLoading = previousText === "Loading output…";
+    const wasNearBottom = log.scrollHeight - log.scrollTop - log.clientHeight <= 24;
+    if (!wasLoading && previousText && nextText.startsWith(previousText)) {
+      log.append(document.createTextNode(nextText.slice(previousText.length)));
+    } else {
+      log.textContent = nextText;
+    }
+    if (wasLoading || wasNearBottom) log.scrollTop = log.scrollHeight;
   });
 }
 
 async function refreshRunLog(runId) {
   const cached = state.runLogs.get(runId);
-  if (cached?.complete) {
-    updateRunLogNodes(runId, cached);
-    return;
-  }
+  if (cached?.complete) return;
   let request = state.runLogLoads.get(runId);
   if (!request) {
     const offset = cached?.nextOffset || 0;
