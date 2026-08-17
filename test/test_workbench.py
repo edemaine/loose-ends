@@ -297,6 +297,11 @@ class WorkbenchPlanningTests(unittest.TestCase):
         self.assertIn('`${expanded ? "Hide" : "Show"} command & output`', app)
         self.assertNotIn('}, "run-toggle")', app)
         self.assertIn('node("div", "run-expanded")', app)
+        self.assertIn("if (previousText === nextText) return", app)
+        self.assertIn("nextText.startsWith(previousText)", app)
+        self.assertIn("log.append(document.createTextNode", app)
+        self.assertIn("if (wasLoading || wasNearBottom)", app)
+        self.assertIn("if (cached?.complete) return", app)
         self.assertIn("preserveActivityDetail", app)
         self.assertIn("function updateActivityCount()", app)
         self.assertIn("!schedulerControl.contains(event.target)", app)
@@ -1275,6 +1280,35 @@ class WorkbenchStoreTests(unittest.TestCase):
 
             workbench_worker.recover_run_artifacts(store, run)
             self.assertEqual(store.get_run(run["id"])["outputs"], [str(artifact.resolve())])
+
+    def test_problem_resource_accepts_installed_attempt_artifacts(self):
+        with TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            problem = state / "OP-001"
+            artifact = problem / "attempt-001" / "result.md"
+            artifact.parent.mkdir(parents=True)
+            artifact.write_text("result", encoding="utf-8")
+            store = WorkbenchStore(state / "workbench.sqlite3", state)
+            job = store.create_job(
+                {"action": "solve"},
+                fake_plan(
+                    [sys.executable, "-c", "pass"],
+                    resources=[f"problem:{problem}"],
+                ),
+            )
+            run = job["runs"][0]
+            artifact_log = Path(run["log_path"]).parent / "artifacts.txt"
+            artifact_log.write_text(
+                f"{artifact.resolve()}\n",
+                encoding="utf-8",
+            )
+
+            workbench_worker.recover_run_artifacts(store, run)
+
+            self.assertEqual(
+                store.get_run(run["id"])["outputs"],
+                [str(artifact.resolve())],
+            )
 
     def test_artifact_reporter_is_disabled_without_managed_environment(self):
         with TemporaryDirectory() as temporary:

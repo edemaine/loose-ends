@@ -84,6 +84,51 @@ def write_run_files(workspace: Path) -> None:
 
 
 class OpenProblemPipelineTests(unittest.TestCase):
+    def test_attempt_install_restores_owner_access_on_problem_directory(self):
+        with TemporaryDirectory() as temporary:
+            paper = make_analyzed_paper(Path(temporary))
+            problem = common.discover_problem_refs(
+                [paper], problem_ids={"OP-001"}
+            )[0]
+            problem.directory.mkdir(parents=True)
+            workspace = problem.directory / ".solve-run-finished"
+            workspace.mkdir()
+            (workspace / "attempt.md").write_text(
+                "# Attempt\n\n## C-001\n\nA lemma.\n",
+                encoding="utf-8",
+            )
+            write_run_files(workspace)
+            work = solve_open_problems.SolveWork(
+                problem,
+                solve_open_problems.generic_guidance(),
+                1,
+                None,
+            )
+            result = {
+                "claimed_result_type": "partial_result",
+                "checkable_claims": [{"id": "C-001"}],
+            }
+
+            with patch.object(
+                codex_cli,
+                "grant_workspace_owner_inheritance",
+            ) as grant_owner_access:
+                destination = solve_open_problems._install_attempt(
+                    work,
+                    workspace=workspace,
+                    result=result,
+                    artifacts=[],
+                    config_digest="config",
+                    codex_version="test",
+                    options=codex_cli.ModelOptions(),
+                    prior_history_digest="history",
+                    recovered_from=workspace,
+                )
+
+            grant_owner_access.assert_called_once_with(problem.directory)
+            self.assertEqual(destination, problem.directory / "attempt-001")
+            self.assertTrue((destination / "solver-result.json").is_file())
+
     def test_human_priority_is_derived_from_merit_axes(self):
         base = {
             "correctness": "plausible",

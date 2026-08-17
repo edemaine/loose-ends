@@ -463,6 +463,10 @@ def _install_review(
     web_search: str,
     recovered_from: Path | None = None,
 ) -> None:
+    # Review installation replaces files in the solver-owned attempt after an
+    # elevated sandbox turn.  Restore owner inheritance on that destination
+    # before creating and moving the staging files.
+    codex_cli.grant_workspace_owner_inheritance(attempt.directory)
     staging = Path(
         tempfile.mkdtemp(prefix=".review-install-", dir=attempt.directory)
     )

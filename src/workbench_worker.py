@@ -24,7 +24,7 @@ def _artifact_roots(run: dict) -> list[Path]:
     roots = []
     for resource in run.get("resources", []):
         kind, separator, value = resource.partition(":")
-        if separator and kind in {"paper", "manuscript"} and value:
+        if separator and kind in {"paper", "problem", "manuscript"} and value:
             roots.append(Path(value).resolve())
     return roots
 

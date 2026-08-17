@@ -653,6 +653,11 @@ def _install_attempt(
         raise common.CodexError(
             f"attempt destination already exists: {destination}"
         )
+    # The elevated Windows sandbox can leave deny ACLs on ancestors of its
+    # nested workspace.  Installing an attempt is a sibling-directory rename,
+    # which requires the invoking user to retain full control of the problem
+    # directory itself, not just of the normalized solver workspace.
+    codex_cli.grant_workspace_owner_inheritance(work.problem.directory)
     staging = Path(
         tempfile.mkdtemp(prefix=".attempt-install-", dir=work.problem.directory)
     )
