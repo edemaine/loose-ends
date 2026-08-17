@@ -433,6 +433,14 @@ function runTiming(run) {
     if (run.exit_code != null && run.exit_code !== 0) {
       row.append(node("span", "run-timing-separator", "·"), node("span", "", `Exit code ${run.exit_code}`));
     }
+  } else if (status.active && run.started_at) {
+    const elapsed = node(
+      "span",
+      "run-elapsed",
+      `Elapsed ${formatDuration(run.started_at, Date.now() / 1000)}`,
+    );
+    elapsed.dataset.runElapsed = run.id;
+    row.append(node("span", "run-timing-separator", "·"), elapsed);
   }
   return row;
 }
@@ -446,6 +454,14 @@ function runConsoleStatus(run) {
   if (run.finished_at) {
     const duration = formatDuration(run.started_at, run.finished_at);
     footer.append(node("span", "console-status-detail", `${formatTime(run.finished_at)}${duration ? ` · ${duration}` : ""}`));
+  } else if (status.active && run.started_at) {
+    const elapsed = node(
+      "span",
+      "console-status-detail run-elapsed",
+      `Elapsed ${formatDuration(run.started_at, Date.now() / 1000)}`,
+    );
+    elapsed.dataset.runElapsed = run.id;
+    footer.append(elapsed);
   }
   if (status.active) {
     const cursor = node("span", "console-cursor");
@@ -1902,7 +1918,10 @@ function renderActivity({ preserveDetail = false } = {}) {
   const visibleJob = main.querySelector("[data-job-detail]")?.dataset.jobDetail;
   if (cached) {
     if (!preserveDetail || visibleJob !== state.selectedJob) renderJobDetail(cached);
-    else refreshVisibleRunLogs();
+    else {
+      refreshVisibleRunElapsed(cached);
+      refreshVisibleRunLogs();
+    }
   } else {
     const shell = node("div", "main-inner");
     shell.append(node("div", "loading", summary ? `Loading ${summary.title}…` : "Loading task…"));
@@ -2034,6 +2053,7 @@ async function loadJob(id) {
     ) {
       renderJobDetail(job);
     } else {
+      refreshVisibleRunElapsed(job);
       refreshVisibleRunLogs();
     }
   } catch (error) {
@@ -2215,6 +2235,16 @@ async function refreshRunLog(runId) {
 function refreshVisibleRunLogs() {
   main.querySelectorAll("[data-run-log]").forEach(log => {
     refreshRunLog(log.dataset.runLog);
+  });
+}
+
+function refreshVisibleRunElapsed(job) {
+  const runs = new Map((job.runs || []).map(run => [run.id, run]));
+  const now = Date.now() / 1000;
+  main.querySelectorAll("[data-run-elapsed]").forEach(label => {
+    const run = runs.get(label.dataset.runElapsed);
+    if (!run || !taskStatus(run.status).active || !run.started_at) return;
+    label.textContent = `Elapsed ${formatDuration(run.started_at, now)}`;
   });
 }
 

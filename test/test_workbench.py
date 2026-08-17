@@ -424,6 +424,10 @@ class WorkbenchPlanningTests(unittest.TestCase):
         self.assertIn("preview?.output", app)
         self.assertIn("function formatDuration", app)
         self.assertIn("function runConsoleStatus", app)
+        self.assertIn("elapsed.dataset.runElapsed = run.id", app)
+        self.assertIn("function refreshVisibleRunElapsed(job)", app)
+        self.assertIn("refreshVisibleRunElapsed(job)", app)
+        self.assertIn('`Elapsed ${formatDuration(run.started_at, now)}`', app)
         self.assertIn("tags: taskBadges(job)", app)
         self.assertIn('taskIsPaused(job) ? badge("Paused", "paused")', app)
         self.assertIn(
