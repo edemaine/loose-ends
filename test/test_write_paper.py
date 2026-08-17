@@ -698,6 +698,7 @@ class WritePaperTests(unittest.TestCase):
         )
         self.assertIn("literal keys appearing", writer_prompt)
         self.assertIn("print-only source", writer_prompt)
+        self.assertIn(r"\bibliographystyle{alpha}", writer_prompt)
         self.assertIn(
             "Authorship administration is outside",
             reviewer_prompt,

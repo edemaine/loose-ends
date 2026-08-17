@@ -150,6 +150,9 @@ Write these files in the current working directory:
   exact inputs, outputs, environment description, and cryptographic hashes
   needed to authenticate the reported results.
 
+Prefer `\bibliographystyle{alpha}` for the manuscript bibliography so citation
+labels are concise and mnemonic.
+
 In every Markdown file, delimit all mathematical notation explicitly. Use
 `\(...\)` for inline mathematics and `\[...\]` for display mathematics.
 
