@@ -1462,6 +1462,58 @@ function olderVersionWarning(kind, currentName, latestName, route, selectLatest)
   return warning;
 }
 
+function manuscriptsForProblem(item) {
+  const paperPath = normalizedPath(item.paperDirectory);
+  return state.catalog.manuscripts.flatMap(manuscript => {
+    const drafts = (manuscript.drafts || []).filter(draft =>
+      (draft.sources?.problems || []).some(source =>
+        source.id === item.problemId &&
+        normalizedPath(source.paperPath) === paperPath
+      )
+    );
+    if (!drafts.length) return [];
+    const draft = [...drafts].sort((left, right) =>
+      Number(right.number || 0) - Number(left.number || 0)
+    )[0];
+    return [{ manuscript, draft, matchingDraftCount: drafts.length }];
+  }).sort((left, right) =>
+    left.draft.title.localeCompare(
+      right.draft.title,
+      undefined,
+      { sensitivity: "base", numeric: true },
+    )
+  );
+}
+
+function problemManuscriptsPanel(item) {
+  const relations = manuscriptsForProblem(item);
+  if (!relations.length) return null;
+  const panel = node("section", "problem-manuscripts panel");
+  const heading = node("div", "related-tasks-heading");
+  heading.append(
+    node("h2", "", "Manuscripts about this problem"),
+    badge(`${relations.length} manuscript${relations.length === 1 ? "" : "s"}`, "neutral"),
+  );
+  const grid = node("div", "card-grid");
+  relations.forEach(({ manuscript, draft, matchingDraftCount }) => {
+    const link = routeLink(
+      { tab: "manuscripts", manuscript, draft },
+      "",
+      "entity-card",
+    );
+    const draftSummary = matchingDraftCount === 1
+      ? draft.name
+      : `${matchingDraftCount} matching drafts · latest match ${draft.name}`;
+    link.append(
+      node("strong", "", draft.title),
+      node("small", "", `${manuscript.name} · ${draftSummary}`),
+    );
+    grid.append(link);
+  });
+  panel.append(heading, grid);
+  return panel;
+}
+
 function renderReviewDetail(item) {
   const shell = node("div", "main-inner");
   const selectedSummary = state.catalog.reviews.find(value => value.itemKey === item.itemKey);
@@ -1524,6 +1576,8 @@ function renderReviewDetail(item) {
     paperPath: item.paperDirectory,
     problemPath: `${item.paperDirectory}/${item.problemId}`,
   }));
+  const manuscriptPanel = problemManuscriptsPanel(item);
+  if (manuscriptPanel) shell.append(manuscriptPanel);
 
   const problemStatement = node("section", "problem-statement panel");
   problemStatement.append(
