@@ -31,6 +31,7 @@ from workbench_tasks import (
     PlanError,
     build_plan,
     populate_dry_run_previews,
+    task_cli_defaults,
 )
 import workbench_worker
 
@@ -301,6 +302,10 @@ class WorkbenchPlanningTests(unittest.TestCase):
         self.assertIn("if (eventReconnectNeedsRefresh)", app)
         self.assertIn("if (eventConnection !== events) return", app)
         self.assertIn("return api(path, options, false)", app)
+        self.assertIn("state.settings.taskDefaults?.[task.action]", app)
+        self.assertIn("taskDefaults.reasoningEffort", app)
+        self.assertIn('copy.append(document.createTextNode(" "), node("small", "", help))', app)
+        self.assertNotIn("CLI default", app)
         server = (PROJECT_ROOT / "src" / "workbench.py").read_text(
             encoding="utf-8"
         )
@@ -313,6 +318,7 @@ class WorkbenchPlanningTests(unittest.TestCase):
         )
         self.assertIn('raise PlanError("incomplete request body")', server)
         self.assertIn('parsed.path == "/api/arxiv/author-search"', server)
+        self.assertIn('"taskDefaults": self.app.task_defaults', server)
         self.assertIn('r"/api/paper-imports/([A-Za-z0-9_-]+)/files"', server)
         self.assertIn('self.app.create_paper_import()', server)
         self.assertIn('self.app.commit_paper_import(match.group(1), body)', server)
@@ -519,6 +525,7 @@ class WorkbenchPlanningTests(unittest.TestCase):
         self.assertIn("bottom: 12px", styles)
         self.assertIn(".selection-bar .button:hover, .selection-bar .button:focus-visible", styles)
         self.assertIn(".selection-bar .button:active", styles)
+        self.assertIn(".field { display: grid; align-content: start;", styles)
         self.assertIn(".side-card > span > .badge", styles)
         self.assertIn(".paper-list-controls { display: grid; gap: 6px; }", styles)
         self.assertNotIn(".research-controls > .search", styles)
@@ -550,6 +557,17 @@ class WorkbenchPlanningTests(unittest.TestCase):
             "https://arxiv.org/abs/2608.04410v1",
         )
         self.assertEqual(records[0]["arxivId"], "2608.04410v1")
+
+    def test_task_defaults_come_from_cli_parsers(self):
+        defaults = task_cli_defaults()
+
+        self.assertEqual(defaults["metadata"]["reasoningEffort"], "medium")
+        self.assertEqual(
+            defaults["analyze"]["reasoningEffort"],
+            workbench.codex_cli.DEFAULT_REASONING_EFFORT,
+        )
+        self.assertEqual(defaults["metadata"]["model"], workbench.codex_cli.DEFAULT_MODEL)
+        self.assertEqual(defaults["literature"]["webSearch"], "live")
 
     def test_file_import_uploads_and_ingests_directory(self):
         with TemporaryDirectory() as temporary:

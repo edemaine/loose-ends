@@ -14,6 +14,10 @@ import extract_paper_metadata
 
 
 class ExtractPaperMetadataTests(unittest.TestCase):
+    def test_cli_defaults_to_medium_reasoning(self):
+        args = extract_paper_metadata.build_parser().parse_args(["paper"])
+        self.assertEqual(args.reasoning_effort, "medium")
+
     def test_dry_run_needs_no_codex_executable(self):
         with TemporaryDirectory() as temporary:
             paper = Path(temporary) / "paper"

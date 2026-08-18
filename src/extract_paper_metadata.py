@@ -18,6 +18,7 @@ from ingest_paper import is_iso8601_date_or_timestamp
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PROMPT_PATH = PROJECT_ROOT / "prompts" / "extract-paper-metadata.md"
 DEFAULT_SCHEMA_PATH = PROJECT_ROOT / "schemas" / "paper-metadata.schema.json"
+DEFAULT_REASONING_EFFORT = "medium"
 
 
 class MetadataExtractionError(codex_cli.CodexError):
@@ -176,7 +177,10 @@ def build_parser() -> argparse.ArgumentParser:
         default_template=DEFAULT_PROMPT_PATH,
         task="paper metadata extractor",
     )
-    codex_cli.add_model_arguments(parser)
+    codex_cli.add_model_arguments(
+        parser,
+        default_reasoning_effort=DEFAULT_REASONING_EFFORT,
+    )
     parser.add_argument("--schema", type=Path, default=DEFAULT_SCHEMA_PATH)
     return parser
 

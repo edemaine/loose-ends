@@ -383,7 +383,7 @@ button { color: inherit; }
 .icon-button { width: 34px; height: 34px; border: 0; border-radius: 9px; background: transparent; color: var(--muted); font-size: 25px; cursor: pointer; }
 .icon-button:hover { background: var(--paper); }
 .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 11px; }
-.field { display: grid; gap: 4px; }
+.field { display: grid; align-content: start; gap: 4px; }
 .field.full { grid-column: 1 / -1; }
 .field > span { color: var(--heading); font-size: 12px; font-weight: 800; }
 .field small { color: var(--muted); }

@@ -181,17 +181,24 @@ def add_model_arguments(
     parser: argparse.ArgumentParser,
     *,
     prefix: str = "",
+    default_reasoning_effort: str | None = None,
 ) -> None:
     """Add consistent model, reasoning, Fast mode, and executable options."""
+    if (
+        default_reasoning_effort is not None
+        and default_reasoning_effort not in REASONING_EFFORTS
+    ):
+        raise ValueError(f"invalid default reasoning effort: {default_reasoning_effort}")
     option_prefix = f"{prefix}-" if prefix else ""
     destination_prefix = f"{prefix.replace('-', '_')}_" if prefix else ""
     model_default = None if prefix else DEFAULT_MODEL
-    reasoning_default = None if prefix else DEFAULT_REASONING_EFFORT
+    primary_reasoning_default = default_reasoning_effort or DEFAULT_REASONING_EFFORT
+    reasoning_default = None if prefix else primary_reasoning_default
     model_default_help = (
         "inherit the primary run" if prefix else DEFAULT_MODEL
     )
     reasoning_default_help = (
-        "inherit the primary run" if prefix else DEFAULT_REASONING_EFFORT
+        "inherit the primary run" if prefix else primary_reasoning_default
     )
     parser.add_argument(
         f"--{option_prefix}model",

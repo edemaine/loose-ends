@@ -42,6 +42,41 @@ MIN_PRIORITY_LEVEL = -3
 MAX_PRIORITY_LEVEL = 3
 
 
+def task_cli_defaults() -> dict[str, dict[str, str]]:
+    """Read workbench-visible defaults from each action's actual CLI parser."""
+    import extract_paper_metadata
+    import literature_review
+    import review_solutions
+    import solve_open_problems
+    import triage_open_problems
+    import write_paper
+
+    modules = {
+        "metadata": extract_paper_metadata,
+        "analyze": analyze_papers,
+        "triage": triage_open_problems,
+        "literature": literature_review,
+        "solve": solve_open_problems,
+        "review": review_solutions,
+        "write": write_paper,
+        "revise": write_paper,
+    }
+    defaults: dict[str, dict[str, str]] = {}
+    for action, module in modules.items():
+        parser = module.build_parser()
+        destinations = {argument.dest for argument in parser._actions}
+        values = {
+            "model": parser.get_default("model"),
+            "reasoningEffort": parser.get_default("reasoning_effort"),
+        }
+        if "web_search" in destinations:
+            values["webSearch"] = parser.get_default("web_search")
+        defaults[action] = {
+            name: value for name, value in values.items() if isinstance(value, str)
+        }
+    return defaults
+
+
 class PlanError(codex_cli.CodexError):
     pass
 

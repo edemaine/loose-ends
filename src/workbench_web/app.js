@@ -8,7 +8,7 @@ const state = {
   eventSequence: 0,
   catalog: { papers: [], reviews: [], manuscripts: [], counts: {} },
   jobs: [],
-  settings: { workerLimit: 2, queuePaused: false, paperRoots: [] },
+  settings: { workerLimit: 2, queuePaused: false, paperRoots: [], taskDefaults: {} },
   tab: "research",
   search: "",
   selectedReview: "",
@@ -3228,7 +3228,7 @@ function checkbox(name, label, help = "", checked = false) {
   input.checked = checked;
   const copy = node("span");
   copy.append(node("span", "", label));
-  if (help) copy.append(node("small", "", help));
+  if (help) copy.append(document.createTextNode(" "), node("small", "", help));
   wrapper.append(input, copy);
   return wrapper;
 }
@@ -3515,16 +3515,20 @@ function renderTaskConfiguration(errorMessage = "") {
   const advanced = node("details", "advanced");
   advanced.append(node("summary", "", "Model and web-search settings"));
   const advancedGrid = node("div", "form-grid");
-  advancedGrid.append(field("model", "Model", { value: options.model || "", help: "Blank uses the CLI default." }));
+  const taskDefaults = state.settings.taskDefaults?.[task.action] || {};
+  advancedGrid.append(field("model", "Model", {
+    value: options.model || "",
+    help: `Default: ${taskDefaults.model || "unavailable"}.`,
+  }));
   advancedGrid.append(field("reasoningEffort", "Reasoning effort", {
     type: "select", value: options.reasoningEffort || "",
-    options: [["", "CLI default"], ...["low", "medium", "high", "xhigh", "max", "ultra"].map(value => [value, value])],
+    options: [["", `Default (${taskDefaults.reasoningEffort || "unavailable"})`], ...["low", "medium", "high", "xhigh", "max", "ultra"].map(value => [value, value])],
   }));
   advancedGrid.append(checkbox("fast", "Fast service tier", "Uses additional credits.", options.fast));
   if (["literature", "solve", "review", "write", "revise"].includes(task.action)) {
     advancedGrid.append(field("webSearch", "Web search", {
       type: "select", value: options.webSearch || "",
-      options: [["", "CLI default"], ["live", "Live"], ["indexed", "Indexed"], ["disabled", "Disabled"]],
+      options: [["", `Default (${reviewModel.titleize(taskDefaults.webSearch || "unavailable")})`], ["live", "Live"], ["indexed", "Indexed"], ["disabled", "Disabled"]],
     }));
   }
   if (["solve", "write", "revise"].includes(task.action)) {

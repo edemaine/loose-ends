@@ -42,6 +42,7 @@ from workbench_tasks import (
     PlanError,
     build_plan,
     populate_dry_run_previews,
+    task_cli_defaults,
 )
 
 try:
@@ -1155,6 +1156,7 @@ class WorkbenchApplication:
             state_directory=state_directory,
         )
         self.csrf = secrets.token_urlsafe(24)
+        self.task_defaults = task_cli_defaults()
         self.plans: dict[str, dict] = {}
         self.plan_lock = threading.Lock()
         self.manuscript_lock = threading.Lock()
@@ -1698,6 +1700,7 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                             "paperRoots": [
                                 str(path) for path in self.app.paper_output_roots
                             ],
+                            "taskDefaults": self.app.task_defaults,
                         },
                     }
                 )
