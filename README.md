@@ -912,12 +912,15 @@ literature search, solving, independent review, paper writing, and revision.
 Initial discovery runs in the background with live phase and row progress.
 Manuscript details link back to the source paper and open-problem titles recorded
 by their input selectors and attempts.
-The last completed catalog is cached under the private state directory. After
-the first successful scan, a server restart renders that catalog immediately
-and checks the filesystem in the background; a corrupt cache or one belonging
-to different paper roots is ignored. Unchanged freshness digests are also
-reused within the running server, while changed file metadata invalidates the
-corresponding digest automatically.
+Each paper root caches its own completed paper/review inventory in
+`.loose-ends/workbench-papers.json`; the manuscript root similarly uses
+`.loose-ends/workbench-manuscripts.json`. After the first successful scan, a
+server restart renders the merged cached catalog immediately and validates
+lightweight filesystem signatures in the background. Only new or changed
+roots are rebuilt, so adding an empty root does not rescan existing roots.
+Cache directories are ignored by both Git and the filesystem watcher. Changes
+to catalog code, prompts, or schemas invalidate the affected caches, and
+unchanged freshness digests are reused within the running server.
 
 The Papers view has **Add from arXiv** and **Add from files** actions. The file
 importer accepts multiple dragged PDF files, ZIP/tar.gz archives, and/or folders, shows the selected

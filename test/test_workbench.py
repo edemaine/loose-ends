@@ -614,7 +614,7 @@ class WorkbenchPlanningTests(unittest.TestCase):
             self.assertEqual((target / "paper.pdf").read_bytes(), b"%PDF-test")
             self.assertTrue((target / "source" / "main.tex").is_file())
             self.assertFalse(app.paper_imports)
-            app.catalog.schedule.assert_called_once_with()
+            app.catalog.schedule.assert_called_once_with([target])
 
     def test_file_import_rejects_path_traversal(self):
         with TemporaryDirectory() as temporary:
@@ -892,45 +892,121 @@ class WorkbenchPlanningTests(unittest.TestCase):
             root = Path(temporary)
             paper = make_paper(root / "papers")
             manuscripts = root / "manuscripts"
-            cache = root / "state" / "catalog-cache.json"
             first = CatalogManager(
                 [paper.parent],
                 manuscripts,
                 EventHub(),
-                cache_path=cache,
             )
             try:
                 self.assertTrue(first.wait_until_ready(8))
-                self.assertTrue(cache.is_file())
-                version = first.version
+                self.assertTrue(
+                    (
+                        paper.parent
+                        / workbench.ROOT_CACHE_DIRECTORY
+                        / workbench.PAPER_CACHE_FILENAME
+                    ).is_file()
+                )
+                self.assertEqual(
+                    (
+                        paper.parent
+                        / workbench.ROOT_CACHE_DIRECTORY
+                        / ".gitignore"
+                    ).read_text(encoding="utf-8"),
+                    "*\n",
+                )
+                self.assertTrue(
+                    (
+                        manuscripts
+                        / workbench.ROOT_CACHE_DIRECTORY
+                        / workbench.MANUSCRIPT_CACHE_FILENAME
+                    ).is_file()
+                )
             finally:
                 first.close()
 
-            scan_allowed = threading.Event()
+            empty = root / "empty"
+            empty.mkdir()
+            scanned = []
+            original_paper_inventory = workbench._paper_inventory
 
-            def slow_paper_inventory(paths):
-                scan_allowed.wait(5)
-                return []
+            def recording_paper_inventory(paths):
+                scanned.extend(path.resolve() for path in paths)
+                return original_paper_inventory(paths)
 
             with patch(
                 "workbench._paper_inventory",
-                side_effect=slow_paper_inventory,
+                side_effect=recording_paper_inventory,
             ):
                 second = CatalogManager(
-                    [paper.parent],
+                    [paper.parent, empty],
                     manuscripts,
                     EventHub(),
-                    cache_path=cache,
                 )
                 try:
                     snapshot = second.snapshot()
-                    self.assertEqual(snapshot["version"], version)
                     self.assertFalse(snapshot["loading"])
                     self.assertEqual(len(snapshot["papers"]), 1)
                     self.assertNotIn("progress", snapshot)
+                    self.assertTrue(second.wait_until_ready(8))
+                    self.assertEqual(scanned, [empty.resolve()])
+                    self.assertTrue(
+                        (
+                            empty
+                            / workbench.ROOT_CACHE_DIRECTORY
+                            / workbench.PAPER_CACHE_FILENAME
+                        ).is_file()
+                    )
                 finally:
-                    scan_allowed.set()
                     second.close()
+
+    def test_catalog_cache_rebuilds_only_root_changed_while_offline(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first_root = root / "first"
+            second_root = root / "second"
+            make_paper(first_root)
+            second_paper = make_paper(second_root)
+            manuscripts = root / "manuscripts"
+            manager = CatalogManager(
+                [first_root, second_root],
+                manuscripts,
+                EventHub(),
+            )
+            try:
+                self.assertTrue(manager.wait_until_ready(8))
+            finally:
+                manager.close()
+
+            manifest_path = second_paper / "analysis" / "manifest.json"
+            manifest = common.read_json(manifest_path)
+            manifest["paper_title"] = "Changed while offline"
+            common.write_json(manifest_path, manifest)
+            scanned = []
+            original_paper_inventory = workbench._paper_inventory
+
+            def recording_paper_inventory(paths):
+                scanned.extend(path.resolve() for path in paths)
+                return original_paper_inventory(paths)
+
+            with patch(
+                "workbench._paper_inventory",
+                side_effect=recording_paper_inventory,
+            ):
+                restarted = CatalogManager(
+                    [first_root, second_root],
+                    manuscripts,
+                    EventHub(),
+                )
+                try:
+                    self.assertEqual(len(restarted.snapshot()["papers"]), 2)
+                    self.assertTrue(restarted.wait_until_ready(8))
+                    self.assertEqual(scanned, [second_root.resolve()])
+                    self.assertIn(
+                        "Changed while offline",
+                        {item["title"] for item in restarted.snapshot()["papers"]},
+                    )
+                finally:
+                    restarted.close()
 
     def test_solver_plan_preserves_prompt_round_and_critic_settings(self):
         with TemporaryDirectory() as temporary:
@@ -1157,7 +1233,7 @@ class WorkbenchPlanningTests(unittest.TestCase):
         self.assertEqual(metadata["arxiv_id"], "2608.04410v2")
         self.assertEqual(metadata["updated"], "2025-12")
         self.assertEqual(metadata["provenance"], {"kind": "local"})
-        app.catalog.schedule.assert_called_once_with()
+        app.catalog.schedule.assert_called_once_with([metadata_path])
 
     def test_multi_problem_plan_title_includes_single_paper_title(self):
         with TemporaryDirectory() as temporary:
@@ -1806,7 +1882,9 @@ class WorkbenchWatchTests(unittest.TestCase):
             )
         )
 
-        catalog.schedule.assert_called_once_with()
+        catalog.schedule.assert_called_once_with(
+            [str(PROJECT_ROOT / "papers" / "metadata.json")]
+        )
 
     def test_watchdog_ignores_files_outside_the_catalog_model(self):
         catalog = Mock()
@@ -1836,7 +1914,27 @@ class WorkbenchWatchTests(unittest.TestCase):
             handler.on_any_event(event)
             handler.on_any_event(event)
 
-        catalog.schedule.assert_called_once_with()
+        catalog.schedule.assert_called_once_with([str(path)])
+
+    def test_watchdog_ignores_root_catalog_cache(self):
+        catalog = Mock()
+        handler = ChangeHandler(catalog)
+        cache = (
+            PROJECT_ROOT
+            / "papers"
+            / workbench.ROOT_CACHE_DIRECTORY
+            / workbench.PAPER_CACHE_FILENAME
+        )
+
+        handler.on_any_event(
+            SimpleNamespace(
+                event_type="created",
+                is_directory=False,
+                src_path=str(cache),
+            )
+        )
+
+        catalog.schedule.assert_not_called()
 
     def test_task_watchdog_wakes_only_for_sqlite_files(self):
         scheduler = Mock()

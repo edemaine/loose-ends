@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from collections import deque
 from datetime import datetime
+from functools import lru_cache
 import hashlib
 import ipaddress
 import json
@@ -76,7 +77,10 @@ IGNORED_PREFIXES = (
     ".triage-install-",
 )
 DRAFT_RE = re.compile(r"^draft-([0-9]{3,})$")
-CATALOG_CACHE_SCHEMA_VERSION = 2
+CATALOG_CACHE_SCHEMA_VERSION = 3
+ROOT_CACHE_DIRECTORY = ".loose-ends"
+PAPER_CACHE_FILENAME = "workbench-papers.json"
+MANUSCRIPT_CACHE_FILENAME = "workbench-manuscripts.json"
 PAPER_IMPORT_MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024
 PAPER_IMPORT_MAX_TOTAL_BYTES = 4 * 1024 * 1024 * 1024
 PAPER_IMPORT_MAX_FILES = 20_000
@@ -237,7 +241,12 @@ def _paper_url(metadata: dict) -> str:
 
 
 def _paper_inventory(paths: Iterable[Path]) -> list[dict]:
-    papers = analyze_papers.discover_paper_directories(paths)
+    try:
+        papers = analyze_papers.discover_paper_directories(paths)
+    except analyze_papers.AnalysisError as exc:
+        if "no installed paper directories" in str(exc):
+            return []
+        raise
     records = []
     for paper in papers:
         manifest = _read_json(paper / "analysis" / "manifest.json")
@@ -291,6 +300,74 @@ def _paper_inventory(paths: Iterable[Path]) -> list[dict]:
     return records
 
 
+def _catalog_cache_path(root: Path, filename: str) -> Path:
+    return root / ROOT_CACHE_DIRECTORY / filename
+
+
+@lru_cache(maxsize=1)
+def _catalog_implementation_signature() -> str:
+    """Invalidate root caches when catalog semantics or prompts change."""
+    digest = hashlib.sha256()
+    files = [
+        *sorted((PROJECT_ROOT / "src").glob("*.py")),
+        *sorted((PROJECT_ROOT / "prompts").rglob("*")),
+        *sorted((PROJECT_ROOT / "schemas").rglob("*")),
+    ]
+    for path in files:
+        if not path.is_file():
+            continue
+        relative = path.relative_to(PROJECT_ROOT).as_posix()
+        digest.update(relative.encode("utf-8", errors="surrogateescape"))
+        digest.update(b"\0")
+        try:
+            digest.update(path.read_bytes())
+        except OSError:
+            digest.update(b"<unavailable>")
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _catalog_root_signature(root: Path) -> str:
+    """Fingerprint catalog-relevant filesystem state without parsing it."""
+    digest = hashlib.sha256()
+    if not root.is_dir():
+        return digest.hexdigest()
+    for directory, child_names, file_names in os.walk(root):
+        child_names[:] = sorted(
+            name for name in child_names
+            if name not in IGNORED_PARTS
+            and not name.startswith(IGNORED_PREFIXES)
+        )
+        current = Path(directory)
+        for name in child_names:
+            relative = (current / name).relative_to(root).as_posix()
+            digest.update(f"D\0{relative}\0".encode("utf-8", errors="surrogateescape"))
+        relative_parts = {
+            part.casefold() for part in current.relative_to(root).parts
+        }
+        include_directory_files = bool(
+            relative_parts.intersection({"artifacts", "figures", "code"})
+        )
+        for name in sorted(file_names):
+            if (
+                name.casefold() not in CATALOG_FILE_NAMES
+                and not include_directory_files
+            ):
+                continue
+            path = current / name
+            try:
+                status = path.stat()
+            except OSError:
+                continue
+            relative = path.relative_to(root).as_posix()
+            digest.update(
+                f"F\0{relative}\0{status.st_mtime_ns}\0{status.st_size}\0".encode(
+                    "utf-8", errors="surrogateescape"
+                )
+            )
+    return digest.hexdigest()
+
+
 def _review_inventory(
     paths: Iterable[Path],
     progress=None,
@@ -299,7 +376,14 @@ def _review_inventory(
     try:
         problems = common.discover_problem_refs(paths)
     except common.CodexError as exc:
-        if "none of the discovered papers has" in str(exc) or "no open problems" in str(exc):
+        if any(
+            message in str(exc)
+            for message in (
+                "no installed paper directories",
+                "none of the discovered papers has",
+                "no open problems",
+            )
+        ):
             return []
         raise
     selection_progress = None
@@ -632,16 +716,11 @@ class CatalogManager:
         paths: list[Path],
         manuscripts: Path,
         hub: EventHub,
-        cache_path: Path | None = None,
     ):
-        self.paths = paths
-        self.manuscripts = manuscripts
+        self.paths = list(dict.fromkeys(path.resolve() for path in paths))
+        self.manuscripts = manuscripts.resolve()
+        self.manuscripts.mkdir(parents=True, exist_ok=True)
         self.hub = hub
-        self.cache_path = cache_path
-        self.cache_key = {
-            "paths": sorted(str(path.resolve()) for path in paths),
-            "manuscripts": str(manuscripts.resolve()),
-        }
         self.lock = threading.RLock()
         self.version = 0
         self.error = ""
@@ -660,9 +739,14 @@ class CatalogManager:
             "loading": True,
         }
         self.fingerprint = ""
-        self._load_cache()
+        self.paper_caches: dict[str, dict] = {}
+        self.manuscript_cache: dict | None = None
+        self._load_caches()
         self.pending = threading.Event()
+        self.pending_lock = threading.Lock()
         self.force_refresh = False
+        self.validate_all = True
+        self.dirty_roots: set[str] = set()
         self.stopping = threading.Event()
         self.ready = threading.Event()
         self.thread = threading.Thread(
@@ -673,91 +757,243 @@ class CatalogManager:
         self.thread.start()
         self.pending.set()
 
-    def _load_cache(self) -> None:
-        if self.cache_path is None:
-            return
-        cached = common.load_json(self.cache_path)
+    @staticmethod
+    def _root_key(root: Path) -> str:
+        return os.path.normcase(str(root.resolve()))
+
+    @staticmethod
+    def _load_cache_file(path: Path, kind: str, root: Path) -> dict | None:
+        cached = common.load_json(path)
         if (
             cached is None
             or cached.get("schemaVersion") != CATALOG_CACHE_SCHEMA_VERSION
-            or cached.get("key") != self.cache_key
-            or not isinstance(cached.get("catalog"), dict)
-            or not isinstance(cached.get("fingerprint"), str)
+            or cached.get("kind") != kind
+            or cached.get("root") != str(root.resolve())
+            or not isinstance(cached.get("signature"), str)
+            or cached.get("implementationSignature")
+            != _catalog_implementation_signature()
         ):
-            return
-        catalog = cached["catalog"]
-        if not all(
-            isinstance(catalog.get(name), list)
-            for name in ("papers", "reviews", "manuscripts")
+            return None
+        if kind == "papers" and not all(
+            isinstance(cached.get(name), list) for name in ("papers", "reviews")
         ):
-            return
-        self.catalog = catalog
-        # Cached data is immediately usable; validation happens silently in
-        # the background rather than becoming another initial load.
-        self.catalog["loading"] = False
-        self.catalog["error"] = ""
-        self.catalog.pop("progress", None)
-        self.version = int(catalog.get("version", 0))
-        self.fingerprint = cached["fingerprint"]
+            return None
+        if kind == "manuscripts" and (
+            not isinstance(cached.get("manuscripts"), list)
+            or not isinstance(cached.get("dependencyFingerprint"), str)
+        ):
+            return None
+        return cached
 
-    def _save_cache(self) -> None:
-        if self.cache_path is None:
-            return
-        self.cache_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.cache_path.with_suffix(
-            self.cache_path.suffix + ".tmp"
-        )
-        common.write_json(
-            temporary,
-            {
-                "schemaVersion": CATALOG_CACHE_SCHEMA_VERSION,
-                "key": self.cache_key,
-                "fingerprint": self.fingerprint,
-                "catalog": self.catalog,
-            },
-        )
-        temporary.replace(self.cache_path)
+    @staticmethod
+    def _save_cache_file(path: Path, value: dict) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        ignore = path.parent / ".gitignore"
+        if not ignore.exists():
+            ignore.write_text("*\n", encoding="utf-8")
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        common.write_json(temporary, value)
+        temporary.replace(path)
 
-    def refresh(self, *, force: bool = False) -> None:
-        try:
-            self._set_progress("papers", "Scanning papers…")
-            papers = _paper_inventory(self.paths)
-            self._set_progress("problems", "Discovering open problems…")
+    @staticmethod
+    def _source_fingerprint(papers: list[dict], reviews: list[dict]) -> str:
+        problems = {
+            (
+                str(item.get("paperDirectory", "")),
+                str(item.get("problemId", "")),
+            ): {
+                "paperDirectory": item.get("paperDirectory"),
+                "problemId": item.get("problemId"),
+                "problemTitle": item.get("problemTitle"),
+            }
+            for item in reviews
+        }
+        dependencies = {
+            "papers": [
+                {"path": item.get("path"), "title": item.get("title")}
+                for item in papers
+            ],
+            "problems": [problems[key] for key in sorted(problems)],
+        }
+        return hashlib.sha256(
+            json.dumps(dependencies, sort_keys=True, ensure_ascii=False).encode("utf-8")
+        ).hexdigest()
 
-            last_progress = -25
-            last_stage_progress: dict[str, int] = {}
-
-            def review_progress(current: int, total: int) -> None:
-                nonlocal last_progress
-                if current == 0 or current == total or current - last_progress >= 25:
-                    last_progress = current
-                    self._set_progress(
-                        "reviews",
-                        "Building review catalog…",
-                        current=current,
-                        total=total,
-                    )
-
-            def review_stage_progress(
-                label: str,
-                current: int,
-                total: int,
-            ) -> None:
-                previous = last_stage_progress.get(label, -25)
-                if current == 0 or current == total or current - previous >= 25:
-                    last_stage_progress[label] = current
-                    self._set_progress(
-                        "reviews",
-                        label,
-                        current=current,
-                        total=total,
-                    )
-
-            reviews = _review_inventory(
-                self.paths,
-                progress=review_progress,
-                stage_progress=review_stage_progress,
+    @staticmethod
+    def _merge_paper_caches(entries: Iterable[dict]) -> tuple[list[dict], list[dict]]:
+        papers_by_key: dict[str, dict] = {}
+        reviews_by_key: dict[str, dict] = {}
+        for entry in entries:
+            for item in entry.get("papers", []):
+                papers_by_key[str(item.get("key") or item.get("path"))] = item
+            for item in entry.get("reviews", []):
+                reviews_by_key[str(item.get("itemKey") or item.get("id"))] = item
+        papers = list(papers_by_key.values())
+        papers.sort(key=lambda item: (str(item.get("title", "")).casefold(), item["path"]))
+        reviews = list(reviews_by_key.values())
+        reviews.sort(
+            key=lambda item: (
+                str(item.get("paperTitle", "")).casefold(),
+                os.path.normcase(str(item.get("paperDirectory", ""))),
+                str(item.get("problemId", "")),
+                -int(item.get("attemptNumber", 0) or 0),
+                str(item.get("itemKey", "")),
             )
+        )
+        return papers, reviews
+
+    @staticmethod
+    def _catalog_value(
+        papers: list[dict],
+        reviews: list[dict],
+        manuscripts: list[dict],
+        *,
+        loading: bool,
+    ) -> dict:
+        return {
+            "papers": papers,
+            "reviews": reviews,
+            "manuscripts": manuscripts,
+            "counts": {
+                "papers": len(papers),
+                "problems": len({item["problemKey"] for item in reviews}),
+                "attempts": sum(
+                    item["attemptStatus"] != "unattempted" for item in reviews
+                ),
+                "manuscripts": len(manuscripts),
+            },
+            "loading": loading,
+        }
+
+    @staticmethod
+    def _catalog_fingerprint(value: dict) -> str:
+        comparable = {
+            key: value[key]
+            for key in ("papers", "reviews", "manuscripts", "counts")
+        }
+        return hashlib.sha256(
+            json.dumps(comparable, sort_keys=True, ensure_ascii=False).encode("utf-8")
+        ).hexdigest()
+
+    def _load_caches(self) -> None:
+        for root in self.paths:
+            cached = self._load_cache_file(
+                _catalog_cache_path(root, PAPER_CACHE_FILENAME),
+                "papers",
+                root,
+            )
+            if cached is not None:
+                self.paper_caches[self._root_key(root)] = cached
+        papers, reviews = self._merge_paper_caches(self.paper_caches.values())
+        dependency = self._source_fingerprint(papers, reviews)
+        manuscript_cache = self._load_cache_file(
+            _catalog_cache_path(self.manuscripts, MANUSCRIPT_CACHE_FILENAME),
+            "manuscripts",
+            self.manuscripts,
+        )
+        if (
+            manuscript_cache is not None
+            and manuscript_cache["dependencyFingerprint"] == dependency
+        ):
+            self.manuscript_cache = manuscript_cache
+        cached_anything = bool(self.paper_caches) or self.manuscript_cache is not None
+        manuscripts = (
+            self.manuscript_cache.get("manuscripts", [])
+            if self.manuscript_cache is not None
+            else []
+        )
+        self.catalog = self._catalog_value(
+            papers,
+            reviews,
+            manuscripts,
+            loading=not cached_anything,
+        )
+        if cached_anything:
+            # Cached roots are immediately browsable. Their lightweight
+            # signatures are validated by the background refresh.
+            self.version = 1
+            self.catalog["version"] = self.version
+            self.catalog["error"] = ""
+            self.fingerprint = self._catalog_fingerprint(self.catalog)
+
+    def _scan_paper_root(self, root: Path, signature: str) -> dict:
+        self._set_progress("papers", f"Scanning papers in {root.name}…")
+        papers = _paper_inventory([root])
+        self._set_progress("problems", f"Discovering open problems in {root.name}…")
+        last_progress = -25
+        last_stage_progress: dict[str, int] = {}
+
+        def review_progress(current: int, total: int) -> None:
+            nonlocal last_progress
+            if current == 0 or current == total or current - last_progress >= 25:
+                last_progress = current
+                self._set_progress(
+                    "reviews",
+                    f"Building review catalog for {root.name}…",
+                    current=current,
+                    total=total,
+                )
+
+        def review_stage_progress(label: str, current: int, total: int) -> None:
+            previous = last_stage_progress.get(label, -25)
+            if current == 0 or current == total or current - previous >= 25:
+                last_stage_progress[label] = current
+                self._set_progress(
+                    "reviews",
+                    label,
+                    current=current,
+                    total=total,
+                )
+
+        reviews = _review_inventory(
+            [root],
+            progress=review_progress,
+            stage_progress=review_stage_progress,
+        )
+        return {
+            "schemaVersion": CATALOG_CACHE_SCHEMA_VERSION,
+            "kind": "papers",
+            "root": str(root.resolve()),
+            "signature": signature,
+            "implementationSignature": _catalog_implementation_signature(),
+            "papers": papers,
+            "reviews": reviews,
+        }
+
+    def refresh(
+        self,
+        *,
+        force: bool = False,
+        dirty_roots: set[str] | None = None,
+    ) -> None:
+        rescanned = False
+        try:
+            entries: dict[str, dict] = {}
+            for root in self.paths:
+                key = self._root_key(root)
+                cached = self.paper_caches.get(key)
+                validate = force or dirty_roots is None or key in dirty_roots
+                if not validate and cached is not None:
+                    entries[key] = cached
+                    continue
+                signature = _catalog_root_signature(root)
+                if not force and cached is not None and cached["signature"] == signature:
+                    entries[key] = cached
+                    continue
+                entry = self._scan_paper_root(root, signature)
+                rescanned = True
+                entries[key] = entry
+                try:
+                    self._save_cache_file(
+                        _catalog_cache_path(root, PAPER_CACHE_FILENAME),
+                        entry,
+                    )
+                except (OSError, UnicodeError):
+                    pass
+            self.paper_caches = entries
+            papers, reviews = self._merge_paper_caches(entries.values())
+            dependency = self._source_fingerprint(papers, reviews)
+
             def manuscript_progress(current: int, total: int) -> None:
                 self._set_progress(
                     "manuscripts",
@@ -765,26 +1001,61 @@ class CatalogManager:
                     current=current,
                     total=total,
                 )
-
-            manuscripts = _manuscript_inventory(
-                self.manuscripts,
+            manuscript_key = self._root_key(self.manuscripts)
+            cached_manuscripts = self.manuscript_cache
+            validate_manuscripts = (
+                force
+                or dirty_roots is None
+                or manuscript_key in dirty_roots
+                or cached_manuscripts is None
+                or cached_manuscripts["dependencyFingerprint"] != dependency
+            )
+            if validate_manuscripts:
+                manuscript_signature = _catalog_root_signature(self.manuscripts)
+            else:
+                manuscript_signature = cached_manuscripts["signature"]
+            if (
+                not force
+                and cached_manuscripts is not None
+                and cached_manuscripts["signature"] == manuscript_signature
+                and cached_manuscripts["dependencyFingerprint"] == dependency
+            ):
+                manuscripts = cached_manuscripts["manuscripts"]
+            else:
+                manuscripts = _manuscript_inventory(
+                    self.manuscripts,
+                    papers,
+                    reviews,
+                    progress=manuscript_progress,
+                )
+                rescanned = True
+                cached_manuscripts = {
+                    "schemaVersion": CATALOG_CACHE_SCHEMA_VERSION,
+                    "kind": "manuscripts",
+                    "root": str(self.manuscripts.resolve()),
+                    "signature": manuscript_signature,
+                    "implementationSignature": _catalog_implementation_signature(),
+                    "dependencyFingerprint": dependency,
+                    "manuscripts": manuscripts,
+                }
+                try:
+                    self._save_cache_file(
+                        _catalog_cache_path(
+                            self.manuscripts,
+                            MANUSCRIPT_CACHE_FILENAME,
+                        ),
+                        cached_manuscripts,
+                    )
+                except (OSError, UnicodeError):
+                    pass
+            self.manuscript_cache = cached_manuscripts
+            self._set_progress("finalizing", "Preparing catalog…")
+            value = self._catalog_value(
                 papers,
                 reviews,
-                progress=manuscript_progress,
+                manuscripts,
+                loading=False,
             )
-            self._set_progress("finalizing", "Preparing catalog…")
-            value = {
-                "papers": papers,
-                "reviews": reviews,
-                "manuscripts": manuscripts,
-                "counts": {
-                    "papers": len(papers),
-                    "problems": len({item["problemKey"] for item in reviews}),
-                    "attempts": sum(item["attemptStatus"] != "unattempted" for item in reviews),
-                    "manuscripts": len(manuscripts),
-                },
-                "loading": False,
-            }
         except (OSError, UnicodeError, common.CodexError, json.JSONDecodeError) as exc:
             with self.lock:
                 self.error = str(exc)
@@ -793,10 +1064,14 @@ class CatalogManager:
             self.ready.set()
             self.hub.publish("catalog.error", message=str(exc))
             return
-        fingerprint = hashlib.sha256(
-            json.dumps(value, sort_keys=True, ensure_ascii=False).encode("utf-8")
-        ).hexdigest()
-        changed = fingerprint != self.fingerprint or force
+        fingerprint = self._catalog_fingerprint(value)
+        # A relevant file can affect lazily loaded detail without changing
+        # the summary catalog, so a real root rescan still advances version.
+        changed = (
+            fingerprint != self.fingerprint
+            or force
+            or (rescanned and dirty_roots is not None)
+        )
         with self.lock:
             if not changed:
                 self.error = ""
@@ -810,10 +1085,6 @@ class CatalogManager:
                 value["error"] = ""
                 self.catalog = value
                 self.error = ""
-        try:
-            self._save_cache()
-        except (OSError, UnicodeError):
-            pass
         self.ready.set()
         if changed:
             self.hub.publish("catalog.changed", version=self.version)
@@ -837,8 +1108,17 @@ class CatalogManager:
         if initial_load:
             self.hub.publish("catalog.progress", **progress)
 
-    def schedule(self) -> None:
-        self.force_refresh = True
+    def schedule(self, paths: Iterable[str | Path] | None = None) -> None:
+        with self.pending_lock:
+            if paths is None:
+                self.force_refresh = True
+            else:
+                roots = [*self.paths, self.manuscripts]
+                for value in paths:
+                    path = Path(value).expanduser().resolve()
+                    for root in roots:
+                        if path == root or _relative_to(path, root):
+                            self.dirty_roots.add(self._root_key(root))
         self.pending.set()
 
     def wait_until_ready(self, timeout: float | None = None) -> bool:
@@ -848,14 +1128,21 @@ class CatalogManager:
         while not self.stopping.is_set():
             if not self.pending.wait(0.5):
                 continue
-            self.pending.clear()
             # Coalesce installation bursts produced by atomic directory moves.
             if self.stopping.wait(0.3):
                 break
-            self.pending.clear()
-            force = self.force_refresh
-            self.force_refresh = False
-            self.refresh(force=force)
+            with self.pending_lock:
+                force = self.force_refresh
+                validate_all = self.validate_all
+                dirty_roots = set(self.dirty_roots)
+                self.force_refresh = False
+                self.validate_all = False
+                self.dirty_roots.clear()
+                self.pending.clear()
+            self.refresh(
+                force=force,
+                dirty_roots=None if force or validate_all else dirty_roots,
+            )
 
     def snapshot(self) -> dict:
         with self.lock:
@@ -912,7 +1199,7 @@ class ChangeHandler(FileSystemEventHandler):
         parts = {part.casefold() for part in value.parts}
         return (
             value.name.casefold() in CATALOG_FILE_NAMES
-            or "artifacts" in parts
+            or bool(parts.intersection({"artifacts", "figures", "code"}))
         )
 
     @staticmethod
@@ -959,7 +1246,7 @@ class ChangeHandler(FileSystemEventHandler):
                 self.signatures[key] = signature
             if not changed:
                 return
-        self.catalog.schedule()
+        self.catalog.schedule(paths)
 
 
 class TaskChangeHandler(FileSystemEventHandler):
@@ -1148,7 +1435,6 @@ class WorkbenchApplication:
             paths,
             manuscripts,
             self.hub,
-            cache_path=state_directory / "catalog-cache.json",
         )
         self.scheduler = Scheduler(
             self.store,
@@ -1369,7 +1655,7 @@ class WorkbenchApplication:
                 raise PlanError(str(exc)) from exc
         finally:
             shutil.rmtree(staging, ignore_errors=True)
-        self.catalog.schedule()
+        self.catalog.schedule(targets)
         return {
             "papers": [
                 {"path": str(path), "urlKey": _url_key(path)}
@@ -1457,7 +1743,7 @@ class WorkbenchApplication:
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             temporary.unlink(missing_ok=True)
             raise PlanError(f"could not update paper metadata: {exc}") from exc
-        self.catalog.schedule()
+        self.catalog.schedule([metadata_path])
         result = {"path": str(paper), **fields}
         result["arxivId"] = result.pop("arxiv_id")
         return result
@@ -1497,7 +1783,7 @@ class WorkbenchApplication:
             catalog.get("papers", []),
             catalog.get("reviews", []),
         )
-        self.catalog.schedule()
+        self.catalog.schedule([draft])
         return result
 
     def close(self) -> None:
