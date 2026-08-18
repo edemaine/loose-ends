@@ -1,12 +1,15 @@
-from io import BytesIO
+from contextlib import redirect_stdout
+from io import BytesIO, StringIO
 from pathlib import Path
 import sys
+from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import download_arxiv
+import download_arxiv_author
 from download_arxiv_author import (
     author_query,
     parse_atom_feed,
@@ -46,6 +49,17 @@ class AuthorQueryTests(unittest.TestCase):
     def test_rejects_empty_name(self):
         with self.assertRaises(ValueError):
             author_query("  ")
+
+    def test_cli_dry_run_does_not_search(self):
+        output = StringIO()
+        with TemporaryDirectory() as temporary, redirect_stdout(output):
+            status = download_arxiv_author.main([
+                "Ada Lovelace", "--limit", "5", "--output-dir", temporary,
+                "--dry-run",
+            ])
+        self.assertEqual(status, 0)
+        self.assertIn('au:"Ada Lovelace"', output.getvalue())
+        self.assertIn("limited to 5 result(s)", output.getvalue())
 
 
 class AtomFeedTests(unittest.TestCase):

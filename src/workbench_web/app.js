@@ -8,7 +8,7 @@ const state = {
   eventSequence: 0,
   catalog: { papers: [], reviews: [], manuscripts: [], counts: {} },
   jobs: [],
-  settings: { workerLimit: 2, queuePaused: false },
+  settings: { workerLimit: 2, queuePaused: false, paperRoots: [] },
   tab: "research",
   search: "",
   selectedReview: "",
@@ -517,7 +517,7 @@ async function refreshSession() {
 async function api(path, options = {}, retryConfirmation = true) {
   const requestOptions = { ...options };
   const headers = { ...(options.headers || {}) };
-  if (options.body && typeof options.body !== "string") {
+  if (options.body && typeof options.body !== "string" && !(options.body instanceof Blob)) {
     headers["Content-Type"] = "application/json";
     requestOptions.body = JSON.stringify(options.body);
   }
@@ -657,6 +657,13 @@ function targetDisplayLabel(value) {
     );
     if (item) return `${item.problemId}: ${item.problemTitle} · ${item.attemptName}`;
   }
+  if (value.kind === "paper") {
+    const path = normalizedPath(value.path);
+    const paper = state.catalog.papers.find(item => normalizedPath(item.path) === path);
+    if (paper) {
+      return reviewModel.paperTitleWithYear(paper.title, paper.published);
+    }
+  }
   return value.label || value.path;
 }
 
@@ -770,6 +777,26 @@ function appendAwaitingReviewAction(values) {
   selectionBar.append(action);
 }
 
+function missingMetadataPaperTargets(values) {
+  const selectedPaths = new Set(
+    values.filter(value => value.kind === "paper").map(value => normalizedPath(value.path)),
+  );
+  return state.catalog.papers
+    .filter(paper => selectedPaths.has(normalizedPath(paper.path)) && !paper.metadataComplete)
+    .map(paperTarget);
+}
+
+function appendMissingMetadataAction(values) {
+  const papers = missingMetadataPaperTargets(values);
+  if (!papers.length) return;
+  const action = button(
+    `Extract metadata (${papers.length.toLocaleString()})`,
+    () => openTask("metadata", papers),
+  );
+  action.title = `${papers.length.toLocaleString()} selected paper${papers.length === 1 ? "" : "s"} missing a title or authors`;
+  selectionBar.append(action);
+}
+
 function renderSelectionBar() {
   selectionBar.replaceChildren();
   const values = [...state.selection.values()];
@@ -778,6 +805,7 @@ function renderSelectionBar() {
   selectionBar.append(node("strong", "", `${values.length} selected`));
   const kinds = new Set(values.map(item => item.kind));
   if ([...kinds].every(kind => kind === "paper")) {
+    appendMissingMetadataAction(values);
     selectionBar.append(button("Analyze", () => openTask("analyze", values)));
     const problems = problemsForPapers(values);
     if (problems.length) {
@@ -1585,9 +1613,24 @@ function fileGrid(files) {
 function renderPapers() {
   persistentSidebarControls("papers", () => {
     const controls = node("div", "paper-list-controls");
+    const addFromArxiv = button(
+      "Add from arXiv", () => openTask("download", []), "button",
+    );
+    const addFromFiles = button(
+      "Add from files", openFileImport, "button",
+    );
+    addFromArxiv.disabled = !(state.settings.paperRoots || []).length;
+    addFromFiles.disabled = addFromArxiv.disabled;
+    if (addFromArxiv.disabled) {
+      addFromArxiv.title = "Start the workbench with a parent paper directory to enable downloads.";
+      addFromFiles.title = addFromArxiv.title;
+    }
+    const addActions = node("div", "paper-add-actions");
+    addActions.append(addFromArxiv, addFromFiles);
     controls.append(
       sidebarSearch("Search source papers…"),
       paperSortControl(),
+      addActions,
     );
     return controls;
   });
@@ -1625,6 +1668,28 @@ function renderPapers() {
   copy.append(node("div", "eyebrow", paper.name));
   copy.append(node("h1", "", paper.title));
   copy.append(node("p", "", paper.authors.join(", ") || "Authors unavailable"));
+  if (paper.published || (paper.updated && paper.updated !== paper.published)) {
+    const dates = node("div", "paper-dates");
+    if (paper.published) {
+      const published = node("time", "", paper.published);
+      published.dateTime = paper.published;
+      dates.append(node("strong", "", "Published"), published);
+    }
+    if (paper.updated && paper.updated !== paper.published) {
+      const updated = node("time", "", paper.updated);
+      updated.dateTime = paper.updated;
+      dates.append(node("strong", "", "Revised"), updated);
+    }
+    copy.append(dates);
+  }
+  if (paper.arxivId) copy.append(node("div", "paper-identifier", `arXiv:${paper.arxivId}`));
+  if (paper.url) {
+    const sourceLink = node("a", "paper-source-link", paper.url);
+    sourceLink.href = paper.url;
+    sourceLink.target = "_blank";
+    sourceLink.rel = "noopener noreferrer";
+    copy.append(sourceLink);
+  }
   const badges = node("div", "badges");
   badges.append(badge(paper.analyzed ? "analyzed" : "not analyzed", paper.analyzed ? "succeeded" : "warn"));
   if (paper.analyzed) badges.append(badge(`${paper.problemCount} problems`, "neutral"));
@@ -1632,6 +1697,14 @@ function renderPapers() {
   hero.append(copy);
   shell.append(hero);
   const actions = node("div", "actions");
+  addAction(
+    actions,
+    paper.metadataComplete ? "Extract metadata again" : "Extract metadata",
+    "metadata",
+    [paperTarget(paper)],
+    !paper.metadataComplete,
+  );
+  actions.append(button("Edit metadata", () => openMetadataEditor(paper), "button"));
   addAction(actions, paper.analyzed ? "Analyze again" : "Analyze", "analyze", [paperTarget(paper)], !paper.analyzed);
   const problems = uniqueProblemTargets(paper.path);
   if (problems.length) {
@@ -1656,6 +1729,346 @@ function uniqueProblemTargets(paperPath) {
     values.set(item.problemId, problemTarget(item));
   });
   return [...values.values()];
+}
+
+function paperImportSize(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
+function loosePaperImportItems(files) {
+  return [...files].map(file => {
+    const name = file.name.toLowerCase();
+    if (!name.endsWith(".pdf") && !name.endsWith(".zip")
+        && !name.endsWith(".tar.gz") && !name.endsWith(".tgz")) {
+      throw new Error(`File is not a PDF, ZIP, or tar.gz archive: ${file.name}`);
+    }
+    return { kind: "file", name: file.name, files: [{ file, path: file.name }] };
+  });
+}
+
+function directoryPickerImportItems(files) {
+  const groups = new Map();
+  [...files].forEach(file => {
+    const parts = String(file.webkitRelativePath || file.name).split("/").filter(Boolean);
+    if (parts.length < 2) return;
+    const name = parts.shift();
+    if (!groups.has(name)) groups.set(name, []);
+    groups.get(name).push({ file, path: parts.join("/") });
+  });
+  return [...groups].map(([name, values]) => ({ kind: "directory", name, files: values }));
+}
+
+function fileListPaperImportItems(files) {
+  const values = [...files];
+  const loose = values.filter(file => !String(file.webkitRelativePath || "").includes("/"));
+  const directoryFiles = values.filter(file => String(file.webkitRelativePath || "").includes("/"));
+  return [...loosePaperImportItems(loose), ...directoryPickerImportItems(directoryFiles)];
+}
+
+function fileForEntry(entry) {
+  return new Promise((resolve, reject) => entry.file(resolve, reject));
+}
+
+function entriesForDirectory(reader) {
+  return new Promise((resolve, reject) => {
+    const values = [];
+    const read = () => reader.readEntries(entries => {
+      if (!entries.length) resolve(values);
+      else {
+        values.push(...entries);
+        read();
+      }
+    }, reject);
+    read();
+  });
+}
+
+async function filesForDirectoryEntry(directory, prefix = "") {
+  const values = [];
+  const entries = await entriesForDirectory(directory.createReader());
+  for (const entry of entries) {
+    const path = prefix ? `${prefix}/${entry.name}` : entry.name;
+    if (entry.isDirectory) values.push(...await filesForDirectoryEntry(entry, path));
+    else if (entry.isFile) values.push({ file: await fileForEntry(entry), path });
+  }
+  return values;
+}
+
+async function droppedPaperImportItems(transfer) {
+  const entries = [...(transfer.items || [])]
+    .map(item => item.webkitGetAsEntry?.())
+    .filter(Boolean);
+  if (!entries.length) return fileListPaperImportItems(transfer.files || []);
+  const values = [];
+  for (const entry of entries) {
+    if (entry.isDirectory) {
+      values.push({
+        kind: "directory",
+        name: entry.name,
+        files: await filesForDirectoryEntry(entry),
+      });
+    } else if (entry.isFile) {
+      values.push(...loosePaperImportItems([await fileForEntry(entry)]));
+    }
+  }
+  return values;
+}
+
+function appendPaperImportItems(items) {
+  const task = state.dialog;
+  const names = new Set(task.items.map(item => item.name.toLowerCase()));
+  for (const item of items) {
+    if (!item.files.length) throw new Error(`Directory is empty: ${item.name}`);
+    if (names.has(item.name.toLowerCase())) {
+      throw new Error(`An input named ${item.name} is already selected.`);
+    }
+    names.add(item.name.toLowerCase());
+    task.items.push(item);
+  }
+}
+
+function openFileImport() {
+  state.dialog = {
+    kind: "fileImport",
+    items: [],
+    outputDirectory: (state.settings.paperRoots || [])[0] || "",
+  };
+  renderFileImport();
+  dialog.showModal();
+}
+
+function renderFileImport(errorMessage = "") {
+  const task = state.dialog;
+  if (!task || task.kind !== "fileImport") return;
+  dialogEyebrow.textContent = "Source papers";
+  dialogTitle.textContent = "Add from files";
+  dialogBody.replaceChildren();
+  if (errorMessage) dialogBody.append(node("div", "error-box", errorMessage));
+
+  const dropzone = node("div", "paper-dropzone");
+  dropzone.tabIndex = 0;
+  dropzone.append(
+    node("strong", "", "Drop PDFs, ZIP/tar.gz archives, and/or folders here"),
+    node("small", "", "Archives discard a shared directory prefix. At the resulting root: paper.pdf, then main.pdf, then one PDF matching a TeX filename."),
+  );
+  const chooser = node("div", "paper-dropzone-actions");
+  const pdfInput = node("input");
+  pdfInput.type = "file";
+  pdfInput.multiple = true;
+  pdfInput.accept = ".pdf,.zip,.tar.gz,.tgz,application/pdf,application/zip,application/gzip";
+  pdfInput.hidden = true;
+  const directoryInput = node("input");
+  directoryInput.type = "file";
+  directoryInput.multiple = true;
+  directoryInput.setAttribute("webkitdirectory", "");
+  directoryInput.hidden = true;
+  chooser.append(
+    button("Choose files", () => pdfInput.click()),
+    button("Choose folders", () => directoryInput.click()),
+    pdfInput,
+    directoryInput,
+  );
+  dropzone.append(chooser);
+  const addItems = values => {
+    try {
+      appendPaperImportItems(values);
+      renderFileImport();
+    } catch (error) {
+      renderFileImport(error.message);
+    }
+  };
+  pdfInput.addEventListener("change", () => {
+    try { addItems(loosePaperImportItems(pdfInput.files)); }
+    catch (error) { renderFileImport(error.message); }
+  });
+  directoryInput.addEventListener("change", () => {
+    try { addItems(directoryPickerImportItems(directoryInput.files)); }
+    catch (error) { renderFileImport(error.message); }
+  });
+  ["dragenter", "dragover"].forEach(type => dropzone.addEventListener(type, event => {
+    event.preventDefault();
+    dropzone.classList.add("dragging");
+  }));
+  ["dragleave", "drop"].forEach(type => dropzone.addEventListener(type, event => {
+    event.preventDefault();
+    dropzone.classList.remove("dragging");
+  }));
+  dropzone.addEventListener("drop", async event => {
+    try {
+      addItems(await droppedPaperImportItems(event.dataTransfer));
+    } catch (error) {
+      renderFileImport(error.message);
+    }
+  });
+  dialogBody.append(dropzone);
+
+  if (task.items.length) {
+    const list = node("div", "paper-import-list");
+    task.items.forEach((item, index) => {
+      const size = item.files.reduce((sum, value) => sum + value.file.size, 0);
+      const row = node("div", "paper-import-item");
+      const copy = node("span");
+      copy.append(
+        node("strong", "", item.name),
+        node("small", "", item.kind === "file"
+          ? paperImportSize(size)
+          : `${item.files.length} files · ${paperImportSize(size)}`),
+      );
+      row.append(copy, button("Remove", () => {
+        task.items.splice(index, 1);
+        renderFileImport();
+      }, "button"));
+      list.append(row);
+    });
+    dialogBody.append(list);
+  }
+
+  const roots = state.settings.paperRoots || [];
+  const grid = node("div", "form-grid paper-import-options");
+  grid.append(field("outputDirectory", "Paper collection", {
+    type: "select", value: task.outputDirectory,
+    options: roots.map(value => [value, value]),
+  }));
+  grid.querySelector("select").addEventListener("change", event => {
+    task.outputDirectory = event.target.value;
+  });
+  dialogBody.append(grid);
+  const add = button(
+    `Add ${task.items.length || ""} paper${task.items.length === 1 ? "" : "s"}`.replace("  ", " "),
+    uploadPaperImports,
+    "button primary",
+  );
+  add.disabled = !task.items.length;
+  dialogFooter.replaceChildren(button("Cancel", () => dialog.close()), add);
+}
+
+async function uploadPaperImports() {
+  const task = state.dialog;
+  if (!task || task.kind !== "fileImport" || !task.items.length) return;
+  dialog.setAttribute("aria-busy", "true");
+  dialogFooter.querySelectorAll("button").forEach(value => { value.disabled = true; });
+  let session = null;
+  try {
+    session = await api("/api/paper-imports", { method: "POST", body: {} });
+    const inputs = [];
+    const total = task.items.reduce((sum, item) => sum + item.files.length, 0);
+    let uploaded = 0;
+    for (const [index, item] of task.items.entries()) {
+      const root = `item-${index}/${item.name}`;
+      inputs.push(root);
+      for (const value of item.files) {
+        const path = item.kind === "file" ? root : `${root}/${value.path}`;
+        dialogEyebrow.textContent = `Uploading ${uploaded + 1} of ${total}`;
+        await api(`/api/paper-imports/${session.id}/files?${new URLSearchParams({ path })}`, {
+          method: "POST",
+          body: value.file,
+        });
+        uploaded += 1;
+      }
+    }
+    dialogEyebrow.textContent = "Installing papers";
+    const result = await api(`/api/paper-imports/${session.id}/commit`, {
+      method: "POST",
+      body: { inputs, outputDirectory: task.outputDirectory },
+    });
+    dialog.close();
+    state.dialog = null;
+    showNotice(`Added ${result.papers.length} paper${result.papers.length === 1 ? "" : "s"}.`);
+    const paths = new Set(result.papers.map(value => value.path));
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      await refreshCatalog();
+      const imported = state.catalog.papers.find(paper => paths.has(paper.path));
+      if (imported) {
+        state.selectedPaper = imported.key;
+        syncNavigation({ replace: true });
+        break;
+      }
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+  } catch (error) {
+    if (session) {
+      try {
+        await api(`/api/paper-imports/${session.id}/cancel`, {
+          method: "POST", body: {},
+        });
+      } catch (_) {}
+    }
+    renderFileImport(error.message);
+  } finally {
+    dialog.removeAttribute("aria-busy");
+  }
+}
+
+function openMetadataEditor(paper) {
+  state.dialog = { kind: "metadata", paper };
+  dialogEyebrow.textContent = "Paper metadata";
+  dialogTitle.textContent = "Edit metadata";
+  dialogBody.replaceChildren();
+  const grid = node("div", "form-grid");
+  grid.append(
+    field("title", "Title", {
+      value: paper.metadataComplete || paper.title !== paper.name ? paper.title : "",
+      full: true,
+    }),
+    field("authors", "Authors", {
+      type: "textarea", value: paper.authors.join("\n"), full: true,
+      help: "One author per line, in display order.",
+    }),
+    field("published", "Published", {
+      value: paper.published || "",
+      help: "The paper's original publication or first-submission date. Format: YYYY, YYYY-MM, or YYYY-MM-DD.",
+    }),
+    field("updated", "Revised", {
+      value: paper.updated || "",
+      help: "The paper's latest revision date, such as its newest arXiv version. Format: YYYY, YYYY-MM, or YYYY-MM-DD.",
+    }),
+    field("arxivId", "arXiv ID", {
+      value: paper.arxivId || "", help: "Optional; for example 2608.04410v1.",
+    }),
+    field("doi", "DOI", { value: paper.doi || "" }),
+    field("url", "Canonical URL", { value: paper.url || "", full: true }),
+  );
+  dialogBody.append(grid);
+  dialogFooter.replaceChildren(
+    button("Cancel", () => dialog.close()),
+    button("Save metadata", saveMetadataEditor, "button primary"),
+  );
+  dialog.showModal();
+}
+
+async function saveMetadataEditor() {
+  const editor = state.dialog;
+  if (!editor || editor.kind !== "metadata") return;
+  const values = {};
+  dialogBody.querySelectorAll("[name]").forEach(input => {
+    values[input.name] = input.value;
+  });
+  values.authors = String(values.authors || "")
+    .split("\n").map(value => value.trim()).filter(Boolean);
+  dialogFooter.querySelectorAll("button").forEach(value => {
+    value.disabled = true;
+  });
+  try {
+    const updated = await api("/api/papers/metadata", {
+      method: "POST",
+      body: { path: editor.paper.path, ...values },
+    });
+    Object.assign(editor.paper, updated, {
+      metadataComplete: Boolean(updated.title && updated.authors.length),
+    });
+    dialog.close();
+    state.dialog = null;
+    renderPapers();
+  } catch (error) {
+    dialogFooter.querySelectorAll("button").forEach(value => {
+      value.disabled = false;
+    });
+    dialogBody.querySelector(".error-box")?.remove();
+    dialogBody.prepend(node("div", "error-box", error.message));
+  }
 }
 
 async function setManuscriptPinning(draft, source, pinned, control) {
@@ -2070,7 +2483,7 @@ function renderJobDetail(job) {
   copy.append(node("h1", "", taskActionTitle(job.action)));
   const scope = node("details", "task-scope");
   scope.append(node("summary", "", taskScopeSummary(job)));
-  const targets = job.plan?.targets || job.request?.targets || [];
+  const targets = taskTargets(job);
   if (targets.length) {
     const targetList = node("div", "target-list task-targets");
     targets.forEach(value => targetList.append(targetChip(value)));
@@ -2541,7 +2954,7 @@ function outputRoute(path) {
   }
   const paper = state.catalog.papers.find(
     item => normalizedPath(item.path) === normalizedPath(path) ||
-      pathContains(`${item.path}/analysis`, path),
+      pathContains(item.path, path),
   );
   if (paper) return { tab: "papers", paper };
   for (const manuscript of state.catalog.manuscripts) {
@@ -2666,11 +3079,15 @@ function openOutput(path) {
 }
 
 const actionNames = {
+  download: "Download from arXiv",
+  metadata: "Extract paper metadata",
   analyze: "Analyze papers", triage: "Triage problems", literature: "Search literature",
   solve: "Solve problems", review: "Review attempts", write: "Write paper", revise: "Revise manuscript",
 };
 
 const taskActionTitles = {
+  download: "arXiv download",
+  metadata: "Paper metadata",
   analyze: "Paper analysis",
   triage: "Problem triage",
   literature: "Literature review",
@@ -2685,7 +3102,22 @@ function taskActionTitle(action) {
 }
 
 function taskTargets(job) {
-  return job.plan?.targets || job.request?.targets || [];
+  const planned = job.plan?.targets || job.request?.targets || [];
+  if (planned.length || job.action !== "download") return planned;
+
+  // Older download tasks predate plan-level paper targets. Recover their
+  // scope from reported artifacts so their completed papers remain navigable.
+  const papers = new Map();
+  (job.runs || []).flatMap(run => run.outputs || []).forEach(path => {
+    const paper = state.catalog.papers.find(item => pathContains(item.path, path));
+    if (!paper) return;
+    papers.set(normalizedPath(paper.path), target(
+      "paper",
+      paper.path,
+      reviewModel.paperTitleWithYear(paper.title, paper.published),
+    ));
+  });
+  return [...papers.values()];
 }
 
 function targetCountLabel(targets) {
@@ -2803,6 +3235,7 @@ function checkbox(name, label, help = "", checked = false) {
 
 function promptLabel(action) {
   return {
+    metadata: "Metadata-extractor direction",
     analyze: "Analyzer direction", triage: "Triage direction", literature: "Search direction",
     solve: "Solver direction", review: "Critic direction", write: "Writer direction", revise: "Revision direction",
   }[action];
@@ -2823,7 +3256,10 @@ function openTask(action, targets) {
   ) {
     saved.pinAttempts = targets.some(historicalAttemptTarget);
   }
-  state.dialog = { action, targets, options: saved, storageKey, plan: null };
+  state.dialog = {
+    action, targets, options: saved, storageKey, plan: null,
+    authorSearch: null, authorSelection: new Set(),
+  };
   renderTaskConfiguration();
   dialog.showModal();
 }
@@ -2835,6 +3271,99 @@ function renderTaskTargetChips(task, container) {
   });
 }
 
+function selectedAuthorPaperIds(task) {
+  if (!task.authorSearch) return [];
+  return task.authorSearch.papers
+    .map(paper => paper.id)
+    .filter(id => task.authorSelection.has(id));
+}
+
+function updateAuthorSelectionAction(task) {
+  const selected = selectedAuthorPaperIds(task).length;
+  const action = dialogFooter.querySelector(".primary");
+  if (!action) return;
+  action.disabled = selected === 0;
+  action.textContent = `Review ${selected} download${selected === 1 ? "" : "s"}`;
+}
+
+function arxivAuthorResults(task) {
+  const result = task.authorSearch;
+  const section = node("section", "arxiv-results full");
+  const heading = node("div", "arxiv-results-heading");
+  const displayed = result.papers.length;
+  const summary = displayed === result.totalResults
+    ? `${displayed} paper${displayed === 1 ? "" : "s"}`
+    : `${displayed} of ${result.totalResults} papers`;
+  heading.append(
+    node("div", "", "Search results"),
+    node("small", "", `${summary} for ${result.author}`),
+  );
+  const controls = node("div", "arxiv-results-actions");
+  controls.append(
+    button("Select all", () => {
+      result.papers.forEach(paper => task.authorSelection.add(paper.id));
+      section.querySelectorAll('input[type="checkbox"]').forEach(input => { input.checked = true; });
+      updateAuthorSelectionAction(task);
+    }, "button"),
+    button("Select none", () => {
+      task.authorSelection.clear();
+      section.querySelectorAll('input[type="checkbox"]').forEach(input => { input.checked = false; });
+      updateAuthorSelectionAction(task);
+    }, "button"),
+  );
+  const list = node("div", "arxiv-paper-list");
+  result.papers.forEach(paper => {
+    const row = node("label", "arxiv-paper-choice");
+    const input = node("input");
+    input.type = "checkbox";
+    input.checked = task.authorSelection.has(paper.id);
+    input.addEventListener("change", () => {
+      if (input.checked) task.authorSelection.add(paper.id);
+      else task.authorSelection.delete(paper.id);
+      updateAuthorSelectionAction(task);
+    });
+    const copy = node("span", "arxiv-paper-copy");
+    const date = String(paper.published || "").slice(0, 10);
+    copy.append(
+      node("strong", "", paper.title || paper.id),
+      node("small", "", `${date ? `${date} · ` : ""}arXiv:${paper.id}`),
+      node("small", "", (paper.authors || []).join(", ") || "Authors unavailable"),
+    );
+    row.append(input, copy);
+    list.append(row);
+  });
+  if (!result.papers.length) {
+    list.append(node("p", "", "No papers matched this author search."));
+  }
+  section.append(heading, controls, list);
+  return section;
+}
+
+async function fetchArxivAuthorPapers() {
+  const task = state.dialog;
+  saveDialogOptions();
+  dialogFooter.querySelectorAll("button").forEach(value => { value.disabled = true; });
+  const fetchButton = dialogFooter.querySelector(".primary");
+  if (fetchButton) fetchButton.textContent = "Searching arXiv…";
+  dialog.setAttribute("aria-busy", "true");
+  try {
+    const result = await api("/api/arxiv/author-search", {
+      method: "POST",
+      body: {
+        author: task.options.author || "",
+        limit: task.options.authorLimit || 100,
+      },
+    });
+    task.authorSearch = result;
+    task.authorSelection = new Set(result.papers.map(paper => paper.id));
+    renderTaskConfiguration();
+  } catch (error) {
+    renderTaskConfiguration(error.message);
+  } finally {
+    dialog.removeAttribute("aria-busy");
+  }
+}
+
 function renderTaskConfiguration(errorMessage = "") {
   const task = state.dialog;
   dialogEyebrow.textContent = "Step 1 of 2 · Configure";
@@ -2842,10 +3371,81 @@ function renderTaskConfiguration(errorMessage = "") {
   dialogBody.replaceChildren();
   const targets = node("div", "target-list");
   renderTaskTargetChips(task, targets);
-  dialogBody.append(targets);
+  if (task.targets.length) dialogBody.append(targets);
   if (errorMessage) dialogBody.append(node("div", "error-box", errorMessage));
   const grid = node("div", "form-grid");
   const options = task.options;
+  if (task.action === "download") {
+    const roots = state.settings.paperRoots || [];
+    const acquisition = options.acquisition || "ids";
+    if (!task.authorSearch) {
+      grid.append(field("acquisition", "Find papers by", {
+        type: "select", value: acquisition,
+        options: [["ids", "IDs or URLs"], ["author", "Author name"]],
+      }));
+    }
+    if (acquisition === "ids" && !task.authorSearch) {
+      grid.append(field("papers", "arXiv IDs or URLs", {
+        type: "textarea", value: options.papers || "", full: true,
+        help: "Enter one paper per line. IDs, citations, and arXiv abs/pdf/src/html URLs are accepted.",
+      }));
+    } else if (!task.authorSearch) {
+      grid.append(field("author", "Author name", {
+        value: options.author || "",
+        help: "Author matching is approximate. Search first, then choose individual papers.",
+      }));
+      grid.append(field("authorLimit", "Maximum papers", {
+        type: "number", value: options.authorLimit || 100,
+        help: "Fetch between 1 and 100 results for selection.",
+      }));
+    } else {
+      grid.append(arxivAuthorResults(task));
+    }
+    grid.append(field("outputDirectory", "Paper collection", {
+      type: "select", value: options.outputDirectory || roots[0] || "",
+      options: roots.map(value => [value, value]),
+      help: "The paper directories will be created below this configured root.",
+    }));
+    grid.append(checkbox(
+      "force", "Replace matching downloads",
+      "Re-download files for arXiv directories that already exist.",
+      options.force,
+    ));
+    grid.append(field("priorityLevel", "Scheduling weight", {
+      type: "select", value: options.priorityLevel ?? "0", options: priorityOptions(),
+    }));
+    dialogBody.append(grid);
+    grid.querySelectorAll("input, textarea, select").forEach(input => input.addEventListener("input", saveDialogOptions));
+    const acquisitionInput = grid.querySelector('[name="acquisition"]');
+    acquisitionInput?.addEventListener("change", () => {
+      saveDialogOptions();
+      task.authorSearch = null;
+      task.authorSelection.clear();
+      renderTaskConfiguration();
+    });
+    if (task.authorSearch) {
+      dialogFooter.replaceChildren(
+        button("Search again", () => {
+          task.authorSearch = null;
+          task.authorSelection.clear();
+          renderTaskConfiguration();
+        }),
+        button("Review downloads", reviewTask, "button primary"),
+      );
+      updateAuthorSelectionAction(task);
+    } else if (acquisition === "author") {
+      dialogFooter.replaceChildren(
+        button("Cancel", () => dialog.close()),
+        button("Fetch papers", fetchArxivAuthorPapers, "button primary"),
+      );
+    } else {
+      dialogFooter.replaceChildren(
+        button("Cancel", () => dialog.close()),
+        button("Review download", reviewTask, "button primary"),
+      );
+    }
+    return;
+  }
   grid.append(field("prompt", promptLabel(task.action), {
     type: "textarea", value: options.prompt || "", full: true,
     help: "Added to the standard task instructions without replacing validation safeguards.",
@@ -2876,7 +3476,7 @@ function renderTaskConfiguration(errorMessage = "") {
     }));
     grid.append(field("timeoutMinutes", "Timeout (minutes)", { type: "number", value: options.timeoutMinutes || 120 }));
   }
-  if (["analyze", "triage", "literature", "review"].includes(task.action)) {
+  if (["metadata", "analyze", "triage", "literature", "review"].includes(task.action)) {
     grid.append(checkbox("force", "Force replacement", "Run even if matching current output exists.", options.force));
   }
   if (task.action === "analyze") {
@@ -2960,8 +3560,28 @@ function collectDialogOptions() {
 
 function saveDialogOptions() {
   if (!state.dialog) return;
-  state.dialog.options = collectDialogOptions();
+  const collected = collectDialogOptions();
+  if (state.dialog.action === "download" && state.dialog.authorSearch) {
+    for (const name of ["acquisition", "author", "authorLimit"]) {
+      if (Object.hasOwn(state.dialog.options, name)) {
+        collected[name] = state.dialog.options[name];
+      }
+    }
+  }
+  state.dialog.options = collected;
   sessionStorage.setItem(state.dialog.storageKey, JSON.stringify(state.dialog.options));
+}
+
+function taskRequestOptions(task) {
+  const options = { ...task.options };
+  if (task.action !== "download") return options;
+  if (task.authorSearch) {
+    options.papers = selectedAuthorPaperIds(task).join("\n");
+  }
+  delete options.acquisition;
+  delete options.author;
+  delete options.authorLimit;
+  return options;
 }
 
 async function reviewTask() {
@@ -2977,7 +3597,7 @@ async function reviewTask() {
       body: {
         action: task.action,
         targets: taskTargetsForRequest(task),
-        options: task.options,
+        options: taskRequestOptions(task),
       },
     });
     renderTaskConfirmation();

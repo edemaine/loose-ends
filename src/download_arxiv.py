@@ -19,6 +19,8 @@ import tarfile
 import time
 import xml.etree.ElementTree as ET
 import zipfile
+
+import artifact_reporting
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Callable, Iterable, Mapping
@@ -177,6 +179,11 @@ def directory_name(arxiv_id: str) -> str:
     return f"arXiv-{arxiv_id.replace('/', '_')}"
 
 
+def arxiv_abs_url(arxiv_id: str) -> str:
+    """Return the canonical arXiv abstract URL for an ID or arXiv URL."""
+    return f"https://arxiv.org/abs/{parse_arxiv_id(arxiv_id)}"
+
+
 def open_arxiv_url(url: str, *, pacer: RequestPacer | None = None):
     """Open an arXiv URL after applying the shared request-rate limit."""
     (pacer or DEFAULT_PACER).wait()
@@ -299,6 +306,7 @@ def write_paper_metadata(target_dir: Path, metadata: PaperMetadata) -> Path:
     payload = {
         "schema_version": METADATA_SCHEMA_VERSION,
         "arxiv_id": metadata.arxiv_id,
+        "url": arxiv_abs_url(metadata.arxiv_id),
         "title": metadata.title,
         "authors": list(metadata.authors),
         "published": metadata.published,
@@ -392,6 +400,64 @@ def existing_source_file(target_dir: Path) -> Path | None:
     return next(
         (target_dir / name for name in SOURCE_FILENAMES if (target_dir / name).exists()),
         None,
+    )
+
+
+def content_already_downloaded(arxiv_id: str, output_dir: Path) -> bool:
+    """Return whether both the PDF and source disposition are installed."""
+    target_dir = output_dir / directory_name(arxiv_id)
+    return (target_dir / "paper.pdf").exists() and (
+        (target_dir / "source").is_dir()
+        or (target_dir / PDF_ONLY_MARKER).exists()
+    )
+
+
+def describe_dry_run(
+    arxiv_id: str,
+    output_dir: Path,
+    *,
+    force: bool = False,
+) -> str:
+    """Describe the local work a download would perform without network access."""
+    target_dir = output_dir / directory_name(arxiv_id)
+    pdf_path = target_dir / "paper.pdf"
+    source_dir = target_dir / "source"
+    pdf_only_marker = target_dir / PDF_ONLY_MARKER
+    old_source = existing_source_file(target_dir)
+
+    if force:
+        verb = "re-download" if target_dir.exists() else "download"
+        return (
+            f"Would {verb} arXiv:{arxiv_id} to {target_dir} "
+            "(--force replaces existing content; metadata would be refreshed)"
+        )
+
+    pdf_exists = pdf_path.exists()
+    if source_dir.is_dir():
+        source_state = "source already exists"
+        source_complete = True
+    elif pdf_only_marker.exists():
+        source_state = "already identified as PDF-only"
+        source_complete = True
+    elif source_dir.exists():
+        raise DownloadError(f"source path is not a directory: {source_dir}")
+    elif old_source is not None:
+        source_state = f"existing source package would be processed: {old_source}"
+        source_complete = False
+    else:
+        source_state = "source would be downloaded"
+        source_complete = False
+
+    if pdf_exists and source_complete:
+        return (
+            f"Would skip content download for arXiv:{arxiv_id}: already downloaded "
+            f"at {target_dir} (PDF and {source_state}; metadata would be refreshed)"
+        )
+
+    pdf_state = "PDF already exists" if pdf_exists else "PDF would be downloaded"
+    return (
+        f"Would complete arXiv:{arxiv_id} at {target_dir} "
+        f"({pdf_state}; {source_state}; metadata would be refreshed)"
     )
 
 
@@ -788,6 +854,9 @@ def fetch_papers(
             )
             print(f"Saved metadata: {metadata_path}")
             downloads.append(download)
+            artifact_reporting.report_artifacts(
+                [download.pdf_path, metadata_path]
+            )
         except DownloadError as exc:
             failures.append(PaperFailure(download.arxiv_id, str(exc)))
             print(
@@ -851,12 +920,48 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="replace files that have already been downloaded",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="validate inputs and show target directories without downloading",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.dry_run:
+        seen = set()
+        failed = False
+        pending_count = 0
+        skipped_count = 0
+        output_dir = args.output_dir.expanduser().resolve()
+        for paper in args.papers:
+            try:
+                arxiv_id = parse_arxiv_id(paper)
+            except ValueError as exc:
+                failed = True
+                print(f"error: {paper}: {exc}", file=sys.stderr)
+                continue
+            if arxiv_id in seen:
+                print(f"Skipping duplicate: arXiv:{arxiv_id}")
+                continue
+            seen.add(arxiv_id)
+            try:
+                print(describe_dry_run(arxiv_id, output_dir, force=args.force))
+                if not args.force and content_already_downloaded(arxiv_id, output_dir):
+                    skipped_count += 1
+                else:
+                    pending_count += 1
+            except DownloadError as exc:
+                failed = True
+                print(f"error: {paper}: {exc}", file=sys.stderr)
+        print(
+            f"Dry-run summary: {pending_count} paper(s) would download or complete; "
+            f"{skipped_count} already downloaded and would be skipped."
+        )
+        return 1 if failed else 0
     downloads, failures = fetch_papers(
         args.papers,
         args.output_dir.expanduser(),

@@ -16,10 +16,13 @@ from typing import Iterable
 
 import analyze_papers
 import codex_cli
+import download_arxiv
 import open_problem_common as common
 
 
 ACTIONS = {
+    "download",
+    "metadata",
     "analyze",
     "triage",
     "literature",
@@ -387,6 +390,7 @@ def build_plan(
     allowed_roots: Iterable[Path],
     manuscripts: Path,
     catalog_version: int,
+    paper_roots: Iterable[Path] | None = None,
 ) -> dict:
     if not isinstance(request, dict):
         raise PlanError("invalid task request")
@@ -396,7 +400,11 @@ def build_plan(
     options = request.get("options", {})
     if not isinstance(options, dict):
         raise PlanError("task options must be an object")
-    targets = normalize_targets(
+    allowed_roots = list(allowed_roots)
+    configured_paper_roots = list(
+        allowed_roots if paper_roots is None else paper_roots
+    )
+    targets = [] if action == "download" else normalize_targets(
         request.get("targets"),
         project_root=project_root,
         allowed_roots=allowed_roots,
@@ -407,7 +415,114 @@ def build_plan(
     warnings: list[str] = []
     priority_level = _priority_level(options)
 
-    if action == "analyze":
+    if action == "download":
+        raw_papers = options.get("papers")
+        if isinstance(raw_papers, str):
+            papers = [line.strip() for line in raw_papers.splitlines() if line.strip()]
+        elif isinstance(raw_papers, list):
+            papers = [
+                value.strip()
+                for value in raw_papers
+                if isinstance(value, str) and value.strip()
+            ]
+        else:
+            papers = []
+        if not papers:
+            raise PlanError("enter at least one arXiv ID or URL")
+        if len(papers) > 100:
+            raise PlanError("a workbench download is limited to 100 papers")
+        canonical_papers = []
+        seen_papers = set()
+        for paper in papers:
+            try:
+                arxiv_id = download_arxiv.parse_arxiv_id(paper)
+            except ValueError as exc:
+                raise PlanError(f"invalid arXiv paper {paper!r}: {exc}") from exc
+            if arxiv_id not in seen_papers:
+                canonical_papers.append(arxiv_id)
+                seen_papers.add(arxiv_id)
+        papers = canonical_papers
+        output_value = options.get("outputDirectory")
+        if not isinstance(output_value, str) or not output_value.strip():
+            if not configured_paper_roots:
+                raise PlanError("no paper output directory is configured")
+            output = configured_paper_roots[0].resolve()
+        else:
+            output = Path(output_value).expanduser()
+            if not output.is_absolute():
+                output = project_root / output
+            output = output.resolve()
+        if not _under(output, configured_paper_roots):
+            raise PlanError(
+                f"output directory is outside the configured paper roots: {output}"
+            )
+        targets = [
+            {
+                "kind": "paper",
+                "path": str(
+                    (output / download_arxiv.directory_name(paper)).resolve()
+                ),
+                "label": f"arXiv:{paper}",
+            }
+            for paper in papers
+        ]
+        argv = [
+            python,
+            "-u",
+            str(script / "download_arxiv.py"),
+            *papers,
+            "--output-dir",
+            str(output),
+        ]
+        paper_label = f"{len(papers)} paper{'s' if len(papers) != 1 else ''}"
+        label = f"Download {paper_label} from arXiv"
+        paper_resources = {
+            f"paper:{output / download_arxiv.directory_name(candidate)}"
+            for paper in papers
+            for candidate in download_arxiv.version_candidates(paper)
+        }
+        if options.get("force") is True:
+            argv.append("--force")
+            warnings.append(
+                "Forced downloads replace matching arXiv PDF, source, and metadata files."
+            )
+        units.append(
+            _unit(
+                label=label,
+                argv=argv,
+                project_root=project_root,
+                # Keep fallback-version resources intact. Plan-level targets
+                # provide navigation once the downloaded papers enter the catalog.
+                targets=[],
+                additional_resources=paper_resources,
+            )
+        )
+
+    elif action == "metadata":
+        _require(targets, {"paper"}, action)
+        for target in targets:
+            argv = [
+                python,
+                "-u",
+                str(script / "extract_paper_metadata.py"),
+                target["path"],
+            ]
+            _common_arguments(argv, options)
+            if options.get("force") is True:
+                argv.append("--force")
+                warnings.append(
+                    "Forced extraction replaces title, authors, and extracted dates."
+                )
+            units.append(
+                _unit(
+                    label=f"Extract metadata for {target['label']}",
+                    argv=argv,
+                    project_root=project_root,
+                    targets=[target],
+                )
+            )
+
+    elif action == "analyze":
         _require(targets, {"paper"}, action)
         for target in targets:
             path = Path(target["path"])
@@ -609,6 +724,8 @@ def build_plan(
     single_paper_title = _single_paper_problem_title(targets)
     if single_paper_title:
         scope_title = f"{len(targets)} problems in {single_paper_title}"
+    elif action == "download":
+        scope_title = units[0]["label"].removeprefix("Download ")
     else:
         scope_title = ", ".join(target["label"] for target in targets[:3])
         if len(targets) > 3:

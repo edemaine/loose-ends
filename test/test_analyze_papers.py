@@ -105,6 +105,13 @@ class PaperDiscoveryTests(unittest.TestCase):
             self.assertEqual(direct, [first.resolve()])
             self.assertEqual(nested, sorted([first.resolve(), second.resolve()]))
 
+    def test_discovers_non_arxiv_paper_directories(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = make_paper(root / "publisher", "conference-paper-2025")
+
+            self.assertEqual(discover_paper_directories([root]), [paper.resolve()])
+
     def test_rejects_a_directory_without_downloaded_papers(self):
         with TemporaryDirectory() as temporary:
             with self.assertRaises(AnalysisError):

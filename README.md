@@ -81,8 +81,12 @@ directory as-is. `metadata.json` records the resolved arXiv ID, title, ordered
 authors, and publication/update timestamps from the arXiv API. Existing
 downloads are left untouched; pass `--force` to replace them. If an earlier run
 left a source archive beside `paper.pdf`, the next run extracts and removes it
-without downloading it again. A batch continues after an invalid ID or failed
-download and exits with a failure status after reporting the final counts. When
+without downloading it again. `--dry-run` inspects the output directory and
+distinguishes new or partial downloads from papers whose PDF and source (or
+PDF-only marker) are already present and would be skipped, then summarizes both
+counts. A batch continues
+after an invalid ID or failed download and exits with a failure status after
+reporting the final counts. When
 anything fails, the last output line lists the failed IDs separated by spaces
 so they can be pasted into a retry command:
 
@@ -109,9 +113,9 @@ PDF-only IDs: 1201.1650v1
 
 Both current IDs and pre-2007 IDs are accepted. Because legacy IDs contain a
 slash, the slash is replaced with an underscore in the directory name (for
-example, `hep-th/9901001` is saved under `arXiv-hep-th_9901001/`). Every
-directory starts with `arXiv-` so papers from future downloaders can be
-distinguished by source.
+example, `hep-th/9901001` is saved under `arXiv-hep-th_9901001/`). ArXiv
+directories start with `arXiv-`; papers acquired elsewhere may use any safe,
+unique directory name.
 
 Every network request—API, PDF, or source—is started at least three seconds
 after the previous request. Already-downloaded files do not cause a delay.
@@ -154,6 +158,104 @@ people, and arXiv may match initials or alternate forms of a name. The listing
 includes every paper's full author list so the result set can be checked before
 downloading.
 
+## Ingest arbitrary papers
+
+All acquisition paths meet at one source-neutral on-disk contract. An installed
+paper is any directory containing `paper.pdf` and/or `source/`:
+
+```text
+papers/<collection>/<stable-name>/
+├── paper.pdf              # recommended; rendered paper
+├── metadata.json          # recommended; title/authors before analysis
+└── source/                # optional TeX, figures, data, or other source files
+```
+
+Use `src/ingest_paper.py` for a publisher PDF, scan, proceedings copy, private
+draft, or any other local paper. It validates the PDF, copies inputs through a
+temporary directory, writes normalized metadata and provenance, and refuses to
+overwrite an existing paper:
+
+```sh
+python src/ingest_paper.py ~/Downloads/folding-paper.pdf \
+  --output-dir papers/edemaine \
+  --source ~/src/folding-paper
+```
+
+For the common metadata-later workflow, pass any number of PDF files, ZIP or
+tar.gz archives, and/or source directories. Each input becomes one paper with
+blank title and authors:
+
+```sh
+python src/ingest_paper.py ~/Downloads/first.pdf ~/Downloads/second.zip \
+  ~/src/third-paper --output-dir papers/edemaine
+```
+
+A PDF input is installed under a name derived from its filename. A directory
+input is copied wholesale under `source/` and uses its directory name. ZIP,
+`.tar.gz`, and `.tgz` inputs behave like directories and use the archive name;
+the maximal directory prefix shared by all archived files is discarded first.
+Archive extraction rejects absolute and `..` paths, backslash paths, links,
+special files, duplicate paths, excessive entry counts, and excessive expanded
+size. The compiled PDF is selected by looking for root `paper.pdf`, then root
+`main.pdf`, then exactly one root PDF whose filename stem matches a root `.tex`
+file. Nested files are never candidates. No match or multiple matches is an
+error; the importer does not guess. Metadata, `--name`, and an explicit
+`--source` remain available in the detailed single-PDF mode shown below.
+
+Title and author flags are optional. When omitted, the paper is installed
+immediately with blank `title` and `authors` fields. In the workbench Papers
+tab, select the new paper and choose **Extract metadata** to run a separate,
+managed Codex task. The extractor reads `paper.pdf` plus `source/` when present,
+returns schema-constrained title/authors/dates, and preserves local provenance
+and source-specific identifiers. Its dry run, logs, retry behavior, model
+settings, and optional extra prompt are visible like any other managed task.
+
+For metadata that needs correction—or when no model call is desirable—choose
+**Edit metadata** in the Papers tab. The editor updates title, ordered authors,
+publication/update dates, arXiv ID, canonical URL, and DOI while preserving
+unknown fields such as `provenance`.
+
+Metadata can still be supplied at ingestion time:
+
+```sh
+python src/ingest_paper.py ~/Downloads/folding-paper.pdf \
+  --output-dir papers/edemaine \
+  --name folding-paper-2025 \
+  --title "A Folding Paper" \
+  --author "Ada Lovelace" \
+  --author "Alan Turing" \
+  --published 2025-06-01 \
+  --url https://example.org/folding-paper \
+  --doi 10.1234/example.42 \
+  --source ~/src/folding-paper
+```
+
+`--name` defaults to the PDF filename stem. `--source` may be one file or a
+directory; omit it for a PDF-only paper. Use `--dry-run` to inspect the target
+and normalized metadata without writing. Once installed below a paper root,
+the live workbench discovers the paper automatically and offers the same
+analysis and downstream actions as it does for an arXiv paper.
+
+For a hand-built or programmatic importer, create the same directory directly.
+`metadata.json` uses this minimal interoperable shape:
+
+```json
+{
+  "schema_version": 1,
+  "title": "A Folding Paper",
+  "authors": ["Ada Lovelace", "Alan Turing"],
+  "published": "2025-06-01",
+  "updated": "2025-06-01"
+}
+```
+
+`title` and ordered `authors` are strongly recommended so the paper is useful
+in the catalog before analysis. `published` and `updated` are optional ISO 8601
+dates or timestamps. Importers may add source-specific identifiers and
+provenance (for example `arxiv_id`, `doi`, `url`, or `provenance`); consumers
+ignore unknown fields. Directory names do not encode semantics and need only be
+unique within their collection.
+
 ## Analyze papers with Codex
 
 `src/analyze_papers.py` starts one non-interactive Codex CLI agent per paper.
@@ -188,8 +290,8 @@ codex login
 python src/analyze_papers.py papers/edemaine/arXiv-0705.4085v1
 ```
 
-A parent directory is searched recursively for downloaded `arXiv-*`
-directories. Run several independent paper agents concurrently with `--jobs`:
+A parent directory is searched recursively for installed paper directories.
+Run several independent paper agents concurrently with `--jobs`:
 
 ```sh
 python src/analyze_papers.py papers/edemaine --jobs 4
@@ -816,6 +918,28 @@ and checks the filesystem in the background; a corrupt cache or one belonging
 to different paper roots is ignored. Unchanged freshness digests are also
 reused within the running server, while changed file metadata invalidates the
 corresponding digest automatically.
+
+The Papers view has **Add from arXiv** and **Add from files** actions. The file
+importer accepts multiple dragged PDF files, ZIP/tar.gz archives, and/or folders, shows the selected
+inputs and destination paper collection, and uses the same compiled-PDF rules
+as `src/ingest_paper.py`. Imported papers are installed with blank metadata,
+then selected in the Papers view so **Extract metadata** can populate them.
+
+For arXiv, enter IDs or arXiv URLs (one
+per line), or search by author with a result limit. Author search runs
+immediately and presents checked-by-default results so unwanted papers can be
+deselected. The final selection is converted to concrete arXiv IDs before the
+normal two-step task confirmation. Choose one of the configured paper roots,
+review the exact downloader command and dry-run output, and start it as a
+persistent managed task. Its logs, retry controls, and scheduler behavior match
+the analysis tasks. For local files, the browser importer or
+`src/ingest_paper.py` installs the same documented directory contract; the
+filesystem watcher adds the paper to the catalog without a workbench restart.
+Blank title/author metadata
+can then be populated with the managed **Extract metadata** action, and all
+paper metadata can be corrected directly with **Edit metadata**.
+This editor includes the arXiv ID and canonical URL as separate fields, so
+arXiv provenance can be corrected without preventing a journal or project URL.
 
 The four top-level views have reloadable paths: `/research`, `/papers`,
 `/manuscripts`, and `/activity`. Their query strings capture the complete

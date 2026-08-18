@@ -145,11 +145,28 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="replace files that have already been downloaded",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="validate the query and show the destination without searching",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.dry_run:
+        try:
+            query = author_query(args.author)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        limit = f", limited to {args.limit} result(s)" if args.limit else ""
+        print(
+            f"Would search arXiv for {query}{limit} and download to "
+            f"{args.output_dir.expanduser().resolve()}"
+        )
+        return 0
     pacer = download_arxiv.RequestPacer()
 
     try:

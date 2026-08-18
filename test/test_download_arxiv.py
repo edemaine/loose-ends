@@ -108,6 +108,96 @@ class ParseArxivIdTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_arxiv_id("attention is all you need")
 
+    def test_cli_dry_run_validates_without_network(self):
+        output = StringIO()
+        with TemporaryDirectory() as temporary, redirect_stdout(output):
+            status = download_arxiv.main(
+                ["1706.03762", "--output-dir", temporary, "--dry-run"]
+            )
+        self.assertEqual(status, 0)
+        self.assertIn("Would complete arXiv:1706.03762", output.getvalue())
+        self.assertIn("arXiv-1706.03762", output.getvalue())
+        self.assertIn(
+            "Dry-run summary: 1 paper(s) would download or complete; "
+            "0 already downloaded and would be skipped.",
+            output.getvalue(),
+        )
+
+    def test_cli_dry_run_reports_complete_download_would_be_skipped(self):
+        output = StringIO()
+        with TemporaryDirectory() as temporary:
+            paper = Path(temporary) / "arXiv-1706.03762"
+            (paper / "source").mkdir(parents=True)
+            (paper / "paper.pdf").write_bytes(b"%PDF-test")
+            with redirect_stdout(output):
+                status = download_arxiv.main(
+                    ["1706.03762", "--output-dir", temporary, "--dry-run"]
+                )
+
+        self.assertEqual(status, 0)
+        self.assertIn(
+            "Would skip content download for arXiv:1706.03762: already downloaded",
+            output.getvalue(),
+        )
+        self.assertIn("metadata would be refreshed", output.getvalue())
+        self.assertIn(
+            "Dry-run summary: 0 paper(s) would download or complete; "
+            "1 already downloaded and would be skipped.",
+            output.getvalue(),
+        )
+
+    def test_cli_dry_run_reports_pdf_only_download_would_be_skipped(self):
+        output = StringIO()
+        with TemporaryDirectory() as temporary:
+            paper = Path(temporary) / "arXiv-1706.03762"
+            paper.mkdir()
+            (paper / "paper.pdf").write_bytes(b"%PDF-test")
+            (paper / "PDF_ONLY").write_text("no source\n", encoding="utf-8")
+            with redirect_stdout(output):
+                status = download_arxiv.main(
+                    ["1706.03762", "--output-dir", temporary, "--dry-run"]
+                )
+
+        self.assertEqual(status, 0)
+        self.assertIn("Would skip content download", output.getvalue())
+        self.assertIn("already identified as PDF-only", output.getvalue())
+
+    def test_cli_dry_run_reports_partial_download_would_be_completed(self):
+        output = StringIO()
+        with TemporaryDirectory() as temporary:
+            paper = Path(temporary) / "arXiv-1706.03762"
+            paper.mkdir()
+            (paper / "paper.pdf").write_bytes(b"%PDF-test")
+            with redirect_stdout(output):
+                status = download_arxiv.main(
+                    ["1706.03762", "--output-dir", temporary, "--dry-run"]
+                )
+
+        self.assertEqual(status, 0)
+        self.assertIn("Would complete arXiv:1706.03762", output.getvalue())
+        self.assertIn("PDF already exists", output.getvalue())
+        self.assertIn("source would be downloaded", output.getvalue())
+
+    def test_cli_dry_run_reports_force_would_replace_existing_content(self):
+        output = StringIO()
+        with TemporaryDirectory() as temporary:
+            paper = Path(temporary) / "arXiv-1706.03762"
+            paper.mkdir()
+            with redirect_stdout(output):
+                status = download_arxiv.main(
+                    [
+                        "1706.03762",
+                        "--output-dir",
+                        temporary,
+                        "--force",
+                        "--dry-run",
+                    ]
+                )
+
+        self.assertEqual(status, 0)
+        self.assertIn("Would re-download arXiv:1706.03762", output.getvalue())
+        self.assertIn("--force replaces existing content", output.getvalue())
+
 
 class RequestPacerTests(unittest.TestCase):
     def test_waits_between_requests_but_not_before_first(self):
@@ -242,6 +332,10 @@ class SourceExtractionTests(unittest.TestCase):
             self.assertEqual(
                 metadata["authors"],
                 ["Ada Lovelace", "Alan Turing"],
+            )
+            self.assertEqual(
+                metadata["url"],
+                "https://arxiv.org/abs/1706.03762",
             )
 
 

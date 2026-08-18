@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Analyze downloaded papers with independent non-interactive Codex runs."""
+"""Analyze installed papers with independent non-interactive Codex runs."""
 
 from __future__ import annotations
 
@@ -55,7 +55,7 @@ class AnalysisOutcome:
 
 
 def is_paper_directory(path: Path) -> bool:
-    """Return whether ``path`` looks like one downloaded paper directory."""
+    """Return whether ``path`` looks like one installed paper directory."""
     return path.is_dir() and (
         (path / "paper.pdf").is_file() or (path / "source").exists()
     )
@@ -78,18 +78,14 @@ def discover_paper_directories(paths: Iterable[Path]) -> list[Path]:
 
         for directory, child_names, _ in os.walk(path):
             candidate = Path(directory)
-            if (
-                candidate != path
-                and candidate.name.startswith("arXiv-")
-                and is_paper_directory(candidate)
-            ):
+            if candidate != path and is_paper_directory(candidate):
                 resolved = candidate.resolve()
                 papers[os.path.normcase(str(resolved))] = resolved
-                # Paper internals cannot contain another downloaded paper.
+                # Paper internals cannot contain another installed paper.
                 child_names.clear()
 
     if not papers:
-        raise AnalysisError("no downloaded paper directories were found")
+        raise AnalysisError("no installed paper directories were found")
     return sorted(papers.values(), key=lambda item: os.path.normcase(str(item)))
 
 
@@ -637,7 +633,7 @@ read_codex_version = codex_cli.read_codex_version
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "use independent Codex CLI runs to analyze downloaded research papers"
+            "use independent Codex CLI runs to analyze installed research papers"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""examples:
@@ -655,7 +651,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help=(
             "paper directories, or parent directories to search recursively for "
-            "arXiv-* paper directories"
+            "installed paper directories"
         ),
     )
     parser.add_argument(

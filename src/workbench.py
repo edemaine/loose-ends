@@ -11,9 +11,10 @@ import ipaddress
 import json
 import mimetypes
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import secrets
+import shutil
 import socket
 import subprocess
 import sys
@@ -28,7 +29,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import analyze_papers
 import codex_cli
+import download_arxiv
+import download_arxiv_author
 import human_review
+import ingest_paper
 import open_problem_common as common
 import review_solutions
 import write_paper
@@ -67,10 +71,15 @@ IGNORED_PREFIXES = (
     ".literature-install-",
     ".draft-install-",
     ".paper-review-install-",
+    ".paper-install-",
     ".triage-install-",
 )
 DRAFT_RE = re.compile(r"^draft-([0-9]{3,})$")
 CATALOG_CACHE_SCHEMA_VERSION = 2
+PAPER_IMPORT_MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024
+PAPER_IMPORT_MAX_TOTAL_BYTES = 4 * 1024 * 1024 * 1024
+PAPER_IMPORT_MAX_FILES = 20_000
+PAPER_IMPORT_TTL_SECONDS = 60 * 60
 CATALOG_FILE_NAMES = {
     "metadata.json",
     "paper.pdf",
@@ -201,8 +210,8 @@ def _paper_metadata(
         analysis = _read_json(paper / "analysis" / "manifest.json")
     if metadata is None:
         metadata = _read_json(paper / "metadata.json")
-    title = analysis.get("paper_title") or metadata.get("title") or paper.name
-    authors = analysis.get("paper_authors") or metadata.get("authors") or []
+    title = metadata.get("title") or analysis.get("paper_title") or paper.name
+    authors = metadata.get("authors") or analysis.get("paper_authors") or []
     if not isinstance(authors, list):
         authors = []
     return str(title), [str(author) for author in authors]
@@ -211,6 +220,19 @@ def _paper_metadata(
 def _url_key(path: Path) -> str:
     """Return the same portable project-relative identity used by reviews."""
     return human_review.project_display_path(path)
+
+
+def _paper_url(metadata: dict) -> str:
+    url = metadata.get("url", "")
+    if isinstance(url, str) and url.strip():
+        return url
+    arxiv_id = metadata.get("arxiv_id", "")
+    if isinstance(arxiv_id, str) and arxiv_id.strip():
+        try:
+            return download_arxiv.arxiv_abs_url(arxiv_id)
+        except ValueError:
+            pass
+    return ""
 
 
 def _paper_inventory(paths: Iterable[Path]) -> list[dict]:
@@ -236,10 +258,21 @@ def _paper_inventory(paths: Iterable[Path]) -> list[dict]:
                 "authors": authors,
                 "published": timeline["published"],
                 "updated": timeline["updated"],
+                "arxivId": metadata.get("arxiv_id", "")
+                if isinstance(metadata.get("arxiv_id", ""), str) else "",
+                "url": _paper_url(metadata),
+                "doi": metadata.get("doi", "")
+                if isinstance(metadata.get("doi", ""), str) else "",
                 "activityTimestamp": timeline["activityTimestamp"],
                 "analyzed": bool(manifest),
                 "problemCount": len(manifest.get("open_problems", [])),
                 "analysisStatus": manifest.get("status", ""),
+                "metadataComplete": bool(
+                    isinstance(metadata.get("title"), str)
+                    and metadata["title"].strip()
+                    and isinstance(metadata.get("authors"), list)
+                    and metadata["authors"]
+                ),
                 "files": [
                     str(path)
                     for path in (
@@ -1076,6 +1109,19 @@ class Scheduler:
         self.thread.join(timeout=5)
 
 
+def _paper_import_relative_path(value: str) -> Path:
+    if not value or len(value) > 2048 or "\\" in value or "\0" in value:
+        raise PlanError("invalid uploaded file path")
+    relative = PurePosixPath(value)
+    if (
+        relative.is_absolute()
+        or len(relative.parts) > 64
+        or any(part in {"", ".", ".."} for part in relative.parts)
+    ):
+        raise PlanError("invalid uploaded file path")
+    return Path(*relative.parts)
+
+
 class WorkbenchApplication:
     def __init__(
         self,
@@ -1085,6 +1131,10 @@ class WorkbenchApplication:
         state_directory: Path,
     ):
         self.paths = paths
+        self.paper_output_roots = [
+            path for path in paths
+            if not analyze_papers.is_paper_directory(path)
+        ]
         self.manuscripts = manuscripts
         self.state_directory = state_directory
         self.allowed_roots = [*paths, manuscripts]
@@ -1108,6 +1158,11 @@ class WorkbenchApplication:
         self.plans: dict[str, dict] = {}
         self.plan_lock = threading.Lock()
         self.manuscript_lock = threading.Lock()
+        self.metadata_lock = threading.Lock()
+        self.paper_import_lock = threading.Lock()
+        self.paper_imports: dict[str, dict] = {}
+        self.arxiv_search_lock = threading.Lock()
+        self.arxiv_pacer = download_arxiv.RequestPacer()
         self.observer = None
 
     def start_watching(self) -> None:
@@ -1147,6 +1202,7 @@ class WorkbenchApplication:
             allowed_roots=self.allowed_roots,
             manuscripts=self.manuscripts,
             catalog_version=self.catalog.version,
+            paper_roots=self.paper_output_roots,
         )
         populate_dry_run_previews(plan)
         with self.plan_lock:
@@ -1173,6 +1229,236 @@ class WorkbenchApplication:
         self.scheduler.schedule()
         self.hub.publish("tasks.changed")
         return job
+
+    def search_arxiv_author(self, request: dict) -> dict:
+        author = request.get("author")
+        if not isinstance(author, str) or not author.strip():
+            raise PlanError("author is required")
+        raw_limit = request.get("limit", 100)
+        if isinstance(raw_limit, bool):
+            raise PlanError("limit must be an integer from 1 to 100")
+        try:
+            limit = int(raw_limit)
+        except (TypeError, ValueError) as exc:
+            raise PlanError("limit must be an integer from 1 to 100") from exc
+        if not 1 <= limit <= 100:
+            raise PlanError("limit must be an integer from 1 to 100")
+        try:
+            with self.arxiv_search_lock:
+                result = download_arxiv_author.search_author(
+                    author,
+                    limit=limit,
+                    pacer=self.arxiv_pacer,
+                )
+        except (ValueError, download_arxiv.DownloadError) as exc:
+            raise PlanError(str(exc)) from exc
+        return {
+            "author": result.author,
+            "totalResults": result.total_results,
+            "papers": [
+                {
+                    "id": paper.arxiv_id,
+                    "title": paper.title,
+                    "authors": list(paper.authors),
+                    "published": paper.published,
+                    "updated": paper.updated,
+                }
+                for paper in result.papers
+            ],
+        }
+
+    def create_paper_import(self) -> dict:
+        now = time.time()
+        expired: list[Path] = []
+        with self.paper_import_lock:
+            for key, value in list(self.paper_imports.items()):
+                if value["created"] < now - PAPER_IMPORT_TTL_SECONDS:
+                    expired.append(value["path"])
+                    self.paper_imports.pop(key, None)
+            self.state_directory.mkdir(parents=True, exist_ok=True)
+            import_id = secrets.token_urlsafe(18)
+            staging = Path(tempfile.mkdtemp(
+                prefix=".paper-upload-",
+                dir=self.state_directory,
+            ))
+            self.paper_imports[import_id] = {
+                "path": staging,
+                "created": now,
+                "bytes": 0,
+                "files": 0,
+            }
+        for path in expired:
+            shutil.rmtree(path, ignore_errors=True)
+        return {"id": import_id}
+
+    def upload_paper_import_file(
+        self,
+        import_id: str,
+        relative_value: str,
+        source,
+        length: int,
+    ) -> dict:
+        if length < 0 or length > PAPER_IMPORT_MAX_FILE_BYTES:
+            raise PlanError("uploaded file is too large")
+        relative = _paper_import_relative_path(relative_value)
+        with self.paper_import_lock:
+            session = self.paper_imports.get(import_id)
+            if session is None:
+                raise PlanError("paper import expired; choose the files again")
+            if session["files"] >= PAPER_IMPORT_MAX_FILES:
+                raise PlanError("paper import contains too many files")
+            if session["bytes"] + length > PAPER_IMPORT_MAX_TOTAL_BYTES:
+                raise PlanError("paper import is too large")
+            destination = session["path"] / relative
+            if destination.exists():
+                raise PlanError(f"duplicate uploaded path: {relative_value}")
+            session["files"] += 1
+            session["bytes"] += length
+
+        temporary = destination.with_name(destination.name + ".part")
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            remaining = length
+            with temporary.open("xb") as output:
+                while remaining:
+                    chunk = source.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        raise PlanError("incomplete uploaded file")
+                    output.write(chunk)
+                    remaining -= len(chunk)
+            os.replace(temporary, destination)
+        except Exception as exc:
+            temporary.unlink(missing_ok=True)
+            with self.paper_import_lock:
+                current = self.paper_imports.get(import_id)
+                if current is session:
+                    session["files"] -= 1
+                    session["bytes"] -= length
+            if isinstance(exc, PlanError):
+                raise
+            raise PlanError(f"could not store uploaded file: {exc}") from exc
+        return {"path": relative_value, "size": length}
+
+    def commit_paper_import(self, import_id: str, request: dict) -> dict:
+        output_value = request.get("outputDirectory")
+        if not isinstance(output_value, str) or not output_value:
+            raise PlanError("paper collection is required")
+        output = Path(output_value).expanduser().resolve()
+        if not any(output == root.resolve() for root in self.paper_output_roots):
+            raise PlanError("paper collection is not a configured paper root")
+        input_values = request.get("inputs")
+        if not isinstance(input_values, list) or not input_values:
+            raise PlanError("at least one PDF, archive, or directory is required")
+        if not all(isinstance(value, str) for value in input_values):
+            raise PlanError("paper import inputs must be paths")
+
+        with self.paper_import_lock:
+            session = self.paper_imports.pop(import_id, None)
+        if session is None:
+            raise PlanError("paper import expired; choose the files again")
+        staging: Path = session["path"]
+        try:
+            inputs = [staging / _paper_import_relative_path(value) for value in input_values]
+            if any(not path.exists() for path in inputs):
+                raise PlanError("paper import is missing an uploaded input")
+            try:
+                targets = ingest_paper.ingest_inputs(inputs, output)
+            except ingest_paper.IngestError as exc:
+                raise PlanError(str(exc)) from exc
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+        self.catalog.schedule()
+        return {
+            "papers": [
+                {"path": str(path), "urlKey": _url_key(path)}
+                for path in targets
+            ]
+        }
+
+    def discard_paper_import(self, import_id: str) -> dict:
+        with self.paper_import_lock:
+            session = self.paper_imports.pop(import_id, None)
+        if session is not None:
+            shutil.rmtree(session["path"], ignore_errors=True)
+        return {"discarded": session is not None}
+
+    def update_paper_metadata(self, request: dict) -> dict:
+        value = request.get("path")
+        if not isinstance(value, str) or not value:
+            raise PlanError("paper path is required")
+        paper = Path(value).expanduser().resolve()
+        if not any(_relative_to(paper, root.resolve()) for root in self.paths):
+            raise PlanError("paper is outside the configured paper directories")
+        if not analyze_papers.is_paper_directory(paper):
+            raise PlanError("paper directory is unavailable")
+
+        title = request.get("title", "")
+        authors = request.get("authors", [])
+        if not isinstance(title, str):
+            raise PlanError("title must be text")
+        if not isinstance(authors, list) or not all(
+            isinstance(author, str) for author in authors
+        ):
+            raise PlanError("authors must be an array of names")
+        authors = [author.strip() for author in authors if author.strip()]
+        if len(set(authors)) != len(authors):
+            raise PlanError("authors must not contain duplicates")
+
+        arxiv_id = request.get("arxivId", "")
+        if not isinstance(arxiv_id, str):
+            raise PlanError("arXiv ID must be text")
+        arxiv_id = arxiv_id.strip()
+        if arxiv_id:
+            try:
+                arxiv_id = download_arxiv.parse_arxiv_id(arxiv_id)
+            except ValueError as exc:
+                raise PlanError(str(exc)) from exc
+
+        fields = {
+            "title": title.strip(),
+            "authors": authors,
+            "arxiv_id": arxiv_id,
+        }
+        for name in ("published", "updated"):
+            raw = request.get(name, "")
+            if not isinstance(raw, str):
+                raise PlanError(f"{name} must be text")
+            normalized = raw.strip()
+            if normalized and not ingest_paper.is_iso8601_date_or_timestamp(normalized):
+                raise PlanError(
+                    f"{name} must be an ISO 8601 date or timestamp"
+                )
+            fields[name] = normalized
+        for name in ("url", "doi"):
+            raw = request.get(name, "")
+            if not isinstance(raw, str):
+                raise PlanError(f"{name} must be text")
+            fields[name] = raw.strip()
+
+        metadata_path = paper / "metadata.json"
+        temporary = metadata_path.with_name("metadata.json.tmp")
+        try:
+            with self.metadata_lock:
+                try:
+                    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                except FileNotFoundError:
+                    metadata = {}
+                if not isinstance(metadata, dict):
+                    raise PlanError("paper metadata is not a JSON object")
+                metadata.setdefault("schema_version", 1)
+                metadata.update(fields)
+                temporary.write_text(
+                    json.dumps(metadata, indent=2, ensure_ascii=False) + "\n",
+                    encoding="utf-8",
+                )
+                os.replace(temporary, metadata_path)
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            temporary.unlink(missing_ok=True)
+            raise PlanError(f"could not update paper metadata: {exc}") from exc
+        self.catalog.schedule()
+        result = {"path": str(paper), **fields}
+        result["arxivId"] = result.pop("arxiv_id")
+        return result
 
     def set_manuscript_pinning(self, request: dict) -> dict:
         draft_value = request.get("draft")
@@ -1216,6 +1502,11 @@ class WorkbenchApplication:
         if self.observer is not None:
             self.observer.stop()
             self.observer.join(timeout=5)
+        with self.paper_import_lock:
+            imports = [value["path"] for value in self.paper_imports.values()]
+            self.paper_imports.clear()
+        for path in imports:
+            shutil.rmtree(path, ignore_errors=True)
         self.scheduler.close()
         self.catalog.close()
 
@@ -1404,6 +1695,9 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                         "settings": {
                             **self.app.store.scheduler_settings(),
                             "projectRoot": str(PROJECT_ROOT),
+                            "paperRoots": [
+                                str(path) for path in self.app.paper_output_roots
+                            ],
                         },
                     }
                 )
@@ -1457,11 +1751,52 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
             return
         parsed = urlsplit(self.path)
         try:
+            upload_match = re.fullmatch(
+                r"/api/paper-imports/([A-Za-z0-9_-]+)/files",
+                parsed.path,
+            )
+            if upload_match:
+                if not self.require_mutation_auth():
+                    return
+                try:
+                    length = int(self.headers.get("Content-Length", "-1"))
+                except ValueError as exc:
+                    self.close_connection = True
+                    raise PlanError("invalid content length") from exc
+                relative = parse_qs(parsed.query).get("path", [""])[0]
+                try:
+                    result = self.app.upload_paper_import_file(
+                        upload_match.group(1),
+                        relative,
+                        self.rfile,
+                        length,
+                    )
+                except Exception:
+                    self.close_connection = True
+                    raise
+                self.send_json(result, 201)
+                return
             body = self.read_json()
             if not self.require_mutation_auth():
                 return
             if parsed.path == "/api/plans":
                 self.send_json(self.app.create_plan(body), 201)
+            elif parsed.path == "/api/paper-imports":
+                self.send_json(self.app.create_paper_import(), 201)
+            elif match := re.fullmatch(
+                r"/api/paper-imports/([A-Za-z0-9_-]+)/commit",
+                parsed.path,
+            ):
+                self.send_json(self.app.commit_paper_import(match.group(1), body), 201)
+            elif match := re.fullmatch(
+                r"/api/paper-imports/([A-Za-z0-9_-]+)/cancel",
+                parsed.path,
+            ):
+                self.send_json(self.app.discard_paper_import(match.group(1)))
+            elif parsed.path == "/api/arxiv/author-search":
+                self.send_json(self.app.search_arxiv_author(body))
+            elif parsed.path == "/api/papers/metadata":
+                self.send_json(self.app.update_paper_metadata(body))
             elif parsed.path == "/api/jobs":
                 plan_id = body.get("planId")
                 if not isinstance(plan_id, str):

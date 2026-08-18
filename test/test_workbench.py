@@ -276,6 +276,26 @@ class WorkbenchPlanningTests(unittest.TestCase):
         self.assertIn('since: String(state.eventSequence || 0)', app)
         self.assertIn('result.code === "invalid_confirmation_token"', app)
         self.assertIn('await api("/api/bootstrap", {}, false)', app)
+        self.assertIn('api("/api/arxiv/author-search"', app)
+        self.assertIn('"Add from files", openFileImport', app)
+        self.assertIn('function droppedPaperImportItems(transfer)', app)
+        self.assertIn('api("/api/paper-imports"', app)
+        self.assertIn('/files?${new URLSearchParams({ path })}', app)
+        self.assertIn('/commit`, {', app)
+        self.assertIn("function arxivAuthorResults(task)", app)
+        self.assertIn("selectedAuthorPaperIds(task)", app)
+        self.assertIn('paper.metadataComplete ? "Extract metadata again"', app)
+        self.assertIn('button("Edit metadata", () => openMetadataEditor(paper)', app)
+        self.assertIn('api("/api/papers/metadata"', app)
+        self.assertIn('field("arxivId", "arXiv ID"', app)
+        self.assertIn('field("updated", "Revised"', app)
+        self.assertIn('node("strong", "", "Revised")', app)
+        self.assertIn("Format: YYYY, YYYY-MM, or YYYY-MM-DD", app)
+        self.assertIn('`arXiv:${paper.arxivId}`', app)
+        self.assertIn('node("div", "paper-dates")', app)
+        self.assertIn('node("strong", "", "Published")', app)
+        self.assertIn('paper.updated !== paper.published', app)
+        self.assertIn('node("a", "paper-source-link", paper.url)', app)
         self.assertIn("previousConnection?.close()", app)
         self.assertIn("eventReconnectNeedsRefresh = true", app)
         self.assertIn("if (eventReconnectNeedsRefresh)", app)
@@ -286,11 +306,16 @@ class WorkbenchPlanningTests(unittest.TestCase):
         )
         self.assertIn('code="invalid_confirmation_token"', server)
         self.assertIn('self.send_header("Connection", "close")', server)
+        json_body = server.index("body = self.read_json()")
         self.assertLess(
-            server.index("body = self.read_json()"),
-            server.index("if not self.require_mutation_auth()"),
+            json_body,
+            server.index("if not self.require_mutation_auth()", json_body),
         )
         self.assertIn('raise PlanError("incomplete request body")', server)
+        self.assertIn('parsed.path == "/api/arxiv/author-search"', server)
+        self.assertIn('r"/api/paper-imports/([A-Za-z0-9_-]+)/files"', server)
+        self.assertIn('self.app.create_paper_import()', server)
+        self.assertIn('self.app.commit_paper_import(match.group(1), body)', server)
         self.assertIn("except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):", server)
         self.assertIn('history[method](historyPayload(scrollY), "", url)', app)
         self.assertIn('const tabUrlStoragePrefix = "loose-ends-workbench:tab-url:"', app)
@@ -301,6 +326,7 @@ class WorkbenchPlanningTests(unittest.TestCase):
         self.assertIn("rememberTabUrl(state.tab, canonicalUrl)", app)
         self.assertIn("function restoreTab(tab)", app)
         self.assertIn("restoreTab(value.dataset.tab)", app)
+
         self.assertIn('value.searchParams.delete("detail")', app)
         self.assertIn("pageScrollPositions.get(scrollPositionKey(url))", app)
         self.assertIn("identityFromSearchParams(parameters)", app)
@@ -361,10 +387,17 @@ class WorkbenchPlanningTests(unittest.TestCase):
         self.assertIn("function visibleProblemSelectionControl", app)
         self.assertIn("function awaitingReviewAttemptsForTargets", app)
         self.assertIn("appendAwaitingReviewAction(values)", app)
+        self.assertIn("function missingMetadataPaperTargets(values)", app)
+        self.assertIn("appendMissingMetadataAction(values)", app)
+        self.assertIn("!paper.metadataComplete", app)
+        self.assertIn('() => openTask("metadata", papers)', app)
         self.assertIn("awaiting-review attempt", app)
         self.assertIn("input.indeterminate", app)
         self.assertIn("jobDetails: new Map()", app)
         self.assertIn("function outputRoute(path)", app)
+        self.assertIn("pathContains(item.path, path)", app)
+        self.assertIn('if (value.kind === "paper")', app)
+        self.assertIn("reviewModel.paperTitleWithYear(paper.title, paper.published)", app)
         self.assertIn('detail: critiqueFiles.has(filename) ? "critique" : "attempt"', app)
         self.assertIn('if (filename.startsWith("triage")) detail = "triage"', app)
         self.assertIn('else if (filename.startsWith("literature")) detail = "literature"', app)
@@ -381,6 +414,9 @@ class WorkbenchPlanningTests(unittest.TestCase):
         self.assertIn("draft.key !== manuscript.latest.key", app)
         self.assertIn('node("a", "artifact-action", "Raw")', app)
         self.assertIn("function taskScopeSummary(job)", app)
+        self.assertIn('job.action !== "download"', app)
+        self.assertIn("flatMap(run => run.outputs || [])", app)
+        self.assertIn("const targets = taskTargets(job)", app)
         self.assertIn("function singlePaperProblemScope(job)", app)
         self.assertIn("job.plan?.singlePaperTitle", app)
         self.assertIn("function problemRunPresentation(action, run)", app)
@@ -491,6 +527,84 @@ class WorkbenchPlanningTests(unittest.TestCase):
         self.assertIn(".badge.paused", styles)
         self.assertIn(".badge.neutral { background: #332f35; color: #fff; }", styles)
         self.assertNotIn(".badge.weight", styles)
+
+    def test_paper_inventory_derives_arxiv_url_from_legacy_metadata(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = make_paper(root)
+            common.write_json(
+                paper / "metadata.json",
+                {
+                    "schema_version": 1,
+                    "arxiv_id": "2608.04410v1",
+                    "title": "A Test Paper",
+                    "authors": ["Ada Lovelace"],
+                },
+            )
+
+            records = workbench._paper_inventory([root])
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(
+            records[0]["url"],
+            "https://arxiv.org/abs/2608.04410v1",
+        )
+        self.assertEqual(records[0]["arxivId"], "2608.04410v1")
+
+    def test_file_import_uploads_and_ingests_directory(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            papers = root / "papers"
+            app = object.__new__(workbench.WorkbenchApplication)
+            app.state_directory = root / "state"
+            app.paper_output_roots = [papers]
+            app.paper_import_lock = threading.Lock()
+            app.paper_imports = {}
+            app.catalog = Mock()
+
+            import_id = app.create_paper_import()["id"]
+            app.upload_paper_import_file(
+                import_id,
+                "item-0/Source Paper/main.tex",
+                BytesIO(b"paper"),
+                5,
+            )
+            app.upload_paper_import_file(
+                import_id,
+                "item-0/Source Paper/main.pdf",
+                BytesIO(b"%PDF-test"),
+                9,
+            )
+            result = app.commit_paper_import(import_id, {
+                "outputDirectory": str(papers),
+                "inputs": ["item-0/Source Paper"],
+            })
+
+            target = papers / "Source-Paper"
+            self.assertEqual(result["papers"][0]["path"], str(target))
+            self.assertEqual((target / "paper.pdf").read_bytes(), b"%PDF-test")
+            self.assertTrue((target / "source" / "main.tex").is_file())
+            self.assertFalse(app.paper_imports)
+            app.catalog.schedule.assert_called_once_with()
+
+    def test_file_import_rejects_path_traversal(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            app = object.__new__(workbench.WorkbenchApplication)
+            app.state_directory = root / "state"
+            app.paper_import_lock = threading.Lock()
+            app.paper_imports = {}
+            import_id = app.create_paper_import()["id"]
+
+            with self.assertRaisesRegex(PlanError, "invalid uploaded file path"):
+                app.upload_paper_import_file(
+                    import_id,
+                    "../outside.pdf",
+                    BytesIO(b"%PDF-test"),
+                    9,
+                )
+
+            self.assertFalse((root / "outside.pdf").exists())
 
     def test_network_bind_and_request_host_security(self):
         args = build_parser().parse_args(
@@ -822,6 +936,199 @@ class WorkbenchPlanningTests(unittest.TestCase):
             self.assertEqual(argv[argv.index("--review") + 1], "all")
             self.assertIn("Try small cases.", argv)
             self.assertIn("Check the boundary case.", argv)
+
+    def test_arxiv_download_plan_is_scoped_to_a_configured_paper_root(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            papers = root / "papers"
+            plan = build_plan(
+                {
+                    "action": "download",
+                    "targets": [],
+                    "options": {
+                        "papers": "1706.03762\nhttps://arxiv.org/abs/2401.12345v2",
+                        "outputDirectory": str(papers),
+                    },
+                },
+                project_root=PROJECT_ROOT,
+                allowed_roots=[papers, root / "manuscripts"],
+                paper_roots=[papers],
+                manuscripts=root / "manuscripts",
+                catalog_version=1,
+            )
+
+            self.assertEqual(plan["title"], "Download: 2 papers from arXiv")
+            self.assertEqual(
+                plan["targets"],
+                [
+                    {
+                        "kind": "paper",
+                        "path": str((papers / "arXiv-1706.03762").resolve()),
+                        "label": "arXiv:1706.03762",
+                    },
+                    {
+                        "kind": "paper",
+                        "path": str((papers / "arXiv-2401.12345v2").resolve()),
+                        "label": "arXiv:2401.12345v2",
+                    },
+                ],
+            )
+            unit = plan["units"][0]
+            self.assertEqual(unit["targets"], [])
+            self.assertIn("1706.03762", unit["argv"])
+            self.assertIn("2401.12345v2", unit["argv"])
+            self.assertIn(
+                f"paper:{papers.resolve() / 'arXiv-1706.03762'}",
+                unit["resources"],
+            )
+
+            with self.assertRaisesRegex(PlanError, "outside the configured paper roots"):
+                build_plan(
+                    {
+                        "action": "download",
+                        "targets": [],
+                        "options": {
+                            "papers": "1706.03762",
+                            "outputDirectory": str(root / "elsewhere"),
+                        },
+                    },
+                    project_root=PROJECT_ROOT,
+                    allowed_roots=[root],
+                    paper_roots=[papers],
+                    manuscripts=root / "manuscripts",
+                    catalog_version=1,
+                )
+
+            with self.assertRaisesRegex(PlanError, "no paper output directory"):
+                build_plan(
+                    {
+                        "action": "download",
+                        "targets": [],
+                        "options": {"papers": "1706.03762"},
+                    },
+                    project_root=PROJECT_ROOT,
+                    allowed_roots=[root],
+                    paper_roots=[],
+                    manuscripts=root / "manuscripts",
+                    catalog_version=1,
+                )
+
+    def test_metadata_extraction_plan_uses_managed_codex_script(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = make_paper(root)
+            plan = build_plan(
+                {
+                    "action": "metadata",
+                    "targets": [{"kind": "paper", "path": str(paper)}],
+                    "options": {"prompt": "Prefer the journal title page."},
+                },
+                project_root=PROJECT_ROOT,
+                allowed_roots=[root],
+                manuscripts=root / "manuscripts",
+                catalog_version=1,
+            )
+
+        unit = plan["units"][0]
+        self.assertTrue(unit["argv"][2].endswith("extract_paper_metadata.py"))
+        self.assertIn("Prefer the journal title page.", unit["argv"])
+        self.assertEqual(unit["targets"][0]["kind"], "paper")
+
+    def test_arxiv_plan_preview_reports_already_downloaded_paper(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            papers = root / "papers"
+            paper = papers / "arXiv-1706.03762"
+            (paper / "source").mkdir(parents=True)
+            (paper / "paper.pdf").write_bytes(b"%PDF-test")
+            plan = build_plan(
+                {
+                    "action": "download",
+                    "targets": [],
+                    "options": {
+                        "papers": "1706.03762",
+                        "outputDirectory": str(papers),
+                    },
+                },
+                project_root=PROJECT_ROOT,
+                allowed_roots=[papers],
+                paper_roots=[papers],
+                manuscripts=root / "manuscripts",
+                catalog_version=1,
+            )
+
+            populate_dry_run_previews(plan)
+
+        preview = plan["units"][0]["dryRun"]
+        self.assertEqual(preview["status"], "ok")
+        self.assertIn("Would skip content download", preview["output"])
+        self.assertIn("already downloaded", preview["output"])
+
+    @patch("workbench.download_arxiv_author.search_author")
+    def test_author_search_returns_selectable_paper_metadata(self, search):
+        app = object.__new__(workbench.WorkbenchApplication)
+        app.arxiv_search_lock = threading.Lock()
+        app.arxiv_pacer = Mock()
+        paper = workbench.download_arxiv.PaperMetadata(
+            arxiv_id="1706.03762v7",
+            title="Attention Is All You Need",
+            authors=("A. Author", "B. Author"),
+            published="2017-06-12T00:00:00Z",
+            updated="2023-08-02T00:00:00Z",
+        )
+        search.return_value = workbench.download_arxiv_author.AuthorSearchResult(
+            "A. Author", 3, (paper,)
+        )
+
+        result = app.search_arxiv_author({"author": "A. Author", "limit": 1})
+
+        self.assertEqual(result["author"], "A. Author")
+        self.assertEqual(result["totalResults"], 3)
+        self.assertEqual(result["papers"][0]["id"], "1706.03762v7")
+        self.assertEqual(result["papers"][0]["authors"], ["A. Author", "B. Author"])
+        search.assert_called_once_with(
+            "A. Author", limit=1, pacer=app.arxiv_pacer
+        )
+
+    def test_paper_metadata_editor_preserves_provenance(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = make_paper(root)
+            metadata_path = paper / "metadata.json"
+            metadata_path.write_text(
+                json.dumps({
+                    "schema_version": 1,
+                    "title": "Old title",
+                    "authors": ["Old Author"],
+                    "provenance": {"kind": "local"},
+                }),
+                encoding="utf-8",
+            )
+            app = object.__new__(workbench.WorkbenchApplication)
+            app.paths = [root]
+            app.metadata_lock = threading.Lock()
+            app.catalog = Mock()
+
+            result = app.update_paper_metadata({
+                "path": str(paper),
+                "title": "Corrected title",
+                "authors": ["Ada Lovelace", "Alan Turing"],
+                "published": "2025-06-01",
+                "updated": "2025-12",
+                "arxivId": "arXiv:2608.04410v2",
+                "url": "https://example.test/paper",
+                "doi": "10.1234/example",
+            })
+
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(result["title"], "Corrected title")
+        self.assertEqual(result["arxivId"], "2608.04410v2")
+        self.assertEqual(metadata["authors"], ["Ada Lovelace", "Alan Turing"])
+        self.assertEqual(metadata["arxiv_id"], "2608.04410v2")
+        self.assertEqual(metadata["updated"], "2025-12")
+        self.assertEqual(metadata["provenance"], {"kind": "local"})
+        app.catalog.schedule.assert_called_once_with()
 
     def test_multi_problem_plan_title_includes_single_paper_title(self):
         with TemporaryDirectory() as temporary:
