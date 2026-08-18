@@ -35,6 +35,7 @@ const state = {
   runLogs: new Map(),
   runLogLoads: new Map(),
   expandedRuns: new Set(),
+  expandedJobScopes: new Set(),
   dialog: null,
 };
 
@@ -2478,23 +2479,67 @@ function renderJobDetail(job) {
   const shell = node("div", "main-inner");
   shell.dataset.jobDetail = job.id;
   const hero = node("section", "hero");
-  const copy = node("div");
+  const copy = node("div", "hero-copy");
   copy.append(node("div", "eyebrow", "Managed task"));
   copy.append(node("h1", "", taskActionTitle(job.action)));
-  const scope = node("details", "task-scope");
-  scope.append(node("summary", "", taskScopeSummary(job)));
+  const scope = node("div", "task-scope");
+  scope.append(node("div", "task-scope-summary", taskScopeSummary(job)));
   const targets = taskTargets(job);
   if (targets.length) {
+    const targetBox = node("div", "task-targets-box");
     const targetList = node("div", "target-list task-targets");
+    targetList.id = `job-targets-${job.id}`;
     targets.forEach(value => targetList.append(targetChip(value)));
-    scope.append(targetList);
+    // Start clamped so overflow can be measured even when this scope was
+    // previously expanded. The requested state is restored after layout.
+    targetList.classList.add("collapsed");
+    const expanded = state.expandedJobScopes.has(job.id);
+    const setExpanded = nextExpanded => {
+      targetList.classList.toggle("collapsed", !nextExpanded);
+      if (nextExpanded) state.expandedJobScopes.add(job.id);
+      else state.expandedJobScopes.delete(job.id);
+      topToggle.hidden = !nextExpanded;
+      topToggle.setAttribute("aria-expanded", String(nextExpanded));
+      bottomToggle.textContent = nextExpanded ? "Show less" : "Show all";
+      bottomToggle.setAttribute("aria-expanded", String(nextExpanded));
+    };
+    const topToggle = button("Show less", () => setExpanded(false), "task-targets-toggle top");
+    const bottomToggle = button(
+      expanded ? "Show less" : "Show all",
+      () => setExpanded(targetList.classList.contains("collapsed")),
+      "task-targets-toggle bottom",
+    );
+    topToggle.hidden = true;
+    bottomToggle.hidden = true;
+    [topToggle, bottomToggle].forEach(toggle => {
+      toggle.setAttribute("aria-controls", targetList.id);
+      toggle.setAttribute("aria-expanded", String(expanded));
+    });
+    targetBox.append(topToggle, targetList, bottomToggle);
+    scope.append(targetBox);
+    requestAnimationFrame(() => {
+      if (!targetList.isConnected) return;
+      const overflows = targetList.scrollHeight > targetList.clientHeight + 1;
+      if (!overflows) {
+        state.expandedJobScopes.delete(job.id);
+        targetList.classList.remove("collapsed");
+        topToggle.remove();
+        bottomToggle.remove();
+        return;
+      }
+      if (expanded) {
+        targetList.classList.remove("collapsed");
+        topToggle.hidden = false;
+      }
+      bottomToggle.hidden = false;
+    });
   }
-  copy.append(scope, node("p", "", `Created ${formatTime(job.created_at)}`));
+  copy.append(node("p", "", `Created ${formatTime(job.created_at)}`));
   const badges = node("div", "badges");
   badges.append(taskIsPaused(job) ? badge("Paused", "paused") : taskStatusBadge(job.status));
   badges.append(badge(`Weight ${priorityMultiplier(job.priority_level)}`, "neutral"));
   copy.append(badges);
-  hero.append(copy, jobSchedulingControls(job));
+  hero.append(copy, jobSchedulingControls(job), scope);
   shell.append(hero);
   const attention = runAttentionPanel(job);
   if (attention) shell.append(attention);
@@ -3512,8 +3557,8 @@ function renderTaskConfiguration(errorMessage = "") {
     help: "Relative weight of worker starts when this task competes with other eligible tasks.",
   }));
 
-  const advanced = node("details", "advanced");
-  advanced.append(node("summary", "", "Model and web-search settings"));
+  const modelSettings = node("section", "model-settings");
+  modelSettings.append(node("h3", "", "Model and web-search settings"));
   const advancedGrid = node("div", "form-grid");
   const taskDefaults = state.settings.taskDefaults?.[task.action] || {};
   advancedGrid.append(field("model", "Model", {
@@ -3542,8 +3587,8 @@ function renderTaskConfiguration(errorMessage = "") {
       options: [["", "Inherit"], ["live", "Live"], ["indexed", "Indexed"], ["disabled", "Disabled"]],
     }));
   }
-  advanced.append(advancedGrid);
-  grid.append(advanced);
+  modelSettings.append(advancedGrid);
+  grid.append(modelSettings);
   dialogBody.append(grid);
   grid.querySelectorAll("input, textarea, select").forEach(input => input.addEventListener("input", saveDialogOptions));
   dialogFooter.replaceChildren(
