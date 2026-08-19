@@ -21,15 +21,20 @@ do not merely relabel an unsupported claim or conceal its gap.
 Each selected result represents one open-problem research stream. When its
 index entry has nonempty `prior_attempts`, read every listed earlier attempt,
 artifact, and independent review. The selected attempt is the focal synthesis,
-not the only evidence: incorporate still-valid supported results from its
-history when they materially contribute, especially when the focal argument
-depends on them. Reconcile superseded or conflicting statements in favor of
-the strongest independently supported formulation. Keep attempt provenance in
-`readiness.md`, qualifying historical claims by attempt name (for example,
-`attempt-001/C-002`) to avoid ID collisions. In the structured response,
-`source_claim_ids` still refers to claims of the selected attempt; map
-their historical dependencies transitively in `readiness.md`. Present the
-mathematics itself without workflow history in `main.tex`.
+not the only evidence. Treat its active claims and reviewed cumulative status
+as the proposed current snapshot, and use the history as proof support,
+provenance, and a check on that reconciliation. Honor supported
+`prior_claim_dispositions`: incorporate retained or repaired historical
+results when they materially contribute, but do not resurrect a superseded or
+refuted claim merely because it once received a stronger label. Independently
+resolve any conflict between a disposition and its evidence, favoring the
+strongest formulation that remains supported after the complete history is
+considered. Keep attempt provenance in `readiness.md`, qualifying historical
+claims by attempt name (for example, `attempt-001/C-002`) to avoid ID
+collisions. In the structured response, `source_claim_ids` still refers to
+claims of the selected attempt; map their historical dependencies transitively
+in `readiness.md`. Present the mathematics itself without workflow history in
+`main.tex`.
 
 The originating paper analysis can list open problems for which no result was
 selected because no solver attempt exists. Do not invent results for them;

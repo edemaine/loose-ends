@@ -333,6 +333,16 @@ def _normalize_solver_claim_ids(result: dict) -> dict[str, str]:
                 _replace_claim_ids(warning, changes)
                 for warning in result["warnings"]
             ]
+        for disposition in result.get("prior_claim_dispositions", []):
+            if not isinstance(disposition, dict):
+                continue
+            current_claim_id = disposition.get("current_claim_id")
+            if current_claim_id in changes:
+                disposition["current_claim_id"] = changes[current_claim_id]
+            if isinstance(disposition.get("explanation"), str):
+                disposition["explanation"] = _replace_claim_ids(
+                    disposition["explanation"], changes
+                )
     if changes and isinstance(result.get("warnings"), list):
         rendered = ", ".join(
             f"{old} -> {new}" for old, new in changes.items()
@@ -351,6 +361,23 @@ def _replace_claim_ids(contents: str, changes: dict[str, str]) -> str:
             contents,
         )
     return contents
+
+
+def _prior_claim_refs(problem: common.ProblemRef) -> list[str]:
+    """Return canonical attempt/claim references available to a new snapshot."""
+    references: list[str] = []
+    for directory in common.attempt_directories(problem):
+        result = common.load_json(directory / "solver-result.json") or {}
+        claims = result.get("checkable_claims")
+        if not isinstance(claims, list):
+            continue
+        for claim in claims:
+            if not isinstance(claim, dict):
+                continue
+            claim_id = claim.get("id")
+            if isinstance(claim_id, str) and CLAIM_ID_RE.fullmatch(claim_id):
+                references.append(f"{directory.name}/{claim_id}")
+    return references
 
 
 def validate_solver_result(
@@ -388,6 +415,11 @@ def validate_solver_result(
         isinstance(value, str) for value in warnings
     ):
         raise common.CodexError("solver response has invalid warnings")
+    # Preserved workspaces from the pre-snapshot schema have no lineage field.
+    # Treat them as having supplied no structured reconciliation so recovery
+    # remains backward compatible; fresh validated runs require the field.
+    if "prior_claim_dispositions" not in result:
+        result["prior_claim_dispositions"] = []
     claim_id_changes = _normalize_solver_claim_ids(result)
     claims = result.get("checkable_claims")
     if not isinstance(claims, list):
@@ -432,6 +464,47 @@ def validate_solver_result(
         raise common.CodexError(
             f"{claimed_result_type} response contains no checkable claims"
         )
+    dispositions = result.get("prior_claim_dispositions")
+    if not isinstance(dispositions, list):
+        raise common.CodexError(
+            "solver response has invalid prior_claim_dispositions"
+        )
+    seen_prior_claims: set[tuple[str, str]] = set()
+    for disposition in dispositions:
+        if not isinstance(disposition, dict):
+            raise common.CodexError("solver prior disposition is not an object")
+        source_attempt = disposition.get("source_attempt")
+        source_claim_id = disposition.get("source_claim_id")
+        if (
+            not isinstance(source_attempt, str)
+            or solver_validation.ATTEMPT_NAME_RE.fullmatch(source_attempt) is None
+            or not isinstance(source_claim_id, str)
+            or CLAIM_ID_RE.fullmatch(source_claim_id) is None
+        ):
+            raise common.CodexError("solver prior disposition has invalid source claim")
+        source = (source_attempt, source_claim_id)
+        if source in seen_prior_claims:
+            raise common.CodexError(
+                f"duplicate solver prior disposition: {source_attempt}/{source_claim_id}"
+            )
+        seen_prior_claims.add(source)
+        value = disposition.get("disposition")
+        if value not in solver_validation.PRIOR_DISPOSITIONS:
+            raise common.CodexError("solver prior disposition has invalid status")
+        if not isinstance(disposition.get("explanation"), str) or not disposition[
+            "explanation"
+        ].strip():
+            raise common.CodexError("solver prior disposition has no explanation")
+        current_claim_id = disposition.get("current_claim_id")
+        if value == "refuted":
+            if current_claim_id != "":
+                raise common.CodexError(
+                    "refuted solver prior disposition has nonempty current_claim_id"
+                )
+        elif current_claim_id not in claim_ids:
+            raise common.CodexError(
+                "active solver prior disposition references an unknown current claim"
+            )
     if require_markdown:
         attempt_path = workspace / "attempt.md"
         contents = common.validate_markdown(
@@ -556,9 +629,30 @@ def _recovered_attempt_markdown(work: SolveWork, result: dict) -> str:
         "",
         result["summary"].strip(),
         "",
-        "## Checkable claims",
+        "## History reconciliation",
         "",
     ]
+    dispositions = result["prior_claim_dispositions"]
+    if not dispositions:
+        lines.extend(["No material prior claim disposition was reported.", ""])
+    for disposition in dispositions:
+        replacement = (
+            f" → `{disposition['current_claim_id']}`"
+            if disposition.get("current_claim_id")
+            else ""
+        )
+        lines.extend(
+            [
+                f"- `{disposition['source_attempt']}/{disposition['source_claim_id']}`: "
+                f"**{disposition['disposition']}**{replacement}. "
+                f"{disposition['explanation'].strip()}",
+                "",
+            ]
+        )
+    lines.extend([
+        "## Checkable claims",
+        "",
+    ])
     claims = result["checkable_claims"]
     if not claims:
         lines.extend(["No checkable claim was reported.", ""])
@@ -685,6 +779,10 @@ def _install_attempt(
             "requested_web_search": web_search,
             "claimed_result_type": result["claimed_result_type"],
             "claim_count": len(result["checkable_claims"]),
+            "attempt_semantics": "cumulative_snapshot",
+            "prior_claim_disposition_count": len(
+                result["prior_claim_dispositions"]
+            ),
         }
         if recovered_from is not None:
             manifest.update(
@@ -907,7 +1005,7 @@ def solve_work(
             validator=codex_cli.OutputValidator(
                 Path(solver_validation.__file__).resolve(),
                 solver_validation.validate,
-                {},
+                {"prior_claim_refs": _prior_claim_refs(work.problem)},
             ),
             options=options,
             web_search=web_search,

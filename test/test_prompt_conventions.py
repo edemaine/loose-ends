@@ -27,6 +27,23 @@ class PromptConventionTests(unittest.TestCase):
                 )
                 self.assertIn(MARKDOWN_MATH_INSTRUCTION, prompt)
 
+    def test_open_problem_attempts_are_cumulative_snapshots(self):
+        solve = (
+            PROJECT_ROOT / "prompts" / "solve-open-problem.md"
+        ).read_text(encoding="utf-8")
+        review = (
+            PROJECT_ROOT / "prompts" / "review-open-problem-attempt.md"
+        ).read_text(encoding="utf-8")
+        write = (
+            PROJECT_ROOT / "prompts" / "write-open-problem-paper.md"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("new cumulative snapshot", solve)
+        self.assertIn("prior_claim_dispositions", solve)
+        self.assertIn("All top-level review fields describe the cumulative", review)
+        self.assertIn("not on the best label ever assigned", review)
+        self.assertIn("do not resurrect a superseded or\nrefuted claim", write)
+
 
 if __name__ == "__main__":
     unittest.main()

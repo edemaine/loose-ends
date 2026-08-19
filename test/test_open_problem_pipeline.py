@@ -107,6 +107,7 @@ class OpenProblemPipelineTests(unittest.TestCase):
             result = {
                 "claimed_result_type": "partial_result",
                 "checkable_claims": [{"id": "C-001"}],
+                "prior_claim_dispositions": [],
             }
 
             with patch.object(
@@ -689,6 +690,7 @@ class OpenProblemPipelineTests(unittest.TestCase):
                                 "remaining_gap": "The general case remains.",
                             }
                         ],
+                        "prior_claim_dispositions": [],
                         "artifacts": [],
                         "warnings": [],
                     },
@@ -1916,6 +1918,7 @@ class OpenProblemPipelineTests(unittest.TestCase):
                             "remaining_gap": "The theorem remains.",
                         }
                     ],
+                    "prior_claim_dispositions": [],
                     "artifacts": [],
                     "warnings": [],
                 },

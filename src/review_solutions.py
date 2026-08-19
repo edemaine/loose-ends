@@ -493,6 +493,7 @@ def _install_review(
                     "verification_confidence"
                 ],
                 "human_priority": result["human_priority"],
+                "assessment_semantics": "cumulative_snapshot",
             }
         if recovered_from is not None:
             manifest.update(

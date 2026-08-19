@@ -610,14 +610,18 @@ OP-001/
     └── artifacts/
 ```
 
-`attempt.md` is the human-readable research record. The structured result
-records the solver-owned `claimed_result_type` (`none`, `obstruction`,
-`partial_result`, `solution`, or `counterexample`) and indexes exact `C-###`
-claims so a critic can check them. Claim type is independent of novelty: a
-reconstruction of published work is still mathematically a `solution`.
-External sources actually used are recorded, while literature provenance is
-owned by `literature_review.py`. Code, data, and auxiliary derivations can be
-retained under `artifacts/`.
+`attempt.md` is the human-readable research record. Each new attempt is a
+cumulative snapshot of the problem's research stream rather than a delta: it
+reconciles the history, carries forward still-supported material results, and
+may narrow, supersede, or refute earlier claims. The structured result records
+the solver-owned cumulative `claimed_result_type` (`none`, `obstruction`,
+`partial_result`, `solution`, or `counterexample`), indexes the active exact
+`C-###` claims so a critic can check them, and records material historical
+claim lineage in `prior_claim_dispositions`. Claim type is independent of
+novelty: a reconstruction of published work is still mathematically a
+`solution`. External sources on which the active snapshot relies are recorded,
+while literature provenance is owned by `literature_review.py`. Code, data,
+and auxiliary derivations can be retained under `artifacts/`.
 If a completed Codex turn is preserved because driver validation or
 installation fails, retrying the same solve command recovers the matching
 `.solve-run-*` workspace before starting another model turn.
@@ -674,11 +678,13 @@ attempt-001/
 
 The structured review independently records mathematical correctness, coverage
 of the original problem, importance relative to that problem, verification
-confidence, claim-by-claim assessments, and blocking gaps. Human priority is
-derived deterministically from correctness and importance instead of being a
-free critic judgment. The critic does not assess novelty; it may use live web
-search only to verify an external theorem invoked by the attempt. Literature
-changes therefore do not invalidate mathematical reviews.
+confidence, claim-by-claim assessments, and blocking gaps. Its top-level axes
+assess the cumulative snapshot after reconciling the complete attempt history,
+so they can improve or worsen when a later attempt strengthens or overturns an
+earlier result. Human priority is derived deterministically from those axes
+instead of being a free critic judgment. The critic does not assess novelty;
+it may use live web search only to verify an external theorem invoked by the
+attempt. Literature changes therefore do not invalidate mathematical reviews.
 
 ## Write a paper
 

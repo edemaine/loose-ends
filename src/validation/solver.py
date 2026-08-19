@@ -12,6 +12,8 @@ from . import common
 CLAIM_ID_RE = re.compile(r"^C-[0-9]{3,}$")
 SOLUTION_STATUSES = {"none", "obstruction", "partial_result", "solution", "counterexample"}
 CLAIM_TYPES = {"proof", "lemma", "counterexample", "computation", "reduction", "reformulation", "obstruction", "other"}
+PRIOR_DISPOSITIONS = {"retained", "strengthened", "narrowed", "superseded", "refuted"}
+ATTEMPT_NAME_RE = re.compile(r"^attempt-[0-9]+$")
 
 
 def validate(*, workspace: Path, expectations: Mapping[str, object]) -> common.ValidationReport:
@@ -67,6 +69,51 @@ def validate(*, workspace: Path, expectations: Mapping[str, object]) -> common.V
         reporter.error("E_CLAIM_CONSISTENCY", "none result must not contain claims", path="agent-result.json#/checkable_claims")
     if claimed in SOLUTION_STATUSES - {"none"} and not claims:
         reporter.error("E_CLAIM_CONSISTENCY", f"{claimed} result must contain a claim", path="agent-result.json#/checkable_claims")
+    prior_claim_refs_value = expectations.get("prior_claim_refs")
+    prior_claim_refs = (
+        set(prior_claim_refs_value)
+        if common.string_list(prior_claim_refs_value) is not None
+        else None
+    )
+    dispositions = result.get("prior_claim_dispositions")
+    seen_prior_claims: set[str] = set()
+    if not isinstance(dispositions, list):
+        reporter.error(
+            "E_PRIOR_DISPOSITIONS",
+            "prior_claim_dispositions must be an array",
+            path="agent-result.json#/prior_claim_dispositions",
+        )
+    else:
+        for index, disposition in enumerate(dispositions):
+            base = f"agent-result.json#/prior_claim_dispositions/{index}"
+            if not isinstance(disposition, dict):
+                reporter.error("E_PRIOR_DISPOSITION", "disposition must be an object", path=base)
+                continue
+            source_attempt = disposition.get("source_attempt")
+            source_claim_id = disposition.get("source_claim_id")
+            prior_ref = f"{source_attempt}/{source_claim_id}"
+            if not isinstance(source_attempt, str) or not ATTEMPT_NAME_RE.fullmatch(source_attempt):
+                reporter.error("E_PRIOR_ATTEMPT", "invalid source_attempt", path=f"{base}/source_attempt")
+            if not isinstance(source_claim_id, str) or not CLAIM_ID_RE.fullmatch(source_claim_id):
+                reporter.error("E_PRIOR_CLAIM", "invalid source_claim_id", path=f"{base}/source_claim_id")
+            elif prior_ref in seen_prior_claims:
+                reporter.error("E_PRIOR_CLAIM", f"duplicate prior claim {prior_ref}", path=f"{base}/source_claim_id")
+            else:
+                seen_prior_claims.add(prior_ref)
+                if prior_claim_refs is not None and prior_ref not in prior_claim_refs:
+                    reporter.error("E_PRIOR_CLAIM", f"unknown prior claim {prior_ref}", path=f"{base}/source_claim_id")
+            value = disposition.get("disposition")
+            if value not in PRIOR_DISPOSITIONS:
+                reporter.error("E_PRIOR_DISPOSITION", "invalid disposition", path=f"{base}/disposition")
+            explanation = disposition.get("explanation")
+            if not isinstance(explanation, str) or not explanation.strip():
+                reporter.error("E_PRIOR_EXPLANATION", "explanation must be nonempty", path=f"{base}/explanation")
+            current_claim_id = disposition.get("current_claim_id")
+            if value == "refuted":
+                if current_claim_id != "":
+                    reporter.error("E_PRIOR_CURRENT_CLAIM", "refuted claims require an empty current_claim_id", path=f"{base}/current_claim_id")
+            elif current_claim_id not in claim_ids:
+                reporter.error("E_PRIOR_CURRENT_CLAIM", "active dispositions must reference a current claim", path=f"{base}/current_claim_id")
     if attempt is not None:
         for claim_id in sorted(claim_ids):
             if claim_id not in attempt:

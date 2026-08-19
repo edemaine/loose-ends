@@ -70,6 +70,47 @@
         "additionalProperties": false
       }
     },
+    "prior_claim_dispositions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "source_attempt": {
+            "type": "string",
+            "pattern": "^attempt-[0-9]+$"
+          },
+          "source_claim_id": {
+            "type": "string",
+            "pattern": "^C-[0-9]{3,}$"
+          },
+          "disposition": {
+            "type": "string",
+            "enum": [
+              "retained",
+              "strengthened",
+              "narrowed",
+              "superseded",
+              "refuted"
+            ]
+          },
+          "current_claim_id": {
+            "type": "string",
+            "pattern": "^(C-[0-9]{3,})?$"
+          },
+          "explanation": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_attempt",
+          "source_claim_id",
+          "disposition",
+          "current_claim_id",
+          "explanation"
+        ],
+        "additionalProperties": false
+      }
+    },
     "artifacts": {
       "type": "array",
       "items": {"type": "string"}
@@ -84,6 +125,7 @@
     "summary",
     "external_sources",
     "checkable_claims",
+    "prior_claim_dispositions",
     "artifacts",
     "warnings"
   ],

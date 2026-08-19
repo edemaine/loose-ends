@@ -26,6 +26,7 @@ def solver_result(claim_id: str = "C-001", artifacts=None) -> dict:
                 "remaining_gap": "The main theorem remains.",
             }
         ],
+        "prior_claim_dispositions": [],
         "artifacts": artifacts or [],
         "warnings": [],
     }
@@ -100,6 +101,48 @@ class ValidationTests(unittest.TestCase):
             self.assertFalse(report.valid)
             self.assertIn("E_CLAIM_ID", report.failure_message())
             self.assertIn("E_ARTIFACT_PATH", report.failure_message())
+
+    def test_solver_validates_prior_claim_dispositions(self):
+        with TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            (workspace / "attempt.md").write_text(
+                "# Attempt\n\n## C-001\n\nA retained cumulative claim.\n",
+                encoding="utf-8",
+            )
+            result = solver_result()
+            result["prior_claim_dispositions"] = [
+                {
+                    "source_attempt": "attempt-001",
+                    "source_claim_id": "C-002",
+                    "disposition": "retained",
+                    "current_claim_id": "C-001",
+                    "explanation": "The earlier proof remains valid.",
+                }
+            ]
+            (workspace / "agent-result.json").write_text(
+                json.dumps(result),
+                encoding="utf-8",
+            )
+
+            valid = solver_validation.validate(
+                workspace=workspace,
+                expectations={"prior_claim_refs": ["attempt-001/C-002"]},
+            )
+            self.assertTrue(valid.valid, valid.failure_message())
+
+            result["prior_claim_dispositions"][0]["source_claim_id"] = "C-999"
+            result["prior_claim_dispositions"][0]["disposition"] = "refuted"
+            (workspace / "agent-result.json").write_text(
+                json.dumps(result),
+                encoding="utf-8",
+            )
+            invalid = solver_validation.validate(
+                workspace=workspace,
+                expectations={"prior_claim_refs": ["attempt-001/C-002"]},
+            )
+            self.assertFalse(invalid.valid)
+            self.assertIn("E_PRIOR_CLAIM", invalid.failure_message())
+            self.assertIn("E_PRIOR_CURRENT_CLAIM", invalid.failure_message())
 
     def test_staged_schema_rejects_unknown_result_fields(self):
         with TemporaryDirectory() as temporary:

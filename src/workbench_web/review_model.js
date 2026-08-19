@@ -230,7 +230,7 @@
 
   function paperMetrics(items) {
     const metrics = new Map();
-    const bestResultByProblem = new Map();
+    const latestResultByProblem = new Map();
     items.forEach(item => {
       const key = item.paperUrlKey || item.paperDirectory;
       if (!metrics.has(key)) {
@@ -255,14 +255,13 @@
         Number(item.paperProblemCount) || 0,
       );
       const resultKey = `${key}::${item.problemKey}`;
-      const previousResult = bestResultByProblem.get(resultKey);
-      bestResultByProblem.set(resultKey, {
-        key,
-        weight: Math.max(previousResult?.weight || 0, paperResultWeight(item)),
-      });
+      const previousResult = latestResultByProblem.get(resultKey);
+      if (!previousResult || item.attemptNumber > previousResult.item.attemptNumber) {
+        latestResultByProblem.set(resultKey, { key, item });
+      }
     });
-    bestResultByProblem.forEach(({ key, weight }) => {
-      if (metrics.has(key)) metrics.get(key).resultScore += weight;
+    latestResultByProblem.forEach(({ key, item }) => {
+      if (metrics.has(key)) metrics.get(key).resultScore += paperResultWeight(item);
     });
     return metrics;
   }
