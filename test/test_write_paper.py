@@ -648,6 +648,19 @@ class WritePaperTests(unittest.TestCase):
         )
         self.assertEqual(short_rounds.max_rounds, 4)
 
+    def test_research_stop_suggests_explicit_revision_prompt(self):
+        self.assertEqual(
+            write_paper.revision_stop_hint("invalid", None),
+            'Hint: add --prompt "<revision direction>" to request an author '
+            "round despite this verdict.",
+        )
+        self.assertIsNone(
+            write_paper.revision_stop_hint("invalid", "Remove the theorem")
+        )
+        self.assertIsNone(
+            write_paper.revision_stop_hint("needs_minor_revision", None)
+        )
+
     def test_writer_prompt_includes_explicit_revision_direction(self):
         rendered = write_paper.render_writer_prompt(
             "{{MODE_INSTRUCTION}}\n{{CONTEXT_DIRECTORY}}\n"

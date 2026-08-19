@@ -115,6 +115,21 @@ class PipelineOutcome:
         )
 
 
+def revision_stop_hint(
+    reason: str,
+    revision_instruction: str | None,
+) -> str | None:
+    if (
+        reason in {"invalid", "needs_research"}
+        and revision_instruction is None
+    ):
+        return (
+            'Hint: add --prompt "<revision direction>" to request an author '
+            "round despite this verdict."
+        )
+    return None
+
+
 def _stored_manifest_path(path: Path) -> str:
     """Store project paths portably while preserving external absolute paths."""
     resolved = path.expanduser().resolve()
@@ -2532,6 +2547,8 @@ def main(argv: list[str] | None = None) -> int:
             f"Inspect: {outcome.final_review.draft.directory / 'paper-critique.md'}",
             file=sys.stderr,
         )
+    if hint := revision_stop_hint(outcome.reason, args.revision_instruction):
+        print(hint, file=sys.stderr)
     return 1
 
 
