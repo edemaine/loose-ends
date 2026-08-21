@@ -1514,6 +1514,13 @@ function problemManuscriptsPanel(item) {
   return panel;
 }
 
+function sourcePaperForProblem(item) {
+  const paperPath = normalizedPath(item.paperDirectory);
+  return state.catalog.papers.find(
+    paper => normalizedPath(paper.path) === paperPath,
+  );
+}
+
 function renderReviewDetail(item) {
   const shell = node("div", "main-inner");
   const selectedSummary = state.catalog.reviews.find(value => value.itemKey === item.itemKey);
@@ -1563,6 +1570,14 @@ function renderReviewDetail(item) {
   const actions = node("div", "actions");
   const problem = problemTarget(item);
   const attempt = item.attemptDirectory ? attemptTarget(item) : null;
+  const sourcePaper = sourcePaperForProblem(item);
+  if (sourcePaper) {
+    actions.append(routeLink(
+      { tab: "papers", paper: sourcePaper },
+      "View source paper",
+      "button",
+    ));
+  }
   addAction(actions, item.triageCurrent ? "Triage again" : "Triage", "triage", [problem]);
   addAction(actions, item.literatureStatus ? "Search literature again" : "Search literature", "literature", [problem]);
   addAction(actions, attempt ? "Solve again" : "Solve", "solve", [problem], true);
@@ -1781,9 +1796,62 @@ function renderPapers() {
     paperPath: paper.path,
     includePaperDescendants: true,
   }));
+  const problemPanel = paperProblemsPanel(paper);
+  if (problemPanel) shell.append(problemPanel);
   shell.append(node("section", "section-title", "Files"));
   shell.append(fileGrid(paper.files));
   main.replaceChildren(shell);
+}
+
+function paperProblemReviews(paperPath) {
+  const normalizedPaper = normalizedPath(paperPath);
+  const problems = new Map();
+  state.catalog.reviews.forEach(item => {
+    if (normalizedPath(item.paperDirectory) !== normalizedPaper) return;
+    const previous = problems.get(item.problemKey);
+    if (
+      !previous ||
+      Number(item.attemptNumber || 0) > Number(previous.attemptNumber || 0)
+    ) {
+      problems.set(item.problemKey, item);
+    }
+  });
+  return [...problems.values()].sort((left, right) =>
+    left.problemId.localeCompare(
+      right.problemId,
+      undefined,
+      { numeric: true, sensitivity: "base" },
+    )
+  );
+}
+
+function paperProblemsPanel(paper) {
+  const problems = paperProblemReviews(paper.path);
+  if (!problems.length) return null;
+  const panel = node("section", "paper-problems panel");
+  const heading = node("div", "related-tasks-heading");
+  heading.append(
+    node("h2", "", "Open problems"),
+    badge(`${problems.length} problem${problems.length === 1 ? "" : "s"}`, "neutral"),
+  );
+  const grid = node("div", "card-grid");
+  problems.forEach(problem => {
+    const link = routeLink(
+      { tab: "research", review: problem, detail: "attempt" },
+      "",
+      "entity-card",
+    );
+    const attemptStatus = problem.attemptDirectory
+      ? reviewModel.statusLabel(problem.attemptStatus)
+      : "Unattempted";
+    link.append(
+      node("strong", "", `${problem.problemId} · ${problem.problemTitle}`),
+      node("small", "", `${humanize(problem.explicitness)} · ${attemptStatus}`),
+    );
+    grid.append(link);
+  });
+  panel.append(heading, grid);
+  return panel;
 }
 
 function uniqueProblemTargets(paperPath) {

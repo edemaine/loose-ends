@@ -261,6 +261,7 @@ button { color: inherit; }
 .related-tasks { margin: -6px 0 16px; padding: 10px; box-shadow: none; }
 .related-tasks[hidden] { display: none; }
 .problem-manuscripts { margin: 0 0 16px; box-shadow: none; }
+.paper-problems { margin: 0 0 16px; box-shadow: none; }
 .related-tasks-heading { display: flex; align-items: center; gap: 6px; margin-bottom: 7px; }
 .related-tasks-heading h2 { margin: 0; font-size: 14px; }
 .related-task-list { display: grid; gap: 4px; }
