@@ -949,6 +949,10 @@ can then be populated with the managed **Extract metadata** action, and all
 paper metadata can be corrected directly with **Edit metadata**.
 This editor includes the arXiv ID and canonical URL as separate fields, so
 arXiv provenance can be corrected without preventing a journal or project URL.
+After a paper is analyzed, **Add open problem** accepts a title and a
+Markdown/LaTeX statement. Manually entered problems default to `additional`,
+distinguishing them from problems explicitly stated in or inferred from the
+paper, and are included in the normal triage, literature, and solving flows.
 
 The four top-level views have reloadable paths: `/research`, `/papers`,
 `/manuscripts`, and `/activity`. Their query strings capture the complete

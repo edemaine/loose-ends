@@ -456,11 +456,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--explicitness",
-        default="explicit,inferred,uncertain",
+        default="explicit,inferred,uncertain,additional",
         metavar="KINDS",
         help=(
             "comma-separated explicitness values to include "
-            "(default: explicit,inferred,uncertain)"
+            "(default: explicit,inferred,uncertain,additional)"
         ),
     )
     parser.add_argument(

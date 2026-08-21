@@ -278,6 +278,7 @@ def validate_agent_result(result_path: Path, workspace: Path) -> dict:
             "explicit",
             "inferred",
             "uncertain",
+            "additional",
         }:
             raise AnalysisError(
                 f"open problem {problem_id} has invalid explicitness"

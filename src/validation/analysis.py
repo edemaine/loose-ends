@@ -74,7 +74,9 @@ def validate(
                 problem_ids.add(problem_id)
             if not isinstance(problem.get("title"), str) or not problem["title"].strip():
                 reporter.error("E_PROBLEM_TITLE", "title must be nonempty", path=f"{base}/title")
-            if problem.get("explicitness") not in {"explicit", "inferred", "uncertain"}:
+            if problem.get("explicitness") not in {
+                "explicit", "inferred", "uncertain", "additional"
+            }:
                 reporter.error("E_EXPLICITNESS", "invalid explicitness", path=f"{base}/explicitness")
     open_problem_text = markdown.get("open-problems.md", "")
     for problem_id in sorted(problem_ids):

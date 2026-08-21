@@ -288,6 +288,8 @@ class WorkbenchPlanningTests(unittest.TestCase):
         self.assertIn('paper.metadataComplete ? "Extract metadata again"', app)
         self.assertIn('button("Edit metadata", () => openMetadataEditor(paper)', app)
         self.assertIn('api("/api/papers/metadata"', app)
+        self.assertIn('button("Add problem", saveProblemEditor', app)
+        self.assertIn('api("/api/papers/open-problems"', app)
         self.assertIn('field("arxivId", "arXiv ID"', app)
         self.assertIn('field("updated", "Revised"', app)
         self.assertIn('node("strong", "", "Revised")', app)
@@ -320,6 +322,7 @@ class WorkbenchPlanningTests(unittest.TestCase):
         )
         self.assertIn('raise PlanError("incomplete request body")', server)
         self.assertIn('parsed.path == "/api/arxiv/author-search"', server)
+        self.assertIn('self.app.add_open_problem(body)', server)
         self.assertIn('"taskDefaults": self.app.task_defaults', server)
         self.assertIn('r"/api/paper-imports/([A-Za-z0-9_-]+)/files"', server)
         self.assertIn('self.app.create_paper_import()', server)
@@ -1241,6 +1244,54 @@ class WorkbenchPlanningTests(unittest.TestCase):
         self.assertEqual(metadata["updated"], "2025-12")
         self.assertEqual(metadata["provenance"], {"kind": "local"})
         app.catalog.schedule.assert_called_once_with([metadata_path])
+
+    def test_add_open_problem_updates_manifest_and_markdown(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = make_paper(root)
+            app = object.__new__(workbench.WorkbenchApplication)
+            app.paths = [root]
+            app.analysis_lock = threading.Lock()
+            app.catalog = Mock()
+
+            result = app.add_open_problem({
+                "path": str(paper),
+                "title": "A related question",
+                "statement": "Can we prove $x > 0$?",
+            })
+            manifest = common.read_json(paper / "analysis" / "manifest.json")
+            markdown = (paper / "analysis" / "open-problems.md").read_text(
+                encoding="utf-8"
+            )
+
+        self.assertEqual(result["id"], "OP-002")
+        self.assertEqual(
+            manifest["open_problems"][-1],
+            {
+                "id": "OP-002",
+                "title": "A related question",
+                "explicitness": "additional",
+            },
+        )
+        self.assertIn("## OP-002: A related question", markdown)
+        self.assertIn("Can we prove $x > 0$?", markdown)
+        app.catalog.schedule.assert_called_once()
+
+    def test_add_open_problem_requires_analyzed_paper(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = make_paper(root)
+            (paper / "analysis" / "manifest.json").unlink()
+            app = object.__new__(workbench.WorkbenchApplication)
+            app.paths = [root]
+            app.analysis_lock = threading.Lock()
+
+            with self.assertRaisesRegex(PlanError, "analyze the paper"):
+                app.add_open_problem({
+                    "path": str(paper),
+                    "title": "Question",
+                    "statement": "What happens?",
+                })
 
     def test_multi_problem_plan_title_includes_single_paper_title(self):
         with TemporaryDirectory() as temporary:

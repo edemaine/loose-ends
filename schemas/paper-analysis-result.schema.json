@@ -33,7 +33,8 @@
             "enum": [
               "explicit",
               "inferred",
-              "uncertain"
+              "uncertain",
+              "additional"
             ]
           }
         },

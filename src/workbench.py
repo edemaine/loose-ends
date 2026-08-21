@@ -1447,6 +1447,7 @@ class WorkbenchApplication:
         self.plan_lock = threading.Lock()
         self.manuscript_lock = threading.Lock()
         self.metadata_lock = threading.Lock()
+        self.analysis_lock = threading.Lock()
         self.paper_import_lock = threading.Lock()
         self.paper_imports: dict[str, dict] = {}
         self.arxiv_search_lock = threading.Lock()
@@ -1747,6 +1748,105 @@ class WorkbenchApplication:
         result = {"path": str(paper), **fields}
         result["arxivId"] = result.pop("arxiv_id")
         return result
+
+    def add_open_problem(self, request: dict) -> dict:
+        """Add one manually entered problem to an analyzed paper."""
+        value = request.get("path")
+        if not isinstance(value, str) or not value:
+            raise PlanError("paper path is required")
+        paper = Path(value).expanduser().resolve()
+        if not any(_relative_to(paper, root.resolve()) for root in self.paths):
+            raise PlanError("paper is outside the configured paper directories")
+        if not analyze_papers.is_paper_directory(paper):
+            raise PlanError("paper directory is unavailable")
+
+        title = request.get("title", "")
+        statement = request.get("statement", "")
+        explicitness = request.get("explicitness", "additional")
+        if not isinstance(title, str) or not title.strip():
+            raise PlanError("problem title is required")
+        if "\n" in title or "\r" in title:
+            raise PlanError("problem title must be a single line")
+        if not isinstance(statement, str) or not statement.strip():
+            raise PlanError("problem statement is required")
+        if explicitness not in common.EXPLICITNESS_VALUES:
+            raise PlanError(
+                "problem relation must be explicit, inferred, uncertain, or additional"
+            )
+        title = title.strip()
+        statement = statement.strip()
+
+        analysis = paper / "analysis"
+        manifest_path = analysis / "manifest.json"
+        problems_path = analysis / "open-problems.md"
+        manifest_temporary = analysis / ".manifest.manual-problem.tmp"
+        problems_temporary = analysis / ".open-problems.manual-problem.tmp"
+        with self.analysis_lock:
+            try:
+                manifest = common.read_json(
+                    manifest_path,
+                    description="paper analysis manifest",
+                )
+            except common.CodexError as exc:
+                raise PlanError(
+                    "analyze the paper before adding an open problem"
+                ) from exc
+            problems = manifest.get("open_problems")
+            if not isinstance(problems, list):
+                raise PlanError("paper analysis manifest has no open-problem list")
+
+            used_numbers = []
+            for problem in problems:
+                problem_id = problem.get("id") if isinstance(problem, dict) else None
+                if (
+                    not isinstance(problem_id, str)
+                    or not analyze_papers.OPEN_PROBLEM_ID_RE.fullmatch(problem_id)
+                ):
+                    raise PlanError("paper analysis manifest has an invalid open problem")
+                used_numbers.append(int(problem_id.removeprefix("OP-")))
+            problem_id = f"OP-{max(used_numbers, default=0) + 1:03d}"
+            manifest["open_problems"] = [
+                *problems,
+                {
+                    "id": problem_id,
+                    "title": title,
+                    "explicitness": explicitness,
+                },
+            ]
+
+            try:
+                original_markdown = problems_path.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                original_markdown = "# Open Problems\n"
+            except (OSError, UnicodeError) as exc:
+                raise PlanError(f"could not read open problems: {exc}") from exc
+            updated_markdown = (
+                original_markdown.rstrip()
+                + f"\n\n## {problem_id}: {title}\n\n{statement}\n"
+            )
+            try:
+                common.write_json(manifest_temporary, manifest)
+                problems_temporary.write_text(updated_markdown, encoding="utf-8")
+                os.replace(problems_temporary, problems_path)
+                try:
+                    os.replace(manifest_temporary, manifest_path)
+                except Exception:
+                    problems_path.write_text(original_markdown, encoding="utf-8")
+                    raise
+            except (OSError, UnicodeError) as exc:
+                raise PlanError(f"could not add open problem: {exc}") from exc
+            finally:
+                manifest_temporary.unlink(missing_ok=True)
+                problems_temporary.unlink(missing_ok=True)
+
+        self.catalog.schedule([manifest_path, problems_path])
+        return {
+            "path": str(paper / problem_id),
+            "id": problem_id,
+            "title": title,
+            "statement": statement,
+            "explicitness": explicitness,
+        }
 
     def set_manuscript_pinning(self, request: dict) -> dict:
         draft_value = request.get("draft")
@@ -2086,6 +2186,8 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                 self.send_json(self.app.search_arxiv_author(body))
             elif parsed.path == "/api/papers/metadata":
                 self.send_json(self.app.update_paper_metadata(body))
+            elif parsed.path == "/api/papers/open-problems":
+                self.send_json(self.app.add_open_problem(body), 201)
             elif parsed.path == "/api/jobs":
                 plan_id = body.get("planId")
                 if not isinstance(plan_id, str):

@@ -46,7 +46,7 @@ ANALYSIS_FILES = (
     "open-problems.md",
     "manifest.json",
 )
-EXPLICITNESS_VALUES = ("explicit", "inferred", "uncertain")
+EXPLICITNESS_VALUES = ("explicit", "inferred", "uncertain", "additional")
 CLAIMED_RESULT_TYPES = (
     "none",
     "obstruction",

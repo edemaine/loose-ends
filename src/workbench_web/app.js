@@ -1761,6 +1761,14 @@ function renderPapers() {
   );
   actions.append(button("Edit metadata", () => openMetadataEditor(paper), "button"));
   addAction(actions, paper.analyzed ? "Analyze again" : "Analyze", "analyze", [paperTarget(paper)], !paper.analyzed);
+  const addProblem = button(
+    "Add open problem",
+    () => openProblemEditor(paper),
+    "button",
+  );
+  addProblem.disabled = !paper.analyzed;
+  if (!paper.analyzed) addProblem.title = "Analyze the paper first.";
+  actions.append(addProblem);
   const problems = uniqueProblemTargets(paper.path);
   if (problems.length) {
     addAction(actions, "Triage problems", "triage", problems);
@@ -2117,6 +2125,72 @@ async function saveMetadataEditor() {
     dialog.close();
     state.dialog = null;
     renderPapers();
+  } catch (error) {
+    dialogFooter.querySelectorAll("button").forEach(value => {
+      value.disabled = false;
+    });
+    dialogBody.querySelector(".error-box")?.remove();
+    dialogBody.prepend(node("div", "error-box", error.message));
+  }
+}
+
+function openProblemEditor(paper) {
+  state.dialog = { kind: "open-problem", paper };
+  dialogEyebrow.textContent = paper.title;
+  dialogTitle.textContent = "Add open problem";
+  dialogBody.replaceChildren();
+  const grid = node("div", "form-grid");
+  grid.append(
+    field("title", "Title", {
+      full: true,
+      help: "A short name for the problem.",
+    }),
+    field("statement", "Problem statement", {
+      type: "textarea",
+      full: true,
+      help: "Markdown and LaTeX math are supported.",
+    }),
+    field("explicitness", "Relation to the paper", {
+      type: "select",
+      value: "additional",
+      options: [
+        ["additional", "Additional problem related to the paper"],
+        ["explicit", "Explicitly stated in the paper"],
+        ["inferred", "Inferred from the paper"],
+        ["uncertain", "Uncertain"],
+      ],
+      full: true,
+    }),
+  );
+  dialogBody.append(grid);
+  dialogFooter.replaceChildren(
+    button("Cancel", () => dialog.close()),
+    button("Add problem", saveProblemEditor, "button primary"),
+  );
+  dialog.showModal();
+  dialogBody.querySelector('[name="title"]')?.focus();
+}
+
+async function saveProblemEditor() {
+  const editor = state.dialog;
+  if (!editor || editor.kind !== "open-problem") return;
+  const values = {};
+  dialogBody.querySelectorAll("[name]").forEach(input => {
+    values[input.name] = input.value;
+  });
+  dialogFooter.querySelectorAll("button").forEach(value => {
+    value.disabled = true;
+  });
+  try {
+    const problem = await api("/api/papers/open-problems", {
+      method: "POST",
+      body: { path: editor.paper.path, ...values },
+    });
+    editor.paper.problemCount += 1;
+    dialog.close();
+    state.dialog = null;
+    renderPapers();
+    showNotice(`${problem.id} was added to ${editor.paper.title}.`);
   } catch (error) {
     dialogFooter.querySelectorAll("button").forEach(value => {
       value.disabled = false;
