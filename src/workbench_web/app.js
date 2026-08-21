@@ -699,18 +699,32 @@ function visibleProblemTargets() {
   return reviewModel.latestProblems(filteredReviews()).map(problemTarget);
 }
 
-function updateVisibleProblemSelectionControl(input) {
+function visiblePaperTargets() {
+  const query = state.search.trim().toLowerCase();
+  return state.catalog.papers
+    .filter(paper => !query || `${paper.title} ${paper.name} ${paper.authors.join(" ")}`.toLowerCase().includes(query))
+    .map(paperTarget);
+}
+
+function updateVisibleSelectionControl(input, targets, noun) {
   if (!input) return;
-  const targets = visibleProblemTargets();
   const selected = targets.filter(value => state.selection.has(targetKey(value))).length;
   input.checked = targets.length > 0 && selected === targets.length;
   input.indeterminate = selected > 0 && selected < targets.length;
   input.disabled = targets.length === 0;
-  input.setAttribute("aria-label", `${input.checked ? "Clear" : "Select"} all ${targets.length} visible problems`);
+  input.setAttribute("aria-label", `${input.checked ? "Clear" : "Select"} all ${targets.length} visible ${noun}`);
   const label = input.closest("label");
   label?.classList.toggle("disabled", input.disabled);
   const copy = label?.querySelector("span");
   if (copy) copy.textContent = `Select visible (${targets.length.toLocaleString()})`;
+}
+
+function updateVisibleProblemSelectionControl(input) {
+  updateVisibleSelectionControl(input, visibleProblemTargets(), "problems");
+}
+
+function updateVisiblePaperSelectionControl(input) {
+  updateVisibleSelectionControl(input, visiblePaperTargets(), "papers");
 }
 
 function syncSelectionControls() {
@@ -720,16 +734,19 @@ function syncSelectionControls() {
   updateVisibleProblemSelectionControl(
     document.querySelector("input[data-select-visible-problems]"),
   );
+  updateVisiblePaperSelectionControl(
+    document.querySelector("input[data-select-visible-papers]"),
+  );
 }
 
-function visibleProblemSelectionControl() {
+function visibleSelectionControl(targets, datasetKey, update) {
   const label = node("label", "select-visible");
   const input = node("input");
   input.type = "checkbox";
-  input.dataset.selectVisibleProblems = "";
+  input.dataset[datasetKey] = "";
   input.addEventListener("click", event => event.stopPropagation());
   input.addEventListener("change", () => {
-    visibleProblemTargets().forEach(value => {
+    targets().forEach(value => {
       const key = targetKey(value);
       if (input.checked) state.selection.set(key, value);
       else state.selection.delete(key);
@@ -739,8 +756,24 @@ function visibleProblemSelectionControl() {
   });
   label.addEventListener("click", event => event.stopPropagation());
   label.append(input, node("span"));
-  updateVisibleProblemSelectionControl(input);
+  update(input);
   return label;
+}
+
+function visibleProblemSelectionControl() {
+  return visibleSelectionControl(
+    visibleProblemTargets,
+    "selectVisibleProblems",
+    updateVisibleProblemSelectionControl,
+  );
+}
+
+function visiblePaperSelectionControl() {
+  return visibleSelectionControl(
+    visiblePaperTargets,
+    "selectVisiblePapers",
+    updateVisiblePaperSelectionControl,
+  );
 }
 
 function awaitingReviewAttemptsForTargets(values) {
@@ -1231,6 +1264,11 @@ function syncSidebarControls(tab, controls) {
   if (manuscriptSort && manuscriptSort.value !== state.manuscriptSort) {
     manuscriptSort.value = state.manuscriptSort;
   }
+  if (tab === "papers") {
+    updateVisiblePaperSelectionControl(
+      controls.querySelector("input[data-select-visible-papers]"),
+    );
+  }
   if (tab !== "research") return;
 
   const details = controls.querySelector(".research-filters");
@@ -1700,6 +1738,7 @@ function renderPapers() {
     controls.append(
       sidebarSearch("Search source papers…"),
       paperSortControl(),
+      visiblePaperSelectionControl(),
       addActions,
     );
     return controls;
