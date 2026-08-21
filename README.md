@@ -53,6 +53,100 @@ Loose Ends itself is written in Python, plus JavaScript in the web app.
 The research CLI tools use only the Python standard library.
 The workbench additionally uses `watchdog` for efficient filesystem updates.
 
+## Prerequisites
+
+To use Loose Ends, install the following prerequisites if you haven't already:
+
+* [Python](https://www.python.org/)
+* Python dependencies: `python -m pip install -r requirements.txt`
+* [Codex CLI](https://learn.chatgpt.com/docs/codex/cli), and run
+  `codex login` to authenticate your account
+* LaTeX, such as [TeX Live](https://www.tug.org/texlive/), including `latexmk`,
+  to write manuscripts
+
+If you're using Windows + Cygwin, you will get better performance out of
+Windows Python instead of Cygwin Python.  To do so, replace `python` with
+`py -3` in all instructions.
+
+## Quickstart
+
+Start the workbench web server by running the following command
+from the repository root:
+
+```sh
+python src/workbench.py papers
+```
+
+This command creates `papers/` if necessary, starts the workbench at
+`http://localhost:35007/`, and opens it in your browser. Paper data is stored
+under `papers/`, generated manuscripts under `manuscripts/`, and private task
+state under `.loose-ends/`. If you prefer, you can make multiple `papers`
+subdirectories like `papers/edemaine` and `papers/other` and start the
+workbench with both (`python src/workbench.py papers/edemaine papers/other`).
+
+Your web browser should automatically open the server at
+`http://localhost:35007/`. Then follow this workflow:
+
+1. **Add papers in Papers.** Switch to **Papers** and choose either:
+
+   * **Add from arXiv**. You can enter one or more arXiv IDs or URLs;
+     or change **Find papers by** to **Author name**, search, and
+     select papers from the results.
+   * **Add from files**. Supply local PDFs, source archives
+     (`.zip` or `.tar.gz`), or paper directories.
+
+   After the download or import finishes in **Activity**, return to **Papers**
+   and select a new paper. ArXiv papers should already have their metadata
+   (title and authors), but for local files you will need to supply it:
+   use **Extract metadata** to automate or **Edit metadata** to do it manually.
+2. **Analyze papers (extract open problems).**
+   In **Papers**, select all papers by choosing **Select visible**
+   (after optionally searching to filter down to a subset of papers),
+   or select (click on) an individual paper,
+   or select multiple papers via checkboxes.
+   Then choose **Analyze**. This produces a technical summary and extracts the
+   open problems from the papers. After the task finishes, switch from
+   **Activity** to **Research** to browse the extracted problems.
+3. **Triage the open problems.**
+   In **Research**, select all problems by choosing **Select visible**
+   (after optionally searching or otherwise filtering down to a subset of
+   papers), or select papers via checkboxes, 
+   and then choose **Triage** in the selection bar.
+   Alternatively, select **Triage** from an individual problem in **Research**
+   or **Triage problems** from an individual paper in **Papers**.
+   Afterward, return to **Research** and use **Problem filters** dropdown
+   (specifically the **Triage** field) to filter according to `attempt`,
+   `maybe`, and `skip` recommendations.
+4. **Search the literature.** This stage is optional but helps avoid solving a
+   problem that later work has already resolved. In **Research**, select the
+   promising problems and choose **Literature**, or open one problem and choose
+   **Search literature**. After the task finishes, return to **Research** and
+   open its **Literature** detail tab. The problem filters can narrow the list
+   to current `attempt` or `maybe` triages before selecting a batch.
+5. **Attempt and review solutions.** Select problems in **Research** and choose
+   **Solve**. The default review policy sends promising attempts to an
+   independent critic automatically. When the task finishes, return to
+   **Research** and inspect the **Attempt**, **Critique**, and **Files** detail
+   tabs; the attempt list in the sidebar retains earlier rounds. To handle
+   attempts still awaiting a critic, filter for **Awaiting review**, select
+   them, and choose **Review**.
+6. **Write and revise a paper.** (This requires LaTeX including `latexmk`.)
+   Select one or more results in **Research** and choose **Write paper**,
+   or open an attempt and choose **Write this result**.
+   You can request multiple automatic rounds of writing, reviewing, and
+   revising.
+   After the writing task finishes, switch to **Manuscripts** to open or
+   download the PDF or source files, inspect the critic verdict, and
+   choose **Revise** for another author-review round.
+
+Every managed task has the same two-step launch process: configure its options,
+review the exact commands and dry-run previews, and then start the runs. Once a
+task starts, the workbench switches automatically to **Activity**, where you
+can follow its status and console output; or use the back button to return.
+Use **Activity** at any time to revisit task history, logs, failures, and output
+paths. The **Workers** control in the top bar sets how many queued CLI runs may
+execute concurrently.
+
 ## Download arXiv papers
 
 `src/download_arxiv.py` downloads both the rendered PDF and the authors' submitted
