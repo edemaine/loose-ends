@@ -702,6 +702,7 @@ def stage_context(
     if include_history:
         for problem in problems:
             destination = inputs / "history" / problem.id
+            destination.mkdir(parents=True, exist_ok=True)
             _copy_attempt_history(
                 problem,
                 destination,

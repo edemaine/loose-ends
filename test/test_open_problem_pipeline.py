@@ -909,6 +909,25 @@ class OpenProblemPipelineTests(unittest.TestCase):
                         / "critique.md"
                     ).is_file()
                 )
+                self.assertTrue(
+                    (
+                        workspace
+                        / "inputs"
+                        / "history"
+                        / "OP-002"
+                    ).is_dir()
+                )
+                self.assertEqual(
+                    list(
+                        (
+                            workspace
+                            / "inputs"
+                            / "history"
+                            / "OP-002"
+                        ).iterdir()
+                    ),
+                    [],
+                )
                 entries = [
                     {
                         "problem_id": "OP-001",
@@ -1136,6 +1155,64 @@ class OpenProblemPipelineTests(unittest.TestCase):
             self.assertTrue(
                 (problem.directory / common.LITERATURE_MARKDOWN).is_file()
             )
+
+    def test_literature_recovery_skips_partial_workspace(self):
+        with TemporaryDirectory() as temporary:
+            paper = make_analyzed_paper(Path(temporary))
+            problem = common.discover_problem_refs(
+                [paper], problem_ids={"OP-001"}
+            )[0]
+            runs = common.paper_runs_directory(paper)
+            runs.mkdir()
+            workspace = runs / ".literature-run-partial"
+            workspace.mkdir()
+            prompt = literature_review.DEFAULT_PROMPT_PATH.read_text(
+                encoding="utf-8"
+            )
+            schema_text = (
+                literature_review.DEFAULT_SCHEMA_PATH.read_text(
+                    encoding="utf-8"
+                )
+            )
+            options = codex_cli.ModelOptions("test-model", "xhigh")
+            config_digest = codex_cli.semantic_config_digest(
+                prompt,
+                schema_text,
+                options,
+                web_search="live",
+                validation_source=Path(
+                    literature_review.literature_validation.__file__
+                ),
+            )
+            input_digests = {
+                problem.id: common.literature_input_digest(problem)
+            }
+            literature_review._write_work_record(
+                workspace,
+                [problem],
+                input_digests=input_digests,
+                config_digest=config_digest,
+                codex_version="test",
+                options=options,
+                web_search="live",
+            )
+            common.write_json(
+                workspace / "agent-result.json",
+                {"status": "partial", "literature": [], "warnings": []},
+            )
+            write_run_files(workspace)
+
+            recovered = literature_review.recover_paper_literature(
+                [problem],
+                codex="codex",
+                codex_version="test",
+                input_digests=input_digests,
+                config_digest=config_digest,
+                options=options,
+                web_search="live",
+            )
+
+            self.assertIsNone(recovered)
 
     def test_literature_repairs_unsupported_resolved_status(self):
         with TemporaryDirectory() as temporary:

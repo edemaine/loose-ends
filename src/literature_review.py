@@ -565,11 +565,14 @@ def recover_paper_literature(
         ]
         if not all(path.is_file() for path in required):
             continue
-        root_result, entries = validate_literature_result(
-            workspace / "agent-result.json",
-            workspace,
-            problems,
-        )
+        try:
+            root_result, entries = validate_literature_result(
+                workspace / "agent-result.json",
+                workspace,
+                problems,
+            )
+        except common.CodexError:
+            continue
         outcomes = []
         for problem in problems:
             entry = entries[problem.id]
