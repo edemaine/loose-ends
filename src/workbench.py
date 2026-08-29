@@ -38,6 +38,7 @@ import open_problem_common as common
 import review_solutions
 import write_paper
 from workbench_store import ACTIVE_STATUSES, WorkbenchStore
+from workbench_memory import QUEUE_JOB_ENV, QueueMemoryController
 from workbench_worker import recover_run_artifacts
 from workbench_tasks import (
     PlanError,
@@ -1294,6 +1295,10 @@ class Scheduler:
         self.pending = threading.Event()
         self.last_launch = 0.0
         self.revision = self.store.revision()
+        self.memory = QueueMemoryController(self.store.database)
+        self.memory_lock = threading.Lock()
+        self.last_memory_report: tuple | None = None
+        self.settings_snapshot()
         self.pending.set()
         self.thread = threading.Thread(
             target=self._loop,
@@ -1302,7 +1307,9 @@ class Scheduler:
         )
         self.thread.start()
 
-    def _launch(self, run: dict) -> None:
+    def _launch(self, run: dict, settings: dict | None = None) -> None:
+        if settings is None:
+            settings = self.store.scheduler_settings()
         command = [
             sys.executable,
             "-u",
@@ -1316,6 +1323,24 @@ class Scheduler:
         environment["LOOSE_ENDS_CODEX_LAUNCH_GATE"] = str(
             self.state_directory / "codex-launch.lock"
         )
+        memory = getattr(self, "memory", None)
+        try:
+            if memory is not None:
+                with self.memory_lock:
+                    container = memory.prepare_run(run["id"], settings)
+                if container:
+                    environment[QUEUE_JOB_ENV] = container
+        except OSError as exc:
+            self.store.update_run(
+                run["id"],
+                status="failed",
+                finished_at=time.time(),
+                error=f"could not prepare worker memory limit: {exc}",
+            )
+            self.last_launch = time.monotonic()
+            self.revision = self.store.revision()
+            self.hub.publish("tasks.changed", revision=self.revision)
+            return
         options: dict = {
             "cwd": PROJECT_ROOT,
             "env": environment,
@@ -1340,6 +1365,41 @@ class Scheduler:
     def schedule(self) -> None:
         self.pending.set()
 
+    def settings_snapshot(self) -> dict:
+        """Return persisted settings enriched with live queue-memory state."""
+        with self.memory_lock:
+            settings = self.store.scheduler_settings()
+            active_run_ids = self.store.active_run_ids()
+            if not isinstance(active_run_ids, (set, list, tuple)):
+                active_run_ids = set()
+            memory = self.memory.reconcile(
+                settings,
+                set(active_run_ids),
+            )
+            changed = self.store.update_memory_limit_runtime(
+                pending=bool(memory["pending"]),
+                applied_bytes=memory["appliedBytes"],
+            )
+            if changed is True:
+                settings = self.store.scheduler_settings()
+            settings["memory"] = memory
+            return settings
+
+    def _publish_memory_if_changed(self, settings: dict) -> None:
+        memory = settings["memory"]
+        bucket_size = 128 * 1024 * 1024
+        report = (
+            settings.get("memoryLimitPending", False),
+            memory["appliedBytes"],
+            (memory["currentBytes"] or 0) // bucket_size,
+            (memory["peakBytes"] or 0) // bucket_size,
+            memory["error"],
+        )
+        if report == self.last_memory_report:
+            return
+        self.last_memory_report = report
+        self.hub.publish("settings.changed", **settings)
+
     def _check(self) -> float | None:
         stale = self.store.mark_stale_runs(older_than=12)
         for run_id in stale:
@@ -1357,7 +1417,8 @@ class Scheduler:
             self.revision = current_revision
             self.hub.publish("tasks.changed", revision=self.revision)
 
-        settings = self.store.scheduler_settings()
+        settings = self.settings_snapshot()
+        self._publish_memory_if_changed(settings)
         active_count = self.store.active_count()
         slots = settings["workerLimit"] - active_count
         if slots > 0 and not settings["queuePaused"]:
@@ -1369,10 +1430,12 @@ class Scheduler:
                 return launch_delay
             run = self.store.claim_next_run(self.store.active_resources())
             if run is not None:
-                self._launch(run)
+                self._launch(run, settings)
                 return 1.05
         # An active worker normally wakes us through SQLite WAL events.  This
         # timeout only detects a worker that died without another commit.
+        if settings.get("memoryLimitPending", False):
+            return 2.0
         if active_count:
             return 12.0
         return None
@@ -1395,6 +1458,7 @@ class Scheduler:
         self.stopping.set()
         self.pending.set()
         self.thread.join(timeout=5)
+        self.memory.close()
 
 
 def _paper_import_relative_path(value: str) -> Path:
@@ -2081,7 +2145,7 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                         "catalog": self.app.catalog.snapshot(),
                         "jobs": self.app.store.list_jobs(),
                         "settings": {
-                            **self.app.store.scheduler_settings(),
+                            **self.app.scheduler.settings_snapshot(),
                             "projectRoot": str(PROJECT_ROOT),
                             "paperRoots": [
                                 str(path) for path in self.app.paper_output_roots
@@ -2199,7 +2263,10 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                     changes["worker_limit"] = body["workerLimit"]
                 if "queuePaused" in body:
                     changes["queue_paused"] = body["queuePaused"]
-                settings = self.app.store.update_scheduler_settings(**changes)
+                if "memoryLimit" in body:
+                    changes["memory_limit"] = body["memoryLimit"]
+                self.app.store.update_scheduler_settings(**changes)
+                settings = self.app.scheduler.settings_snapshot()
                 self.send_json(settings)
                 self.app.scheduler.schedule()
                 self.app.hub.publish("settings.changed", **settings)

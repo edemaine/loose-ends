@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import json
+import math
 from pathlib import Path
 import sqlite3
 import time
@@ -24,6 +25,9 @@ MIN_PRIORITY_LEVEL = -3
 MAX_PRIORITY_LEVEL = 3
 DEFAULT_WORKER_LIMIT = 2
 MAX_WORKER_LIMIT = 64
+DEFAULT_MEMORY_LIMIT_PERCENT = 50.0
+MAX_MEMORY_LIMIT_PERCENT = 10_000.0
+MAX_MEMORY_LIMIT_GB = 100_000.0
 
 
 def _resource_identity(resource: str) -> tuple[str, str]:
@@ -169,6 +173,10 @@ class WorkbenchStore:
                     id INTEGER PRIMARY KEY CHECK (id = 1),
                     worker_limit INTEGER NOT NULL,
                     queue_paused INTEGER NOT NULL DEFAULT 0,
+                    memory_limit_mode TEXT NOT NULL DEFAULT 'percent',
+                    memory_limit_value REAL NOT NULL DEFAULT 50,
+                    memory_limit_pending INTEGER NOT NULL DEFAULT 0,
+                    memory_limit_applied_bytes INTEGER,
                     updated_at REAL NOT NULL
                 );
                 """
@@ -195,6 +203,21 @@ class WorkbenchStore:
                 if name not in job_columns:
                     connection.execute(
                         f"ALTER TABLE jobs ADD COLUMN {name} {declaration}"
+                    )
+            scheduler_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(scheduler_settings)")
+            }
+            scheduler_migrations = {
+                "memory_limit_mode": "TEXT NOT NULL DEFAULT 'percent'",
+                "memory_limit_value": "REAL NOT NULL DEFAULT 50",
+                "memory_limit_pending": "INTEGER NOT NULL DEFAULT 0",
+                "memory_limit_applied_bytes": "INTEGER",
+            }
+            for name, declaration in scheduler_migrations.items():
+                if name not in scheduler_columns:
+                    connection.execute(
+                        f"ALTER TABLE scheduler_settings ADD COLUMN {name} {declaration}"
                     )
             connection.execute(
                 """
@@ -415,7 +438,25 @@ class WorkbenchStore:
             ).fetchone()
         return {
             "workerLimit": int(row["worker_limit"]),
-            "queuePaused": bool(row["queue_paused"]),
+            "queuePaused": bool(row["queue_paused"] or row["memory_limit_pending"]),
+            "queueManuallyPaused": bool(row["queue_paused"]),
+            "queuePauseReason": (
+                "manual"
+                if row["queue_paused"]
+                else "memory_limit_pending"
+                if row["memory_limit_pending"]
+                else None
+            ),
+            "memoryLimit": {
+                "mode": row["memory_limit_mode"],
+                "value": (
+                    float(row["memory_limit_value"])
+                    if row["memory_limit_mode"] != "unlimited"
+                    else None
+                ),
+            },
+            "memoryLimitPending": bool(row["memory_limit_pending"]),
+            "appliedMemoryLimitBytes": row["memory_limit_applied_bytes"],
             "updatedAt": float(row["updated_at"]),
         }
 
@@ -424,6 +465,7 @@ class WorkbenchStore:
         *,
         worker_limit: object | None = None,
         queue_paused: object | None = None,
+        memory_limit: object | None = None,
     ) -> dict:
         assignments: list[str] = []
         parameters: list[object] = []
@@ -445,6 +487,33 @@ class WorkbenchStore:
                 raise ValueError("queuePaused must be true or false")
             assignments.append("queue_paused = ?")
             parameters.append(int(queue_paused))
+        if memory_limit is not None:
+            if not isinstance(memory_limit, dict):
+                raise ValueError("memoryLimit must be an object")
+            mode = memory_limit.get("mode")
+            if mode not in {"percent", "gb", "unlimited"}:
+                raise ValueError("memory limit mode must be percent, gb, or unlimited")
+            value: float | None = None
+            if mode != "unlimited":
+                raw_value = memory_limit.get("value")
+                if isinstance(raw_value, bool):
+                    raise ValueError("memory limit value must be a number")
+                try:
+                    value = float(raw_value)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("memory limit value must be a number") from exc
+                maximum = (
+                    MAX_MEMORY_LIMIT_PERCENT
+                    if mode == "percent"
+                    else MAX_MEMORY_LIMIT_GB
+                )
+                if not math.isfinite(value) or not 0.1 <= value <= maximum:
+                    unit = "%" if mode == "percent" else "GB"
+                    raise ValueError(
+                        f"memory limit must be between 0.1 and {maximum:g}{unit}"
+                    )
+            assignments.extend(("memory_limit_mode = ?", "memory_limit_value = ?"))
+            parameters.extend((mode, value or DEFAULT_MEMORY_LIMIT_PERCENT))
         if not assignments:
             raise ValueError("no scheduler setting was supplied")
         assignments.append("updated_at = ?")
@@ -455,6 +524,32 @@ class WorkbenchStore:
                 parameters,
             )
         return self.scheduler_settings()
+
+    def update_memory_limit_runtime(
+        self,
+        *,
+        pending: bool,
+        applied_bytes: int | None,
+    ) -> bool:
+        """Persist runtime enforcement state, returning whether it changed."""
+        with self.connect() as connection:
+            row = connection.execute(
+                """SELECT memory_limit_pending, memory_limit_applied_bytes
+                FROM scheduler_settings WHERE id = 1"""
+            ).fetchone()
+            if (
+                bool(row["memory_limit_pending"]) == pending
+                and row["memory_limit_applied_bytes"] == applied_bytes
+            ):
+                return False
+            connection.execute(
+                """UPDATE scheduler_settings
+                SET memory_limit_pending = ?, memory_limit_applied_bytes = ?,
+                    updated_at = ?
+                WHERE id = 1""",
+                (int(pending), applied_bytes, time.time()),
+            )
+        return True
 
     def update_job_scheduling(
         self,
@@ -590,6 +685,15 @@ class WorkbenchStore:
                 tuple(ACTIVE_STATUSES),
             ).fetchone()
         return int(row[0])
+
+    def active_run_ids(self) -> set[str]:
+        placeholders = ",".join("?" for _ in ACTIVE_STATUSES)
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"SELECT id FROM runs WHERE status IN ({placeholders})",
+                tuple(ACTIVE_STATUSES),
+            ).fetchall()
+        return {str(row["id"]) for row in rows}
 
     def active_resources(self) -> set[str]:
         placeholders = ",".join("?" for _ in ACTIVE_STATUSES)

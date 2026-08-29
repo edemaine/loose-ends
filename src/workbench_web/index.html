@@ -36,10 +36,27 @@
             <button id="worker-increase" type="button" aria-label="Increase worker limit">+</button>
           </div>
         </div>
-        <p id="worker-status"></p>
-        <div class="scheduler-actions">
+        <div class="scheduler-worker-footer">
+          <p id="worker-status"></p>
           <button id="queue-toggle" type="button" class="button"></button>
         </div>
+        <div class="scheduler-memory-heading">Total worker memory limit and units</div>
+        <div id="memory-value-row" class="memory-control-row">
+          <div class="memory-value-control">
+            <span id="memory-value-label" class="memory-unlimited-label" hidden>No limit</span>
+            <div id="memory-stepper" class="memory-stepper" role="group" aria-label="Queue memory limit">
+              <button id="memory-decrease" type="button" aria-label="Decrease queue memory limit">−</button>
+              <input id="memory-value" type="number" min="0.1" step="1" aria-label="Queue memory limit value">
+              <button id="memory-increase" type="button" aria-label="Increase queue memory limit">+</button>
+            </div>
+          </div>
+          <div id="memory-mode" class="memory-mode" role="group" aria-label="Queue memory limit unit">
+            <button type="button" data-memory-mode="percent" title="Percentage of installed RAM">%</button>
+            <button type="button" data-memory-mode="gb" title="Fixed number of GB">GB</button>
+            <button type="button" data-memory-mode="unlimited" title="No queue memory limit">∞</button>
+          </div>
+        </div>
+        <p id="memory-status" class="memory-status"></p>
       </div>
     </details>
     <div id="connection" class="connection">Connecting…</div>
