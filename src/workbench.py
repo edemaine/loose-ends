@@ -86,6 +86,7 @@ PAPER_IMPORT_MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024
 PAPER_IMPORT_MAX_TOTAL_BYTES = 4 * 1024 * 1024 * 1024
 PAPER_IMPORT_MAX_FILES = 20_000
 PAPER_IMPORT_TTL_SECONDS = 60 * 60
+WORKER_HEARTBEAT_STALE_SECONDS = 5 * 60
 CATALOG_FILE_NAMES = {
     "metadata.json",
     "paper.pdf",
@@ -1298,6 +1299,7 @@ class Scheduler:
         self.memory = QueueMemoryController(self.store.database)
         self.memory_lock = threading.Lock()
         self.last_memory_report: tuple | None = None
+        self._restore_legacy_live_workers()
         self.settings_snapshot()
         self.pending.set()
         self.thread = threading.Thread(
@@ -1400,9 +1402,33 @@ class Scheduler:
         self.last_memory_report = report
         self.hub.publish("settings.changed", **settings)
 
-    def _check(self) -> float | None:
-        stale = self.store.mark_stale_runs(older_than=12)
-        for run_id in stale:
+    def _restore_legacy_live_workers(self) -> list[str]:
+        restored = []
+        for run_id in self.store.legacy_misclassified_run_ids():
+            with self.memory_lock:
+                has_processes = self.memory.run_has_processes(run_id)
+            if has_processes is not True:
+                continue
+            if self.store.restore_legacy_misclassified_run(run_id):
+                restored.append(run_id)
+        return restored
+
+    def _interrupt_terminated_workers(self) -> list[str]:
+        interrupted = []
+        candidates = self.store.stale_run_ids(
+            older_than=WORKER_HEARTBEAT_STALE_SECONDS
+        )
+        for run_id in candidates:
+            with self.memory_lock:
+                has_processes = self.memory.run_has_processes(run_id)
+            if has_processes is not False:
+                continue
+            if not self.store.mark_run_interrupted_if_stale(
+                run_id,
+                older_than=WORKER_HEARTBEAT_STALE_SECONDS,
+            ):
+                continue
+            interrupted.append(run_id)
             run = self.store.get_run(run_id)
             recover_run_artifacts(self.store, run)
             run = self.store.get_run(run_id)
@@ -1412,6 +1438,10 @@ class Scheduler:
                     status="partial",
                     error="worker stopped after reporting installed output",
                 )
+        return interrupted
+
+    def _check(self) -> float | None:
+        self._interrupt_terminated_workers()
         current_revision = self.store.revision()
         if current_revision != self.revision:
             self.revision = current_revision

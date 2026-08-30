@@ -511,6 +511,24 @@ class QueueMemoryController:
                 self._kernel32.CloseHandle(process)
         return total
 
+    def run_has_processes(self, run_id: str) -> bool | None:
+        """Return whether a run's OS container is nonempty, if knowable."""
+        if not self.available:
+            return None
+        try:
+            container = self._containers.get(run_id)
+            if container is None:
+                container = self._open_existing_container(run_id)
+                if container is None:
+                    return False
+                self._containers[run_id] = container
+            alive = bool(self._container_process_ids(container))
+            self.error = None
+            return alive
+        except OSError as exc:
+            self.error = str(exc)
+            return None
+
     def _container_limit_matches(
         self,
         container,

@@ -1790,6 +1790,17 @@ class WorkbenchStoreTests(unittest.TestCase):
         self.assertEqual(snapshot["appliedBytes"], 32 * workbench_memory.GB_BYTES)
         controller._set_container_limit.assert_not_called()
 
+    def test_queue_memory_reports_whether_worker_container_is_nonempty(self):
+        controller = object.__new__(workbench_memory.QueueMemoryController)
+        controller.available = True
+        controller.error = None
+        container = object()
+        controller._containers = {"run-1": container}
+        controller._container_process_ids = Mock(side_effect=[[101, 102], []])
+
+        self.assertTrue(controller.run_has_processes("run-1"))
+        self.assertFalse(controller.run_has_processes("run-1"))
+
     def test_queue_memory_increase_applies_immediately(self):
         controller = object.__new__(workbench_memory.QueueMemoryController)
         controller.physical_bytes = 64 * workbench_memory.GB_BYTES
@@ -1888,7 +1899,9 @@ class WorkbenchStoreTests(unittest.TestCase):
                 reopened = controller.reconcile(settings, {"peer-run"})
                 self.assertEqual(reopened["managedWorkers"], 1)
                 self.assertGreater(reopened["currentBytes"], 0)
+                self.assertTrue(controller.run_has_processes("peer-run"))
                 self.assertEqual(peer.wait(), 3)
+                self.assertFalse(controller.run_has_processes("peer-run"))
             finally:
                 if peer is not None and peer.poll() is None:
                     peer.wait(timeout=5)
@@ -1983,6 +1996,9 @@ class WorkbenchStoreTests(unittest.TestCase):
             self.assertEqual(
                 (cgroup / "cgroup.procs").read_text().strip(), str(os.getpid())
             )
+            self.assertTrue(controller.run_has_processes("run-1"))
+            (cgroup / "cgroup.procs").write_text("", encoding="ascii")
+            self.assertFalse(controller.run_has_processes("run-1"))
 
     def test_linux_without_delegation_pauses_a_finite_policy(self):
         controller = object.__new__(workbench_memory.QueueMemoryController)
@@ -2200,7 +2216,7 @@ class WorkbenchStoreTests(unittest.TestCase):
             self.assertEqual(saved["outputs"], [str(first.resolve()), str(second.resolve())])
             self.assertEqual(saved["status"], "succeeded")
 
-    def test_stale_heartbeat_becomes_interrupted_and_can_retry(self):
+    def test_confirmed_terminated_worker_becomes_interrupted_and_can_retry(self):
         with TemporaryDirectory() as temporary:
             state = Path(temporary)
             store = WorkbenchStore(state / "workbench.sqlite3", state)
@@ -2212,11 +2228,34 @@ class WorkbenchStoreTests(unittest.TestCase):
             store.mark_starting(run["id"])
             store.update_run(run["id"], heartbeat_at=time.time() - 100)
 
-            self.assertEqual(store.mark_stale_runs(older_than=10), [run["id"]])
+            self.assertEqual(store.stale_run_ids(older_than=10), [run["id"]])
+            self.assertTrue(
+                store.mark_run_interrupted_if_stale(run["id"], older_than=10)
+            )
             self.assertEqual(store.get_run(run["id"])["status"], "interrupted")
             retry = store.retry_run(run["id"])
             self.assertEqual(retry["status"], "queued")
             self.assertEqual(retry["retry_of"], run["id"])
+
+    def test_fresh_heartbeat_prevents_stale_candidate_race(self):
+        with TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            store = WorkbenchStore(state / "workbench.sqlite3", state)
+            job = store.create_job(
+                {"action": "solve"},
+                fake_plan([sys.executable, "-c", "pass"]),
+            )
+            run = job["runs"][0]
+            store.mark_starting(run["id"])
+            store.update_run(run["id"], heartbeat_at=time.time() - 100)
+            self.assertEqual(store.stale_run_ids(older_than=10), [run["id"]])
+
+            store.update_run(run["id"], heartbeat_at=time.time())
+
+            self.assertFalse(
+                store.mark_run_interrupted_if_stale(run["id"], older_than=10)
+            )
+            self.assertEqual(store.get_run(run["id"])["status"], "starting")
 
     def test_complete_artifact_lines_are_recovered_after_worker_interruption(self):
         with TemporaryDirectory() as temporary:
@@ -2395,10 +2434,107 @@ class WorkbenchWatchTests(unittest.TestCase):
 
         scheduler.schedule.assert_called_once_with()
 
+    def test_scheduler_interrupts_only_empty_stale_worker_containers(self):
+        with TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            store = WorkbenchStore(state / "workbench.sqlite3", state)
+            runs = []
+            for label in ("live", "terminated", "unknown", "recently_delayed"):
+                job = store.create_job(
+                    {"action": "solve"},
+                    fake_plan([sys.executable, "-c", "pass"]),
+                )
+                run = job["runs"][0]
+                store.mark_starting(run["id"])
+                heartbeat_age = 60 if label == "recently_delayed" else 1_000
+                store.update_run(
+                    run["id"],
+                    heartbeat_at=time.time() - heartbeat_age,
+                )
+                runs.append((label, run))
+            scheduler = object.__new__(workbench.Scheduler)
+            scheduler.store = store
+            scheduler.memory = Mock()
+            liveness = {
+                runs[0][1]["id"]: True,
+                runs[1][1]["id"]: False,
+                runs[2][1]["id"]: None,
+            }
+            scheduler.memory.run_has_processes.side_effect = liveness.get
+            scheduler.memory_lock = threading.Lock()
+
+            interrupted = scheduler._interrupt_terminated_workers()
+
+            self.assertEqual(interrupted, [runs[1][1]["id"]])
+            self.assertEqual(store.get_run(runs[0][1]["id"])["status"], "starting")
+            self.assertEqual(
+                store.get_run(runs[1][1]["id"])["status"], "interrupted"
+            )
+            self.assertEqual(store.get_run(runs[2][1]["id"])["status"], "starting")
+            self.assertEqual(store.get_run(runs[3][1]["id"])["status"], "starting")
+            self.assertEqual(store.active_count(), 3)
+            self.assertEqual(scheduler.memory.run_has_processes.call_count, 3)
+
+    def test_scheduler_restores_only_legacy_terminalized_live_workers(self):
+        with TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            store = WorkbenchStore(state / "workbench.sqlite3", state)
+            runs = []
+            outcomes = (
+                (
+                    "live",
+                    "interrupted",
+                    "worker heartbeat stopped; the run can be retried",
+                    True,
+                ),
+                (
+                    "terminated",
+                    "interrupted",
+                    "worker heartbeat stopped; the run can be retried",
+                    False,
+                ),
+                ("unrelated", "interrupted", "different failure", True),
+            )
+            for label, status, error, alive in outcomes:
+                job = store.create_job(
+                    {"action": "solve"},
+                    fake_plan([sys.executable, "-c", "pass"]),
+                )
+                run = job["runs"][0]
+                store.mark_starting(run["id"])
+                store.update_run(
+                    run["id"],
+                    status=status,
+                    finished_at=time.time(),
+                    error=error,
+                )
+                runs.append((label, run, alive))
+            scheduler = object.__new__(workbench.Scheduler)
+            scheduler.store = store
+            scheduler.memory = Mock()
+            liveness = {run["id"]: alive for _label, run, alive in runs}
+            scheduler.memory.run_has_processes.side_effect = liveness.get
+            scheduler.memory_lock = threading.Lock()
+
+            restored = scheduler._restore_legacy_live_workers()
+
+            self.assertEqual(restored, [runs[0][1]["id"]])
+            restored_run = store.get_run(runs[0][1]["id"])
+            self.assertEqual(restored_run["status"], "running")
+            self.assertGreater(restored_run["heartbeat_at"], time.time() - 5)
+            self.assertEqual(
+                store.get_run(runs[1][1]["id"])["status"], "interrupted"
+            )
+            self.assertEqual(
+                store.get_run(runs[2][1]["id"])["status"], "interrupted"
+            )
+            self.assertEqual(store.active_count(), 1)
+
     def test_idle_scheduler_waits_until_explicitly_woken(self):
         store = Mock()
         store.revision.return_value = 0.0
-        store.mark_stale_runs.return_value = []
+        store.legacy_misclassified_run_ids.return_value = []
+        store.stale_run_ids.return_value = []
         store.active_count.return_value = 0
         store.scheduler_settings.return_value = {
             "workerLimit": 1,
@@ -2414,23 +2550,23 @@ class WorkbenchWatchTests(unittest.TestCase):
         try:
             deadline = time.time() + 2
             while (
-                store.mark_stale_runs.call_count == 0
+                store.stale_run_ids.call_count == 0
                 and time.time() < deadline
             ):
                 time.sleep(0.01)
-            checks = store.mark_stale_runs.call_count
+            checks = store.stale_run_ids.call_count
             self.assertGreater(checks, 0)
             time.sleep(0.55)
-            self.assertEqual(store.mark_stale_runs.call_count, checks)
+            self.assertEqual(store.stale_run_ids.call_count, checks)
 
             scheduler.schedule()
             deadline = time.time() + 2
             while (
-                store.mark_stale_runs.call_count == checks
+                store.stale_run_ids.call_count == checks
                 and time.time() < deadline
             ):
                 time.sleep(0.01)
-            self.assertGreater(store.mark_stale_runs.call_count, checks)
+            self.assertGreater(store.stale_run_ids.call_count, checks)
         finally:
             scheduler.close()
 
