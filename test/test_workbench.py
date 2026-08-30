@@ -495,6 +495,8 @@ class WorkbenchPlanningTests(unittest.TestCase):
         )
         self.assertIn("Per-worker limit", app)
         self.assertNotIn("Computed per-worker limit", app)
+        self.assertNotIn("predates per-worker enforcement", app)
+        self.assertNotIn("managedWorkers", app)
         self.assertIn("÷ ${maximumWorkers} maximum workers", app)
         self.assertLess(
             index.index('id="worker-status"'),
@@ -1897,7 +1899,6 @@ class WorkbenchStoreTests(unittest.TestCase):
                 controller.close()
                 controller = workbench_memory.QueueMemoryController(database)
                 reopened = controller.reconcile(settings, {"peer-run"})
-                self.assertEqual(reopened["managedWorkers"], 1)
                 self.assertGreater(reopened["currentBytes"], 0)
                 self.assertTrue(controller.run_has_processes("peer-run"))
                 self.assertEqual(peer.wait(), 3)
@@ -2475,65 +2476,9 @@ class WorkbenchWatchTests(unittest.TestCase):
             self.assertEqual(store.active_count(), 3)
             self.assertEqual(scheduler.memory.run_has_processes.call_count, 3)
 
-    def test_scheduler_restores_only_legacy_terminalized_live_workers(self):
-        with TemporaryDirectory() as temporary:
-            state = Path(temporary)
-            store = WorkbenchStore(state / "workbench.sqlite3", state)
-            runs = []
-            outcomes = (
-                (
-                    "live",
-                    "interrupted",
-                    "worker heartbeat stopped; the run can be retried",
-                    True,
-                ),
-                (
-                    "terminated",
-                    "interrupted",
-                    "worker heartbeat stopped; the run can be retried",
-                    False,
-                ),
-                ("unrelated", "interrupted", "different failure", True),
-            )
-            for label, status, error, alive in outcomes:
-                job = store.create_job(
-                    {"action": "solve"},
-                    fake_plan([sys.executable, "-c", "pass"]),
-                )
-                run = job["runs"][0]
-                store.mark_starting(run["id"])
-                store.update_run(
-                    run["id"],
-                    status=status,
-                    finished_at=time.time(),
-                    error=error,
-                )
-                runs.append((label, run, alive))
-            scheduler = object.__new__(workbench.Scheduler)
-            scheduler.store = store
-            scheduler.memory = Mock()
-            liveness = {run["id"]: alive for _label, run, alive in runs}
-            scheduler.memory.run_has_processes.side_effect = liveness.get
-            scheduler.memory_lock = threading.Lock()
-
-            restored = scheduler._restore_legacy_live_workers()
-
-            self.assertEqual(restored, [runs[0][1]["id"]])
-            restored_run = store.get_run(runs[0][1]["id"])
-            self.assertEqual(restored_run["status"], "running")
-            self.assertGreater(restored_run["heartbeat_at"], time.time() - 5)
-            self.assertEqual(
-                store.get_run(runs[1][1]["id"])["status"], "interrupted"
-            )
-            self.assertEqual(
-                store.get_run(runs[2][1]["id"])["status"], "interrupted"
-            )
-            self.assertEqual(store.active_count(), 1)
-
     def test_idle_scheduler_waits_until_explicitly_woken(self):
         store = Mock()
         store.revision.return_value = 0.0
-        store.legacy_misclassified_run_ids.return_value = []
         store.stale_run_ids.return_value = []
         store.active_count.return_value = 0
         store.scheduler_settings.return_value = {

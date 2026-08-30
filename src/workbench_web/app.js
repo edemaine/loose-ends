@@ -1036,23 +1036,12 @@ function renderMemoryControl(maximumWorkers) {
     ? `${displayed.value}% of ${formatMemoryGB(telemetry.physicalBytes)} installed = ${allocation}`
     : allocation;
   const workerBasis = `${perWorker} (${allocation} ÷ ${maximumWorkers} maximum workers)`;
-  const activeWorkers = schedulerCounts().active;
-  const managedWorkers = Number(telemetry.managedWorkers);
-  let coverageNote = "";
-  if (telemetry.allocationBytes === undefined) {
-    coverageNote = "\nRestart the workbench to enforce per-worker limits.";
-  } else if (Number.isFinite(managedWorkers) && managedWorkers < activeWorkers) {
-    const existing = activeWorkers - managedWorkers;
-    coverageNote = existing === 1
-      ? "\n1 existing active worker predates per-worker enforcement and is not included in current actual usage."
-      : `\n${existing} existing active workers predate per-worker enforcement and are not included in current actual usage.`;
-  }
   if (state.settings.memoryLimitPending) {
-    memoryStatus.textContent = `Requested total allocation limit: ${allocationBasis}.\nRequested per-worker limit: ${workerBasis}.\nCurrent actual usage: ${formatMemoryUsage(telemetry.currentBytes)}; waiting for every worker to fall below its new limit.${coverageNote}`;
+    memoryStatus.textContent = `Requested total allocation limit: ${allocationBasis}.\nRequested per-worker limit: ${workerBasis}.\nCurrent actual usage: ${formatMemoryUsage(telemetry.currentBytes)}; waiting for every worker to fall below its new limit.`;
   } else if (telemetry.currentBytes != null) {
-    memoryStatus.textContent = `Total allocation limit: ${allocationBasis}.\nPer-worker limit: ${workerBasis}.\nCurrent actual usage: ${formatMemoryUsage(telemetry.currentBytes)}.${coverageNote}`;
+    memoryStatus.textContent = `Total allocation limit: ${allocationBasis}.\nPer-worker limit: ${workerBasis}.\nCurrent actual usage: ${formatMemoryUsage(telemetry.currentBytes)}.`;
   } else {
-    memoryStatus.textContent = `Total allocation limit: ${allocationBasis}.\nPer-worker limit: ${workerBasis}.${coverageNote}`;
+    memoryStatus.textContent = `Total allocation limit: ${allocationBasis}.\nPer-worker limit: ${workerBasis}.`;
   }
 }
 

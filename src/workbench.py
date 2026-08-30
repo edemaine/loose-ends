@@ -1299,7 +1299,6 @@ class Scheduler:
         self.memory = QueueMemoryController(self.store.database)
         self.memory_lock = threading.Lock()
         self.last_memory_report: tuple | None = None
-        self._restore_legacy_live_workers()
         self.settings_snapshot()
         self.pending.set()
         self.thread = threading.Thread(
@@ -1401,17 +1400,6 @@ class Scheduler:
             return
         self.last_memory_report = report
         self.hub.publish("settings.changed", **settings)
-
-    def _restore_legacy_live_workers(self) -> list[str]:
-        restored = []
-        for run_id in self.store.legacy_misclassified_run_ids():
-            with self.memory_lock:
-                has_processes = self.memory.run_has_processes(run_id)
-            if has_processes is not True:
-                continue
-            if self.store.restore_legacy_misclassified_run(run_id):
-                restored.append(run_id)
-        return restored
 
     def _interrupt_terminated_workers(self) -> list[str]:
         interrupted = []

@@ -610,7 +610,6 @@ class QueueMemoryController:
             "appliedBytes": None,
             "currentBytes": None,
             "peakBytes": self._observed_peak or None,
-            "managedWorkers": len(self._containers),
             "pending": False,
             "error": self.error,
         }
@@ -656,7 +655,6 @@ class QueueMemoryController:
                 appliedBytes=(max(applied_values) if applied_values else desired),
                 currentBytes=total_current,
                 peakBytes=self._observed_peak or None,
-                managedWorkers=len(self._containers),
                 pending=pending,
                 error=None,
             )

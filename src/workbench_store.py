@@ -21,8 +21,6 @@ TERMINAL_STATUSES = {
     "canceled",
     "interrupted",
 }
-LEGACY_INTERRUPTED_ERROR = "worker heartbeat stopped; the run can be retried"
-LEGACY_PARTIAL_ERROR = "worker stopped after reporting installed output"
 MIN_PRIORITY_LEVEL = -3
 MAX_PRIORITY_LEVEL = 3
 DEFAULT_WORKER_LIMIT = 2
@@ -877,55 +875,6 @@ class WorkbenchStore:
                 (*ACTIVE_STATUSES, cutoff),
             ).fetchall()
         return [str(row["id"]) for row in rows]
-
-    def legacy_misclassified_run_ids(self) -> list[str]:
-        """Return runs terminalized by the former heartbeat-only detector."""
-        with self.connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT id FROM runs
-                WHERE (status = 'interrupted' AND error = ?)
-                   OR (status = 'partial' AND error = ?)
-                """,
-                (LEGACY_INTERRUPTED_ERROR, LEGACY_PARTIAL_ERROR),
-            ).fetchall()
-        return [str(row["id"]) for row in rows]
-
-    def restore_legacy_misclassified_run(self, run_id: str) -> bool:
-        """Atomically restore a live run misclassified by the old detector."""
-        now = time.time()
-        with self.connect() as connection:
-            row = connection.execute(
-                "SELECT job_id FROM runs WHERE id = ?",
-                (run_id,),
-            ).fetchone()
-            if row is None:
-                return False
-            cursor = connection.execute(
-                """
-                UPDATE runs SET
-                    status = 'running',
-                    finished_at = NULL,
-                    heartbeat_at = ?,
-                    error = NULL,
-                    updated_at = ?
-                WHERE id = ?
-                  AND ((status = 'interrupted' AND error = ?)
-                    OR (status = 'partial' AND error = ?))
-                """,
-                (
-                    now,
-                    now,
-                    run_id,
-                    LEGACY_INTERRUPTED_ERROR,
-                    LEGACY_PARTIAL_ERROR,
-                ),
-            )
-            changed = bool(cursor.rowcount)
-            job_id = str(row["job_id"])
-        if changed:
-            self.reconcile_job(job_id)
-        return changed
 
     def mark_run_interrupted_if_stale(
         self,
