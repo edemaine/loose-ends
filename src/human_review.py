@@ -399,6 +399,7 @@ def paper_timeline(
         "published": published if isinstance(published, str) else "",
         "updated": updated if isinstance(updated, str) else "",
         "activityTimestamp": max(
+            _modified_timestamp(paper),
             _modified_timestamp(paper / "metadata.json"),
             _modified_timestamp(paper / "analysis" / "manifest.json"),
         ),
@@ -1696,7 +1697,7 @@ def render_human_review_html(
       if (query) {
         parameters.set("q", query);
       }
-      if (paperSort.value !== "alphabetical") {
+      if (paperSort.value !== "activity") {
         parameters.set("sort", paperSort.value);
       }
       LooseEndsReviewModel.filtersToSearchParams(

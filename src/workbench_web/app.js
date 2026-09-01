@@ -26,7 +26,7 @@ const state = {
   revealSidebarSecondarySelection: false,
   sidebarScroll: { research: 0, papers: 0, manuscripts: 0, activity: 0 },
   sidebarSecondaryScroll: { research: 0, manuscripts: 0 },
-  paperSort: "alphabetical",
+  paperSort: "activity",
   manuscriptSort: "latest",
   selectedPaper: "",
   selectedManuscript: "",
@@ -151,7 +151,7 @@ function rememberedTabUrl(tab) {
 function currentUrl() {
   const parameters = new URLSearchParams();
   if (state.search.trim()) parameters.set("q", state.search.trim());
-  if (["research", "papers"].includes(state.tab) && state.paperSort !== "alphabetical") {
+  if (["research", "papers"].includes(state.tab) && state.paperSort !== "activity") {
     parameters.set("sort", state.paperSort);
   }
   if (state.tab === "manuscripts" && state.manuscriptSort !== "latest") {
@@ -3497,7 +3497,7 @@ function routeHref(route) {
 function openRoute(route) {
   if (route.tab === "research") {
     state.search = "";
-    state.paperSort = "alphabetical";
+    state.paperSort = "activity";
     state.researchFilters = reviewModel.createDefaultFilters();
     state.selectedReview = route.review.itemKey;
     state.selectedProblem = route.review.problemKey;
@@ -3506,7 +3506,7 @@ function openRoute(route) {
     state.revealSidebarSecondarySelection = true;
   } else if (route.tab === "papers") {
     state.search = "";
-    state.paperSort = "alphabetical";
+    state.paperSort = "activity";
     state.selectedPaper = route.paper.key;
     state.revealSidebarSelection = true;
   } else {

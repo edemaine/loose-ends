@@ -91,9 +91,9 @@
   const priorityLevels = Object.freeze(["high", "medium", "low", "none"]);
   const freshnessLevels = Object.freeze(["current", "stale"]);
   const paperSortOptions = Object.freeze([
+    ["activity", "Latest activity"],
     ["alphabetical", "Alphabetical"],
     ["publication", "Publication date (newest)"],
-    ["activity", "Latest activity"],
     ["results", "Most results (weighted)"],
     ["problems", "Most open problems"],
   ]);
@@ -204,7 +204,7 @@
   function normalizePaperSort(value) {
     return paperSortOptions.some(([key]) => key === value)
       ? value
-      : "alphabetical";
+      : "activity";
   }
 
   function timestamp(value) {
@@ -293,7 +293,7 @@
     return comparePaperIdentity(left, right);
   }
 
-  function groupProblemsByPaper(items, sort = "alphabetical", referenceItems = items) {
+  function groupProblemsByPaper(items, sort = "activity", referenceItems = items) {
     const groups = new Map();
     latestProblems(items).forEach(item => {
       const key = item.paperUrlKey || item.paperDirectory;
@@ -314,7 +314,7 @@
     })).sort((left, right) => comparePaperEntries(left, right, sort));
   }
 
-  function sortPapers(papers, sort = "alphabetical", referenceItems = []) {
+  function sortPapers(papers, sort = "activity", referenceItems = []) {
     const metrics = paperMetrics(referenceItems);
     return papers.map(paper => {
       const key = paper.urlKey || paper.path;

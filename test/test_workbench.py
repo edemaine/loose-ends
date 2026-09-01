@@ -350,6 +350,8 @@ class WorkbenchPlanningTests(unittest.TestCase):
         self.assertIn("identityFromSearchParams(parameters)", app)
         self.assertIn("reviewModel.groupProblemsByPaper(", app)
         self.assertIn('parameters.set("sort", state.paperSort)', app)
+        self.assertIn('paperSort: "activity"', app)
+        self.assertIn('state.paperSort !== "activity"', app)
         self.assertIn("reviewModel.paperSortOptions", app)
         self.assertIn("reviewModel.sortPapers(", app)
         self.assertIn('node("div", "paper-list-controls")', app)
@@ -566,6 +568,8 @@ class WorkbenchPlanningTests(unittest.TestCase):
         self.assertNotIn("Math.max(previousResult?.weight", model)
         self.assertIn("function paperTitleWithYear", model)
         self.assertIn("function groupProblemsByPaper(items, sort", model)
+        self.assertIn('["activity", "Latest activity"]', model)
+        self.assertIn('function sortPapers(papers, sort = "activity"', model)
         self.assertIn('["results", "Most results (weighted)"]', model)
         styles = (
             PROJECT_ROOT / "src" / "workbench_web" / "styles.css"
@@ -608,6 +612,16 @@ class WorkbenchPlanningTests(unittest.TestCase):
             "https://arxiv.org/abs/2608.04410v1",
         )
         self.assertEqual(records[0]["arxivId"], "2608.04410v1")
+
+    def test_paper_timeline_counts_directory_installation_as_activity(self):
+        with TemporaryDirectory() as temporary:
+            paper = Path(temporary) / "new-paper"
+            paper.mkdir()
+            os.utime(paper, (1_000, 1_000))
+
+            timeline = human_review.paper_timeline(paper, metadata={})
+
+        self.assertEqual(timeline["activityTimestamp"], 1_000)
 
     def test_task_defaults_come_from_cli_parsers(self):
         defaults = task_cli_defaults()
