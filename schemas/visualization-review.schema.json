@@ -1,70 +1,34 @@
 {
   "type": "object",
   "properties": {
-    "fidelity": {
-      "type": "string",
-      "enum": ["well_supported", "minor_gaps", "major_gaps", "incorrect"]
-    },
-    "interaction_quality": {
-      "type": "string",
-      "enum": ["works", "minor_issues", "major_issues", "unusable"]
-    },
-    "exposition_quality": {
-      "type": "string",
-      "enum": ["complete", "minor_gaps", "major_gaps", "not_self_contained"]
-    },
     "summary": {"type": "string"},
-    "claim_reviews": {
+    "annotations_review": {
+      "type": "object",
+      "properties": {
+        "accuracy": {"type": "string", "enum": ["accurate", "minor_issues", "major_issues", "not_applicable"]},
+        "findings": {"type": "array", "items": {"type": "string"}}
+      },
+      "required": ["accuracy", "findings"],
+      "additionalProperties": false
+    },
+    "widget_reviews": {
       "type": "array",
       "items": {
         "type": "object",
         "properties": {
-          "claim_id": {
-            "type": "string",
-            "pattern": "^C-[0-9]{3,}$"
-          },
-          "assessment": {
-            "type": "string",
-            "enum": ["faithful", "qualified", "misleading", "incorrect"]
-          },
-          "explanation": {"type": "string"}
+          "id": {"type": "string"},
+          "fidelity": {"type": "string", "enum": ["well_supported", "minor_gaps", "major_gaps", "incorrect"]},
+          "interaction_quality": {"type": "string", "enum": ["works", "minor_issues", "major_issues", "unusable"]},
+          "summary": {"type": "string"},
+          "findings": {"type": "array", "items": {"type": "string"}},
+          "blocking_gaps": {"type": "array", "items": {"type": "string"}}
         },
-        "required": ["claim_id", "assessment", "explanation"],
+        "required": ["id", "fidelity", "interaction_quality", "summary", "findings", "blocking_gaps"],
         "additionalProperties": false
       }
     },
-    "mathematical_findings": {
-      "type": "array",
-      "items": {"type": "string"}
-    },
-    "interaction_findings": {
-      "type": "array",
-      "items": {"type": "string"}
-    },
-    "exposition_findings": {
-      "type": "array",
-      "items": {"type": "string"}
-    },
-    "blocking_gaps": {
-      "type": "array",
-      "items": {"type": "string"}
-    },
-    "warnings": {
-      "type": "array",
-      "items": {"type": "string"}
-    }
+    "warnings": {"type": "array", "items": {"type": "string"}}
   },
-  "required": [
-    "fidelity",
-    "interaction_quality",
-    "exposition_quality",
-    "summary",
-    "claim_reviews",
-    "mathematical_findings",
-    "interaction_findings",
-    "exposition_findings",
-    "blocking_gaps",
-    "warnings"
-  ],
+  "required": ["summary", "annotations_review", "widget_reviews", "warnings"],
   "additionalProperties": false
 }

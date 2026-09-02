@@ -37,6 +37,7 @@ import ingest_paper
 import open_problem_common as common
 import review_solutions
 import write_paper
+import paper_document
 import visualizations
 from workbench_store import ACTIVE_STATUSES, WorkbenchStore
 from workbench_memory import QUEUE_JOB_ENV, QueueMemoryController
@@ -61,6 +62,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ASSET_DIRECTORY = Path(__file__).resolve().parent / "workbench_web"
 DEFAULT_STATE_DIRECTORY = PROJECT_ROOT / ".loose-ends"
 DEFAULT_MANUSCRIPTS = PROJECT_ROOT / "manuscripts"
+READER_DIRECTORY = Path(__file__).resolve().parent / "workbench_web" / "reader"
+READER_CDN = "https://cdn.jsdelivr.net"
 IGNORED_PARTS = {".git", ".loose-ends", "__pycache__", ".runs"}
 IGNORED_PREFIXES = (
     ".run-",
@@ -109,9 +112,10 @@ CATALOG_FILE_NAMES = {
     "readiness.md",
     "paper-critique.md",
     visualizations.MANIFEST_NAME,
-    visualizations.REVIEW_NAME,
-    visualizations.CRITIQUE_NAME,
-    "index.html",
+    visualizations.ANNOTATIONS_NAME,
+    visualizations.WIDGET_MANIFEST_NAME,
+    visualizations.WIDGET_REVIEW_NAME,
+    paper_document.DOCUMENT_JSON,
 }
 
 
@@ -654,6 +658,7 @@ def _manuscript_inventory(
                     "path": str(draft.resolve()),
                     "name": draft.name,
                     "number": int(match.group(1)),
+                    "visualization": visualizations.discover(draft),
                     "title": result.get("title") or manifest.get("title") or manuscript.name,
                     "createdTimestamp": created_timestamp,
                     "abstract": _manuscript_abstract(draft / "main.tex"),
@@ -1190,16 +1195,20 @@ class CatalogManager:
         """Resolve a resource from a catalogued visualization package."""
         with self.lock:
             packages = [
-                package
-                for item in self.catalog.get("reviews", [])
-                for package in item.get("visualizations", [])
-                if isinstance(package, dict) and package.get("key") == key
+                draft.get("visualization")
+                for manuscript in self.catalog.get("manuscripts", [])
+                for draft in manuscript.get("drafts", [])
+                if isinstance(draft.get("visualization"), dict)
+                and draft["visualization"].get("key") == key
             ]
         if len(packages) != 1:
             raise KeyError(key)
         directory = Path(packages[0]["directory"]).resolve()
-        if not any(_relative_to(directory, root.resolve()) for root in self.paths):
+        roots = [*self.paths, self.manuscripts]
+        if not any(_relative_to(directory, root.resolve()) for root in roots):
             raise KeyError(key)
+        if relative in visualizations.READER_FILES:
+            return READER_DIRECTORY / relative
         try:
             return visualizations.resolve_file(directory, relative)
         except (FileNotFoundError, ValueError) as exc:
@@ -2458,20 +2467,25 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy", "no-referrer")
         # A sandboxed iframe without allow-same-origin has the opaque `null`
         # origin. Scope this CORS exception to package resources so local
-        # fetch/module/WASM loads work without exposing the Workbench API.
+        # fetch loads work without exposing the Workbench API. The reader
+        # itself loads KaTeX from the same CDN the workbench already uses.
         self.send_header("Access-Control-Allow-Origin", "null")
+        # The sandboxed reader has an opaque origin, so `frame-ancestors
+        # 'self'` would never match; allow only the workbench host that
+        # served this request to embed it.
+        host = re.sub(r"[^A-Za-z0-9.:\[\]-]", "", self.headers.get("Host") or "")
+        ancestors = f"http://{host} https://{host}" if host else "'none'"
         self.send_header(
             "Content-Security-Policy",
             "default-src 'none'; "
-            "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; "
-            "style-src 'self' 'unsafe-inline'; "
+            f"script-src 'self' {READER_CDN}; "
+            f"style-src 'self' 'unsafe-inline' {READER_CDN}; "
             "img-src 'self' data: blob:; "
-            "font-src 'self' data:; "
+            f"font-src 'self' data: {READER_CDN}; "
             "media-src 'self' data: blob:; "
             "connect-src 'self'; object-src 'none'; frame-src 'none'; "
             "worker-src 'none'; base-uri 'none'; form-action 'none'; "
-            "navigate-to 'none'; "
-            "frame-ancestors 'self'",
+            f"frame-ancestors {ancestors}",
         )
         self.end_headers()
         self.wfile.write(data)

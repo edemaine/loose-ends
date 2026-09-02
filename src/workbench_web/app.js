@@ -1667,85 +1667,6 @@ function addAction(parent, label, action, targets, primary = false) {
   parent.append(button(label, () => openTask(action, targets), `button${primary ? " primary" : ""}`));
 }
 
-function visualizationResourceUrl(visualization, relative = visualization.entryPoint) {
-  const resource = String(relative || "").split("/").map(encodeURIComponent).join("/");
-  return `/api/visualizations/${encodeURIComponent(visualization.key)}/${resource}`;
-}
-
-function visualizationVerdictClass(value) {
-  if (value === "well_supported" || value === "works" || value === "complete") return "success";
-  if (value === "minor_gaps" || value === "minor_issues") return "warn";
-  if (value === "major_gaps" || value === "major_issues") return "error";
-  if (value === "incorrect" || value === "unusable" || value === "not_self_contained") return "error";
-  return "neutral";
-}
-
-function renderVisualizationExperience(item) {
-  const visualizations = item.visualizations || [];
-  const shell = node("div", "visualization-shell");
-  if (!visualizations.length) {
-    shell.append(node("p", "", "No visualization is installed."));
-    return shell;
-  }
-
-  const controls = node("div", "visualization-picker");
-  const mount = node("div");
-  let selected = visualizations[0];
-
-  function renderSelected() {
-    mount.replaceChildren();
-    const header = node("section", "visualization-summary panel");
-    const title = node("div", "visualization-title");
-    title.append(node("h2", "", selected.title || selected.name));
-    const badges = node("div", "badges");
-    badges.append(
-      badge(`fidelity: ${reviewModel.humanize(selected.fidelity || "unreviewed")}`, visualizationVerdictClass(selected.fidelity)),
-      badge(`exposition: ${reviewModel.humanize(selected.expositionQuality || "unreviewed")}`, visualizationVerdictClass(selected.expositionQuality)),
-      badge(`interaction: ${reviewModel.humanize(selected.interactionQuality || "unreviewed")}`, visualizationVerdictClass(selected.interactionQuality)),
-    );
-    title.append(badges);
-    header.append(title);
-    if (selected.summary) header.append(node("p", "", selected.summary));
-    if (selected.reviewSummary) {
-      header.append(node("p", "visualization-review-summary", `Independent review: ${selected.reviewSummary}`));
-    }
-    if (selected.claimRefs?.length) {
-      header.append(node("small", "visualization-claims", `Represents ${selected.claimRefs.join(", ")}`));
-    }
-    appendStringList(header, "Limitations", selected.limitations);
-    appendStringList(header, "Independent-review gaps", selected.blockingGaps);
-    mount.append(header);
-
-    const frame = node("iframe", "visualization-frame");
-    frame.title = selected.title || "Interactive mathematical visualization";
-    frame.src = visualizationResourceUrl(selected);
-    frame.loading = "lazy";
-    frame.referrerPolicy = "no-referrer";
-    frame.setAttribute("sandbox", "allow-scripts");
-    mount.append(frame);
-  }
-
-  if (visualizations.length > 1) {
-    const select = node("select");
-    visualizations.forEach(value => {
-      const option = node("option", "", `${value.name} · ${value.title}`);
-      option.value = value.key;
-      select.append(option);
-    });
-    select.addEventListener("change", () => {
-      selected = visualizations.find(value => value.key === select.value) || visualizations[0];
-      renderSelected();
-    });
-    const label = node("label", "");
-    label.append(node("span", "", "Visualization"), select);
-    controls.append(label);
-    shell.append(controls);
-  }
-  shell.append(mount);
-  renderSelected();
-  return shell;
-}
-
 function olderVersionWarning(kind, currentName, latestName, route, selectLatest) {
   const warning = node("aside", "version-warning");
   warning.setAttribute("aria-label", `Older ${kind}`);
@@ -1891,7 +1812,6 @@ function renderReviewDetail(item) {
   addAction(actions, attempt ? "Solve again" : "Solve", "solve", [problem], true);
   if (attempt) {
     addAction(actions, item.attemptStatus === "reviewed" ? "Review again" : "Review", "review", [attempt]);
-    addAction(actions, item.visualizationCount ? "Visualize again" : "Visualize", "visualize", [attempt]);
     addAction(actions, "Write this result", "write", [attempt]);
   }
   shell.append(actions);
@@ -1946,8 +1866,7 @@ function renderReviewDetail(item) {
   });
   shell.append(tabbar);
   const section = node("section", "section");
-  if (state.detailTab === "visualize") section.append(renderVisualizationExperience(item));
-  else if (state.detailTab === "attempt") section.append(markdown(item.solverAttempt, "Loading solver attempt…"));
+  if (state.detailTab === "attempt") section.append(markdown(item.solverAttempt, "Loading solver attempt…"));
   else if (state.detailTab === "critique") section.append(markdown(item.critique, "No critique is installed."));
   else if (state.detailTab === "triage") section.append(markdown(item.triageReport, "Loading triage report…"));
   else if (state.detailTab === "literature") section.append(markdown(item.literatureReport, "No literature report is installed."));
@@ -2715,6 +2634,7 @@ function renderManuscripts() {
   }
   const actions = node("div", "actions");
   addAction(actions, draft.verdict === "unreviewed" ? "Resume review" : "Revise", "revise", [draftTarget(draft)], true);
+  addAction(actions, draft.visualization ? "Visualize more" : "Visualize", "visualize", [draftTarget(draft)]);
   const pdf = draft.files.find(path => path.endsWith("main.pdf"));
   if (pdf) {
     const open = node("a", "button", "Open PDF");
@@ -2732,6 +2652,7 @@ function renderManuscripts() {
     manuscriptPath: manuscript.path,
     draftPath: draft.path,
   }));
+  shell.append(renderDraftReader(manuscript, draft));
   if (draft.abstract) shell.append(summaryPanel("Abstract", draft.abstract));
   if (draft.summary) shell.append(summaryPanel("Paper critic", draft.summary));
   const sources = draft.sources || { papers: [], problems: [] };
@@ -2808,6 +2729,69 @@ function renderManuscripts() {
   shell.append(heading, fileGrid(draft.files));
   main.replaceChildren(shell);
 }
+
+function readerUrl(visualization, relative = "reader.html") {
+  const resource = String(relative || "").split("/").map(encodeURIComponent).join("/");
+  return `/api/visualizations/${encodeURIComponent(visualization.key)}/${resource}`;
+}
+
+function verdictClass(value) {
+  if (["well_supported", "works", "accurate"].includes(value)) return "success";
+  if (["minor_gaps", "minor_issues"].includes(value)) return "warn";
+  if (["major_gaps", "major_issues", "incorrect", "unusable"].includes(value)) return "error";
+  return "neutral";
+}
+
+function renderDraftReader(manuscript, draft) {
+  const panel = node("section", "panel reader-panel");
+  const head = node("div", "reader-panel-head");
+  head.append(node("h2", "", "Read"));
+  const visualization = draft.visualization;
+  if (!visualization) {
+    head.append(node("span", "reader-panel-hint", "Not built yet"));
+    panel.append(head);
+    panel.append(node("p", "", "Choose Visualize to render this draft as a readable paper with collapsible sections, definition popovers, a main-result widget, and proof outlines."));
+    return panel;
+  }
+  const badges = node("div", "badges");
+  badges.append(badge(`${visualization.glossaryCount} definitions`, "neutral"));
+  badges.append(badge(`${visualization.widgetCount} widget${visualization.widgetCount === 1 ? "" : "s"}`, "neutral"));
+  (visualization.widgets || []).forEach(widget => {
+    badges.append(badge(`${widget.title}: ${reviewModel.humanize(widget.fidelity)}`, verdictClass(widget.fidelity)));
+  });
+  head.append(badges);
+  const fullscreen = button("Fullscreen", () => {
+    panel.classList.toggle("fullscreen");
+    fullscreen.textContent = panel.classList.contains("fullscreen") ? "Exit fullscreen" : "Fullscreen";
+  }, "button");
+  head.append(fullscreen);
+  panel.append(head);
+  if (visualization.warnings?.length) {
+    panel.append(node("p", "reader-panel-warning", `Conversion warnings: ${visualization.warnings.join(" · ")}`));
+  }
+  const frame = node("iframe", "reader-frame");
+  frame.title = `${draft.title} · reader`;
+  frame.src = readerUrl(visualization);
+  frame.loading = "lazy";
+  frame.referrerPolicy = "no-referrer";
+  frame.setAttribute("sandbox", "allow-scripts allow-popups allow-popups-to-escape-sandbox");
+  frame.dataset.draftKey = draft.key;
+  panel.append(frame);
+  return panel;
+}
+
+window.addEventListener("message", event => {
+  const data = event.data;
+  if (!data || data.type !== "loose-ends:visualize") return;
+  const frame = [...document.querySelectorAll("iframe.reader-frame")].find(item => item.contentWindow === event.source);
+  if (!frame) return;
+  const draft = state.catalog.manuscripts.flatMap(item => item.drafts).find(item => item.key === frame.dataset.draftKey);
+  if (!draft) return;
+  const anchors = Array.isArray(data.anchors) ? data.anchors.filter(value => typeof value === "string") : [];
+  openTask("visualize", [draftTarget(draft)], {
+    anchors: anchors.filter(value => value !== "default").join(" "),
+  });
+});
 
 function renderActivity({ preserveDetail = false } = {}) {
   persistentSidebarControls("activity", () => {
@@ -3494,7 +3478,6 @@ function outputRoute(path) {
       review,
       detail: critiqueFiles.has(filename) ? "critique" : "attempt",
     };
-    if (path.split(/[\\/]/).includes("visualizations")) route.detail = "visualize";
     return route;
   }
   const problem = state.catalog.reviews.find(
@@ -3521,7 +3504,6 @@ function outputRoute(path) {
 function outputRouteLabel(route) {
   if (route.tab === "papers") return "Go to paper";
   if (route.tab === "manuscripts") return "Go to manuscript";
-  if (route.detail === "visualize") return "Go to visualization";
   if (route.review?.attemptDirectory && route.detail !== "literature" && route.detail !== "triage") {
     return "Go to attempt";
   }
@@ -3637,7 +3619,7 @@ const actionNames = {
   download: "Download from arXiv",
   metadata: "Extract paper metadata",
   analyze: "Analyze papers", triage: "Triage problems", literature: "Search literature",
-  solve: "Solve problems", review: "Review attempts", visualize: "Visualize attempts", write: "Write paper", revise: "Revise manuscript",
+  solve: "Solve problems", review: "Review attempts", visualize: "Visualize paper", write: "Write paper", revise: "Revise manuscript",
 };
 
 const taskActionTitles = {
@@ -3648,7 +3630,7 @@ const taskActionTitles = {
   literature: "Literature review",
   solve: "Problem solving",
   review: "Solution review",
-  visualize: "Result visualization",
+  visualize: "Paper visualization",
   write: "Paper writing",
   revise: "Manuscript revision",
 };
@@ -3753,7 +3735,7 @@ function taskSidebarMeta(job) {
   return pieces.join(" · ");
 }
 
-function field(name, label, { type = "text", value = "", help = "", full = false, options = [] } = {}) {
+function field(name, label, { type = "text", value = "", help = "", full = false, options = [], min, max } = {}) {
   const wrapper = node("label", `field${full ? " full" : ""}`);
   wrapper.append(node("span", "", label));
   let input;
@@ -3768,6 +3750,8 @@ function field(name, label, { type = "text", value = "", help = "", full = false
   } else {
     input = node("input");
     input.type = type;
+    if (min !== undefined) input.min = String(min);
+    if (max !== undefined) input.max = String(max);
   }
   input.name = name;
   input.value = value ?? "";
@@ -3802,10 +3786,11 @@ function dialogStorageKey(action, targets) {
   return `loose-ends-task-draft:${action}:${targets.map(value => value.path).sort().join("|")}`;
 }
 
-function openTask(action, targets) {
+function openTask(action, targets, presetOptions = null) {
   const storageKey = dialogStorageKey(action, targets);
   let saved = {};
   try { saved = JSON.parse(sessionStorage.getItem(storageKey) || "{}"); } catch (_) { saved = {}; }
+  if (presetOptions) saved = { ...saved, ...presetOptions };
   if (
     action === "write" &&
     targets.some(value => value.kind === "attempt") &&
@@ -4007,6 +3992,17 @@ function renderTaskConfiguration(errorMessage = "") {
     type: "textarea", value: options.prompt || "", full: true,
     help: "Added to the standard task instructions without replacing validation safeguards.",
   }));
+  if (task.action === "visualize") {
+    grid.append(field("anchors", "Anchors", {
+      value: options.anchors || "", full: true,
+      help: "Statement or proof ids to visualize, separated by spaces. Leave blank for the default aids: definition popovers, the main-result widget, and proof outlines.",
+    }));
+    grid.append(field("repairRounds", "Repair rounds", {
+      type: "number", value: options.repairRounds ?? 1, min: 0, max: 3,
+      help: "Designer rounds that fix the critic's blocking gaps before installing (0 installs the first draft).",
+    }));
+    grid.append(checkbox("skipReview", "Skip the independent fidelity review", "Faster and cheaper; widgets show as unreviewed.", options.skipReview));
+  }
   if (["solve", "visualize", "write", "revise"].includes(task.action)) {
     const reviewLabel = task.action === "solve"
       ? "Solution-critic direction"

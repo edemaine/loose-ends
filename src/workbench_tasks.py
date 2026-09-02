@@ -20,6 +20,7 @@ import download_arxiv
 import open_problem_common as common
 
 
+ANCHOR_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:._-]{0,120}$")
 ACTIONS = {
     "download",
     "metadata",
@@ -50,7 +51,7 @@ def task_cli_defaults() -> dict[str, dict[str, str]]:
     import review_solutions
     import solve_open_problems
     import triage_open_problems
-    import visualize_result
+    import visualize_paper
     import write_paper
 
     modules = {
@@ -60,7 +61,7 @@ def task_cli_defaults() -> dict[str, dict[str, str]]:
         "literature": literature_review,
         "solve": solve_open_problems,
         "review": review_solutions,
-        "visualize": visualize_result,
+        "visualize": visualize_paper,
         "write": write_paper,
         "revise": write_paper,
     }
@@ -683,15 +684,35 @@ def build_plan(
             )
 
     elif action == "visualize":
-        _require(targets, {"attempt"}, action)
+        _require(targets, {"draft", "paper"}, action)
+        anchors = options.get("anchors", [])
+        if isinstance(anchors, str):
+            anchors = anchors.replace(",", " ").split()
+        if not isinstance(anchors, list) or not all(
+            isinstance(anchor, str) and ANCHOR_RE.fullmatch(anchor) for anchor in anchors
+        ):
+            raise PlanError("anchors must be statement or proof identifiers")
         for target in targets:
-            attempt = Path(target["path"])
+            source = Path(target["path"])
             argv = [
                 python,
                 "-u",
-                str(script / "visualize_result.py"),
-                str(attempt),
+                str(script / "visualize_paper.py"),
+                str(source),
             ]
+            for anchor in anchors:
+                argv.extend(("--anchor", anchor))
+            if options.get("skipReview") is True:
+                argv.append("--skip-review")
+            rounds = options.get("repairRounds")
+            if rounds not in (None, ""):
+                try:
+                    rounds = int(rounds)
+                except (TypeError, ValueError) as exc:
+                    raise PlanError("repairRounds must be an integer") from exc
+                if not 0 <= rounds <= 3:
+                    raise PlanError("repairRounds must be between 0 and 3")
+                argv.extend(("--repair-rounds", str(rounds)))
             _common_arguments(argv, options, web_search=True)
             _review_arguments(argv, options)
             units.append(

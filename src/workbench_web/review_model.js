@@ -422,9 +422,6 @@
 
   function detailTabs(item) {
     const tabs = [];
-    if ((item.visualizationCount ?? (item.visualizations || []).length) > 0) {
-      tabs.push(["visualize", `Visualize (${item.visualizationCount ?? item.visualizations.length})`]);
-    }
     if (item.attemptStatus !== "unattempted") tabs.push(["attempt", "Solution attempt"]);
     if (item.attemptStatus === "reviewed") tabs.push(["critique", "Critique"]);
     if (item.triageReport || item.hasTriageReport) tabs.push(["triage", "Triage"]);

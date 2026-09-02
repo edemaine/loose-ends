@@ -1,27 +1,25 @@
 {
   "type": "object",
   "properties": {
-    "status": {
-      "type": "string",
-      "enum": ["complete", "partial"]
-    },
-    "title": {"type": "string"},
+    "status": {"type": "string", "enum": ["complete", "partial"]},
     "summary": {"type": "string"},
-    "entry_point": {"type": "string"},
-    "claim_refs": {
+    "annotations_updated": {"type": "boolean"},
+    "widgets": {
       "type": "array",
       "items": {
-        "type": "string",
-        "pattern": "^C-[0-9]{3,}$"
+        "type": "object",
+        "properties": {
+          "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,80}$"},
+          "anchor": {"type": "string"},
+          "kind": {"type": "string", "enum": ["statement", "proof"]},
+          "title": {"type": "string"},
+          "summary": {"type": "string"},
+          "limitations": {"type": "array", "items": {"type": "string"}},
+          "files": {"type": "array", "minItems": 2, "items": {"type": "string"}}
+        },
+        "required": ["id", "anchor", "kind", "title", "summary", "limitations", "files"],
+        "additionalProperties": false
       }
-    },
-    "concepts": {
-      "type": "array",
-      "items": {"type": "string"}
-    },
-    "limitations": {
-      "type": "array",
-      "items": {"type": "string"}
     },
     "verification_checks": {
       "type": "array",
@@ -30,37 +28,15 @@
         "properties": {
           "name": {"type": "string"},
           "method": {"type": "string"},
-          "result": {
-            "type": "string",
-            "enum": ["passed", "warning"]
-          },
+          "result": {"type": "string", "enum": ["passed", "warning"]},
           "details": {"type": "string"}
         },
         "required": ["name", "method", "result", "details"],
         "additionalProperties": false
       }
     },
-    "files": {
-      "type": "array",
-      "minItems": 2,
-      "items": {"type": "string"}
-    },
-    "warnings": {
-      "type": "array",
-      "items": {"type": "string"}
-    }
+    "warnings": {"type": "array", "items": {"type": "string"}}
   },
-  "required": [
-    "status",
-    "title",
-    "summary",
-    "entry_point",
-    "claim_refs",
-    "concepts",
-    "limitations",
-    "verification_checks",
-    "files",
-    "warnings"
-  ],
+  "required": ["status", "summary", "annotations_updated", "widgets", "verification_checks", "warnings"],
   "additionalProperties": false
 }

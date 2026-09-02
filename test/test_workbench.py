@@ -1096,27 +1096,23 @@ class WorkbenchPlanningTests(unittest.TestCase):
             self.assertIn("Try small cases.", argv)
             self.assertIn("Check the boundary case.", argv)
 
-    def test_visualization_plan_targets_attempt_and_preserves_reviewer_settings(self):
+    def test_visualization_plan_targets_draft_with_anchors_and_reviewer_settings(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
-            paper = make_paper(root)
-            attempt = paper / "OP-001" / "attempt-001"
-            attempt.mkdir(parents=True)
-            common.write_json(
-                attempt / "solver-result.json",
-                {
-                    "claimed_result_type": "partial_result",
-                    "summary": "A construction.",
-                    "checkable_claims": [],
-                },
-            )
+            draft = root / "manuscripts" / "paper" / "draft-002"
+            draft.mkdir(parents=True)
+            (draft / "main.tex").write_text("\\documentclass{article}", encoding="utf-8")
+            common.write_json(draft / "manifest.json", {"title": "T"})
             plan = build_plan(
                 {
                     "action": "visualize",
                     "targets": [
-                        {"kind": "attempt", "path": str(attempt), "label": "attempt-001"}
+                        {"kind": "draft", "path": str(draft), "label": "draft-002"}
                     ],
                     "options": {
+                        "anchors": "lem:one proof-2",
+                        "skipReview": True,
+                        "repairRounds": 2,
                         "prompt": "Use the square example.",
                         "reviewPrompt": "Audit degenerate inputs.",
                         "reviewReasoningEffort": "high",
@@ -1129,13 +1125,32 @@ class WorkbenchPlanningTests(unittest.TestCase):
             )
 
             argv = plan["units"][0]["argv"]
-            self.assertIn("visualize_result.py", argv[2])
+            self.assertIn("visualize_paper.py", argv[2])
+            self.assertEqual(argv[3], str(draft.resolve()))
+            self.assertEqual(
+                [argv[index + 1] for index, value in enumerate(argv) if value == "--anchor"],
+                ["lem:one", "proof-2"],
+            )
+            self.assertIn("--skip-review", argv)
+            self.assertEqual(argv[argv.index("--repair-rounds") + 1], "2")
             self.assertIn("Use the square example.", argv)
             self.assertIn("Audit degenerate inputs.", argv)
             self.assertEqual(
                 argv[argv.index("--review-reasoning-effort") + 1], "high"
             )
-            self.assertIn(f"problem:{attempt.parent.resolve()}", plan["units"][0]["resources"])
+            self.assertIn(f"manuscript:{draft.parent.resolve()}", plan["units"][0]["resources"])
+            with self.assertRaises(PlanError):
+                build_plan(
+                    {
+                        "action": "visualize",
+                        "targets": [{"kind": "draft", "path": str(draft), "label": "d"}],
+                        "options": {"anchors": "bad anchor;"},
+                    },
+                    project_root=PROJECT_ROOT,
+                    allowed_roots=[root],
+                    manuscripts=root / "manuscripts",
+                    catalog_version=9,
+                )
 
     def test_arxiv_download_plan_is_scoped_to_a_configured_paper_root(self):
         with TemporaryDirectory() as temporary:
@@ -2422,8 +2437,8 @@ class WorkbenchWatchTests(unittest.TestCase):
         catalog = Mock()
         handler = ChangeHandler(catalog)
         path = (
-            PROJECT_ROOT / "papers" / "paper" / "OP-001" / "attempt-001"
-            / "visualizations" / "visualization-001" / "app.js"
+            PROJECT_ROOT / "manuscripts" / "paper" / "draft-001"
+            / "visualization" / "widgets" / "thm-main" / "widget.js"
         )
 
         handler.on_any_event(
@@ -2714,6 +2729,24 @@ class WorkbenchWatchTests(unittest.TestCase):
             self.assertGreater(manager.version, initial)
 
 
+class UnsupportedMemoryPlatformTests(unittest.TestCase):
+    @unittest.skipIf(
+        os.name == "nt" or sys.platform.startswith("linux"),
+        "this platform enforces worker memory limits",
+    )
+    def test_unsupported_platform_runs_workers_without_a_container(self):
+        import workbench_memory
+
+        with TemporaryDirectory() as temporary:
+            controller = workbench_memory.QueueMemoryController(Path(temporary) / "db")
+            self.assertFalse(controller.available)
+            settings = {"memoryLimit": {"mode": "percent", "value": 50}, "maxWorkers": 2}
+            self.assertIsNone(controller.prepare_run("run-1", settings))
+            snapshot = controller.reconcile(settings, {"run-1"})
+            self.assertFalse(snapshot["pending"])
+            self.assertIn("requires", snapshot["error"])
+
+
 class VisualizationResponseTests(unittest.TestCase):
     def test_visualization_headers_allow_only_local_package_connections(self):
         with TemporaryDirectory() as temporary:
@@ -2728,14 +2761,19 @@ class VisualizationResponseTests(unittest.TestCase):
             )
             handler.end_headers = Mock()
 
+            handler.headers = {"Host": "localhost:35007"}
+
             handler._send_visualization_file(resource)
 
             self.assertEqual(headers["Access-Control-Allow-Origin"], "null")
+            self.assertIn("frame-ancestors http://localhost:35007 https://localhost:35007", headers["Content-Security-Policy"])
             policy = headers["Content-Security-Policy"]
             self.assertIn("default-src 'none'", policy)
             self.assertIn("connect-src 'self'", policy)
             self.assertIn("worker-src 'none'", policy)
-            self.assertNotIn("http:", policy)
+            self.assertIn("script-src 'self' https://cdn.jsdelivr.net", policy)
+            self.assertNotIn("http:", policy.split("frame-ancestors")[0])
+            self.assertNotIn("unsafe-eval", policy)
             self.assertEqual(handler.wfile.getvalue(), resource.read_bytes())
 
 

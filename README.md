@@ -29,9 +29,10 @@ Loose Ends enables the following research workflow:
 6. **Review attempts.** Have independent critics assess correctness, coverage,
    importance, and remaining gaps, while preserving the full research history
    for later attempts and human inspection.
-7. **Visualize results.** Build purpose-designed interactive companions for
-   selected attempts, then independently audit their mathematical fidelity and
-   behavior before presenting them beside the proof.
+7. **Read and visualize papers.** Render a manuscript as a readable web
+   page with collapsible sections and proofs, then add definition popovers,
+   an interactive widget for the main result, proof outlines, and on-demand
+   step-by-step proof widgets, each independently audited for fidelity.
 8. **Write and revise papers.** Turn selected results into traced, cited LaTeX
    manuscripts, compile them, critique them independently, and iterate toward
    expert human review.
@@ -133,12 +134,7 @@ Your web browser should automatically open the server at
    tabs; the attempt list in the sidebar retains earlier rounds. To handle
    attempts still awaiting a critic, filter for **Awaiting review**, select
    them, and choose **Review**.
-6. **Visualize a result.** Open a solver attempt and choose **Visualize**. The
-   visualization designer creates a purpose-built static web application and a
-   separate critic audits its mathematical fidelity and interactions. When the
-   task finishes, open the attempt's **Visualize** tab. Multiple visualizations
-   remain available so different explanatory approaches can coexist.
-7. **Write and revise a paper.** (This requires LaTeX including `latexmk`.)
+6. **Write and revise a paper.** (This requires LaTeX including `latexmk`.)
    Select one or more results in **Research** and choose **Write paper**,
    or open an attempt and choose **Write this result**.
    You can request multiple automatic rounds of writing, reviewing, and
@@ -146,6 +142,14 @@ Your web browser should automatically open the server at
    After the writing task finishes, switch to **Manuscripts** to open or
    download the PDF or source files, inspect the critic verdict, and
    choose **Revise** for another author-review round.
+7. **Read and visualize a draft.** In **Manuscripts**, select a draft and
+   choose **Visualize**. The draft is converted into a readable page shown in
+   the **Read** panel (collapsible sections and proofs, an outline, rendered
+   math and figures), and a designer adds definition popovers, a widget for
+   the main result, and proof outlines; a separate critic audits them.
+   Inside the reader, every statement and proof has its own **Visualize**
+   button for adding an illustration of a lemma or a step-by-step running
+   example beside a proof.
 
 Every managed task has the same two-step launch process: configure its options,
 review the exact commands and dry-run previews, and then start the runs. Once a
@@ -791,60 +795,76 @@ instead of being a free critic judgment. The critic does not assess novelty;
 it may use live web search only to verify an external theorem invoked by the
 attempt. Literature changes therefore do not invalidate mathematical reviews.
 
-## Visualize a result
+## Read and visualize a paper
 
-`src/visualize_result.py` creates a standalone interactive mathematical
-exposition for a specific solver attempt. The generated visualization is
-free-form HTML, CSS, and JavaScript designed for that result; the contract
-intentionally does not prescribe whether it behaves as a construction player,
-algorithm visualizer, object explorer, proof walkthrough, parameter
-experiment, or a combination. Its primary reading path must nevertheless
-introduce the problem, visibly state the precise result, build its hypotheses,
-explain the proof or argument step by step, and return to the conclusion. An
-interactive example or laboratory by itself is not considered complete.
-The exposition is written for professional mathematicians: formal statements
-and source numbering remain explicit, intuition is labeled separately, the
-current proof goal stays visible, and a genuine construction playground is
-included whenever the mathematics reasonably supports one.
+`src/visualize_paper.py` turns a manuscript draft (or an arXiv paper
+directory) into a readable web page and adds reading aids to it.
 
-Preview a run without starting Codex:
+The conversion is deterministic and keeps the paper's own text: `pandoc`
+converts the LaTeX, this tool preserves sections, theorem-like environments,
+proofs, numbered equations, figures (TikZ and included graphics are rendered
+to SVG with `pdflatex` and `pdftocairo`), citations, and cross-references,
+and assigns stable identifiers to every statement, proof, and paragraph.
+The reader (`src/workbench_web/reader/`) shows the result with collapsible
+sections and proofs, an outline, and KaTeX-rendered math.
+
+An LLM run then adds aids anchored to those identifiers:
+
+* **definition popovers**: hovering a defined term or notation shows its
+  definition and offers a jump to where the paper defines it;
+* **a main-result widget**: an interactive figure or playground beneath the
+  central theorem;
+* **proof outlines**: the 2 to 5 substantive steps of the main proofs,
+  mapped to their paragraphs and shown beside the proof;
+* **statement and proof widgets on demand**: an illustration for a lemma, or
+  a running example that advances step by step as you read a proof.
+
+Convert only (no LLM):
 
 ```sh
-python src/visualize_result.py papers/.../OP-001/attempt-001 --dry-run
+python src/visualize_paper.py manuscripts/.../draft-002 --document-only
 ```
 
-Generate the visualization and run its independent fidelity review:
+Default aids (definitions, main-result widget, proof outlines) and their
+independent review:
 
 ```sh
-python src/visualize_result.py papers/.../OP-001/attempt-001
+python src/visualize_paper.py manuscripts/.../draft-002
 ```
 
-The result is installed beneath the attempt:
+Widgets for specific statements or proofs, using ids from `document.json`:
+
+```sh
+python src/visualize_paper.py manuscripts/.../draft-002 \
+  --anchor lem:tiling-completion --anchor proof-2
+```
+
+Everything is installed beneath the draft:
 
 ```text
-attempt-001/
-└── visualizations/
-    └── visualization-001/
-        ├── visualization.json
-        ├── fidelity-review.json
-        ├── fidelity-critique.md
-        ├── index.html
-        ├── verification.md
-        └── ... bundled application assets
+draft-002/
+└── visualization/
+    ├── visualization.json    manifest: runs, widgets, review verdicts
+    ├── document.html         the converted paper
+    ├── document.json         sections, statements, proofs, paragraphs, ...
+    ├── figures/              rendered figures
+    ├── annotations.json      glossary, main result, proof outlines
+    ├── widgets/<id>/         widget.js, widget.json, review.json
+    └── runs/run-NNN/         logs, structured results, critique.md
 ```
 
-Every application is served in a script-enabled sandboxed iframe. Generated
-code does not receive the workbench origin, parent-page access, forms, popups,
-persistent browser storage, or network access. Libraries and other reusable
-assets must be bundled inside the visualization package. The manifest records
-the represented `C-###` claims, limitations, verification checks, source
-attempt digest, model configuration, and independent fidelity verdict.
+Every run is audited by an independent critic. When the critic reports
+blocking gaps (a mathematically misleading state or an interaction defect),
+the designer gets a repair round with the full critique and the result is
+reviewed again; `--repair-rounds` (default 1, and a field in the workbench
+dialog) controls how many such rounds run before installation. Superseded
+reviews are kept under `runs/run-NNN/review-before-repair-N/`.
 
-Visualizations are explanatory artifacts, not proof certificates. The critic
-separately assesses mathematical fidelity, exposition quality, and interaction
-quality. Its verdicts and blocking gaps remain visible above the embedded app,
-including when a technically functional visualization is mathematically
-misleading or fails to explain the result as a self-contained narrative.
+The workbench serves the package to a sandboxed iframe: widget code never
+receives the workbench origin, network access, storage, or the parent page.
+Each widget carries the critic's fidelity and interaction verdicts, visible
+in the reader next to the widget. Reading aids are explanatory artifacts,
+not proof certificates.
 
 ## Write a paper
 
