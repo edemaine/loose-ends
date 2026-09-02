@@ -8,7 +8,14 @@ const state = {
   eventSequence: 0,
   catalog: { papers: [], reviews: [], manuscripts: [], counts: {} },
   jobs: [],
-  settings: { workerLimit: 2, queuePaused: false, paperRoots: [], taskDefaults: {} },
+  settings: {
+    workerLimit: 2,
+    queuePaused: false,
+    queueManuallyPaused: false,
+    memoryLimit: { mode: "percent", value: 50 },
+    paperRoots: [],
+    taskDefaults: {},
+  },
   tab: "research",
   search: "",
   selectedReview: "",
@@ -19,7 +26,7 @@ const state = {
   revealSidebarSecondarySelection: false,
   sidebarScroll: { research: 0, papers: 0, manuscripts: 0, activity: 0 },
   sidebarSecondaryScroll: { research: 0, manuscripts: 0 },
-  paperSort: "alphabetical",
+  paperSort: "activity",
   manuscriptSort: "latest",
   selectedPaper: "",
   selectedManuscript: "",
@@ -52,6 +59,13 @@ const workerDecrease = document.getElementById("worker-decrease");
 const workerIncrease = document.getElementById("worker-increase");
 const workerStatus = document.getElementById("worker-status");
 const queueToggle = document.getElementById("queue-toggle");
+const memoryMode = document.getElementById("memory-mode");
+const memoryValueLabel = document.getElementById("memory-value-label");
+const memoryStepper = document.getElementById("memory-stepper");
+const memoryValue = document.getElementById("memory-value");
+const memoryDecrease = document.getElementById("memory-decrease");
+const memoryIncrease = document.getElementById("memory-increase");
+const memoryStatus = document.getElementById("memory-status");
 const dialog = document.getElementById("task-dialog");
 const dialogBody = document.getElementById("dialog-body");
 const dialogFooter = document.getElementById("dialog-footer");
@@ -77,6 +91,9 @@ let sessionRefresh = null;
 let workerLimitDraft = null;
 let workerLimitTimer = null;
 let workerLimitSaving = false;
+let memoryLimitDraft = null;
+let memoryLimitTimer = null;
+let memoryLimitSaving = false;
 let renderScrollTarget = null;
 const priorityLevels = [
   [-3, "⅛×"],
@@ -134,7 +151,7 @@ function rememberedTabUrl(tab) {
 function currentUrl() {
   const parameters = new URLSearchParams();
   if (state.search.trim()) parameters.set("q", state.search.trim());
-  if (["research", "papers"].includes(state.tab) && state.paperSort !== "alphabetical") {
+  if (["research", "papers"].includes(state.tab) && state.paperSort !== "activity") {
     parameters.set("sort", state.paperSort);
   }
   if (state.tab === "manuscripts" && state.manuscriptSort !== "latest") {
@@ -939,6 +956,95 @@ function schedulerCounts() {
   }, { active: 0, queued: 0 });
 }
 
+function formatMemoryGB(bytes) {
+  if (bytes == null || !Number.isFinite(Number(bytes))) return "unknown";
+  const value = Number(bytes) / (1024 ** 3);
+  const digits = value >= 100 ? 0 : value >= 10 ? 1 : 2;
+  return `${Number(value.toFixed(digits))} GB`;
+}
+
+function formatMemoryUsage(bytes) {
+  if (bytes == null || !Number.isFinite(Number(bytes))) return "unknown";
+  const value = Number(bytes);
+  if (value < 1024 ** 3) {
+    const mb = value / (1024 ** 2);
+    const digits = mb >= 100 ? 0 : mb >= 10 ? 1 : 2;
+    return `${Number(mb.toFixed(digits))} MB`;
+  }
+  return formatMemoryGB(value);
+}
+
+function configuredMemoryLimit() {
+  const memory = state.settings.memoryLimit;
+  if (!memory || !["percent", "gb", "unlimited"].includes(memory.mode)) {
+    return { mode: "percent", value: 50 };
+  }
+  return {
+    mode: memory.mode,
+    value: memory.mode === "unlimited" ? null : Number(memory.value),
+  };
+}
+
+function renderMemoryControl(maximumWorkers) {
+  const configured = configuredMemoryLimit();
+  const displayed = memoryLimitDraft || configured;
+  memoryMode.querySelectorAll("[data-memory-mode]").forEach(control => {
+    const active = control.dataset.memoryMode === displayed.mode;
+    control.classList.toggle("active", active);
+    control.setAttribute("aria-pressed", String(active));
+    control.disabled = memoryLimitSaving;
+  });
+  const unlimited = displayed.mode === "unlimited";
+  memoryValueLabel.hidden = !unlimited;
+  memoryStepper.hidden = unlimited;
+  memoryValue.step = displayed.mode === "percent" ? "5" : "1";
+  memoryValue.max = displayed.mode === "percent" ? "10000" : "100000";
+  if (!unlimited && document.activeElement !== memoryValue) {
+    memoryValue.value = String(displayed.value);
+  }
+  const minimum = 0.1;
+  memoryValue.disabled = memoryLimitSaving || unlimited;
+  memoryDecrease.disabled = memoryLimitSaving || unlimited || displayed.value <= minimum;
+  memoryIncrease.disabled = memoryLimitSaving || unlimited;
+
+  const telemetry = state.settings.memory || {};
+  if (telemetry.error && state.settings.memoryLimitPending) {
+    memoryStatus.textContent = `Queue paused because the memory limit could not be enforced: ${telemetry.error}`;
+    return;
+  }
+  if (!telemetry.available) {
+    const policy = unlimited
+      ? "Configured total allocation limit: unlimited."
+      : displayed.mode === "percent"
+        ? `Configured total allocation limit: ${displayed.value}% of installed RAM.`
+        : `Configured total allocation limit: ${displayed.value} GB.`;
+    memoryStatus.textContent = `${policy} ${telemetry.error || "Enforcement status unavailable."}`;
+    return;
+  }
+  if (unlimited) {
+    memoryStatus.textContent = telemetry.currentBytes == null
+      ? "Total allocation limit: unlimited.\nPer-worker limit: unlimited."
+      : `Total allocation limit: unlimited.\nPer-worker limit: unlimited.\nCurrent actual usage: ${formatMemoryUsage(telemetry.currentBytes)}.`;
+    return;
+  }
+  const displayedAllocationBytes = displayed.mode === "percent"
+    ? Number(telemetry.physicalBytes) * displayed.value / 100
+    : displayed.value * (1024 ** 3);
+  const allocation = formatMemoryGB(displayedAllocationBytes);
+  const perWorker = formatMemoryUsage(displayedAllocationBytes / maximumWorkers);
+  const allocationBasis = displayed.mode === "percent"
+    ? `${displayed.value}% of ${formatMemoryGB(telemetry.physicalBytes)} installed = ${allocation}`
+    : allocation;
+  const workerBasis = `${perWorker} (${allocation} ÷ ${maximumWorkers} maximum workers)`;
+  if (state.settings.memoryLimitPending) {
+    memoryStatus.textContent = `Requested total allocation limit: ${allocationBasis}.\nRequested per-worker limit: ${workerBasis}.\nCurrent actual usage: ${formatMemoryUsage(telemetry.currentBytes)}; waiting for every worker to fall below its new limit.`;
+  } else if (telemetry.currentBytes != null) {
+    memoryStatus.textContent = `Total allocation limit: ${allocationBasis}.\nPer-worker limit: ${workerBasis}.\nCurrent actual usage: ${formatMemoryUsage(telemetry.currentBytes)}.`;
+  } else {
+    memoryStatus.textContent = `Total allocation limit: ${allocationBasis}.\nPer-worker limit: ${workerBasis}.`;
+  }
+}
+
 function renderSchedulerControl() {
   const configuredLimit = Number(state.settings.workerLimit) || 2;
   const displayedLimit = workerLimitDraft ?? configuredLimit;
@@ -947,14 +1053,24 @@ function renderSchedulerControl() {
   workerLimit.textContent = String(displayedLimit);
   workerDecrease.disabled = workerLimitSaving || displayedLimit <= 1;
   workerIncrease.disabled = workerLimitSaving || displayedLimit >= 64;
-  queueToggle.textContent = state.settings.queuePaused ? "Resume queue" : "Pause queue";
-  if (state.settings.queuePaused) {
+  const manuallyPaused = state.settings.queueManuallyPaused ?? state.settings.queuePaused;
+  queueToggle.textContent = manuallyPaused
+    ? "Resume queue"
+    : state.settings.memoryLimitPending
+      ? "Pause manually"
+      : "Pause queue";
+  if (state.settings.memoryLimitPending && state.settings.memory?.error) {
+    workerStatus.textContent = `${counts.active} active; ${counts.queued} waiting. Queue paused because memory enforcement failed.`;
+  } else if (state.settings.memoryLimitPending) {
+    workerStatus.textContent = `${counts.active} active; ${counts.queued} waiting. Queue paused until the lower memory limit can be applied.`;
+  } else if (state.settings.queuePaused) {
     workerStatus.textContent = `${counts.active} active; ${counts.queued} waiting. Active runs continue.`;
   } else if (counts.active > configuredLimit) {
     workerStatus.textContent = `Draining ${counts.active} active runs to the new limit of ${configuredLimit}.`;
   } else {
     workerStatus.textContent = `${counts.active} active; ${counts.queued} waiting.`;
   }
+  renderMemoryControl(displayedLimit);
 }
 
 async function updateScheduler(changes) {
@@ -994,9 +1110,84 @@ function adjustWorkerLimit(delta) {
   }, 2000);
 }
 
+function equivalentMemoryValue(mode, current) {
+  if (current.mode === mode && Number.isFinite(current.value)) return current.value;
+  const physical = Number(state.settings.memory?.physicalBytes);
+  const allocationValue = state.settings.memory?.allocationBytes;
+  const allocation = allocationValue == null ? NaN : Number(allocationValue);
+  if (mode === "gb" && Number.isFinite(allocation) && allocation > 0) {
+    return Math.max(0.1, Number((allocation / (1024 ** 3)).toFixed(1)));
+  }
+  if (mode === "percent" && physical > 0 && Number.isFinite(allocation) && allocation > 0) {
+    return Math.max(0.1, Number((allocation * 100 / physical).toFixed(1)));
+  }
+  return mode === "percent" ? 50 : 8;
+}
+
+function scheduleMemoryLimit(memory) {
+  memoryLimitDraft = memory;
+  renderSchedulerControl();
+  clearTimeout(memoryLimitTimer);
+  memoryLimitTimer = setTimeout(async () => {
+    const limit = memoryLimitDraft;
+    memoryLimitSaving = true;
+    renderSchedulerControl();
+    try {
+      state.settings = await api("/api/scheduler", {
+        method: "POST",
+        body: { memoryLimit: limit },
+      });
+      memoryLimitDraft = null;
+    } catch (error) {
+      memoryLimitDraft = null;
+      showNotice(error.message, true);
+    } finally {
+      memoryLimitSaving = false;
+      renderSchedulerControl();
+    }
+  }, 2000);
+}
+
+function setMemoryMode(mode) {
+  if (memoryLimitSaving) return;
+  const current = memoryLimitDraft || configuredMemoryLimit();
+  if (current.mode === mode) return;
+  scheduleMemoryLimit({
+    mode,
+    value: mode === "unlimited" ? null : equivalentMemoryValue(mode, current),
+  });
+}
+
+function setMemoryValue(rawValue) {
+  if (memoryLimitSaving) return;
+  if (String(rawValue).trim() === "") return;
+  const current = memoryLimitDraft || configuredMemoryLimit();
+  if (current.mode === "unlimited") return;
+  const maximum = current.mode === "percent" ? 10000 : 100000;
+  const value = Math.max(0.1, Math.min(maximum, Number(rawValue)));
+  if (!Number.isFinite(value)) return;
+  scheduleMemoryLimit({ mode: current.mode, value });
+}
+
+function adjustMemoryLimit(direction) {
+  const current = memoryLimitDraft || configuredMemoryLimit();
+  if (current.mode === "unlimited") return;
+  const step = current.mode === "percent" ? 5 : 1;
+  setMemoryValue(Number((current.value + direction * step).toFixed(1)));
+}
+
 workerDecrease.addEventListener("click", () => adjustWorkerLimit(-1));
 workerIncrease.addEventListener("click", () => adjustWorkerLimit(1));
-queueToggle.addEventListener("click", () => updateScheduler({ queuePaused: !state.settings.queuePaused }));
+memoryDecrease.addEventListener("click", () => adjustMemoryLimit(-1));
+memoryIncrease.addEventListener("click", () => adjustMemoryLimit(1));
+memoryValue.addEventListener("input", () => setMemoryValue(memoryValue.value));
+memoryMode.addEventListener("click", event => {
+  const control = event.target.closest("[data-memory-mode]");
+  if (control) setMemoryMode(control.dataset.memoryMode);
+});
+queueToggle.addEventListener("click", () => updateScheduler({
+  queuePaused: !(state.settings.queueManuallyPaused ?? state.settings.queuePaused),
+}));
 document.addEventListener("pointerdown", event => {
   if (schedulerControl.open && !schedulerControl.contains(event.target)) {
     schedulerControl.open = false;
@@ -3390,7 +3581,7 @@ function routeHref(route) {
 function openRoute(route) {
   if (route.tab === "research") {
     state.search = "";
-    state.paperSort = "alphabetical";
+    state.paperSort = "activity";
     state.researchFilters = reviewModel.createDefaultFilters();
     state.selectedReview = route.review.itemKey;
     state.selectedProblem = route.review.problemKey;
@@ -3399,7 +3590,7 @@ function openRoute(route) {
     state.revealSidebarSecondarySelection = true;
   } else if (route.tab === "papers") {
     state.search = "";
-    state.paperSort = "alphabetical";
+    state.paperSort = "activity";
     state.selectedPaper = route.paper.key;
     state.revealSidebarSelection = true;
   } else {

@@ -11,6 +11,17 @@ import signal
 import subprocess
 import time
 
+from workbench_memory import join_queue_job_from_environment
+
+
+_QUEUE_JOIN_ERROR: OSError | None = None
+try:
+    # Join before importing the task stack so its allocations and every later
+    # child are charged to the queue container on Linux.
+    join_queue_job_from_environment()
+except OSError as exc:
+    _QUEUE_JOIN_ERROR = exc
+
 import artifact_reporting
 import codex_cli
 from workbench_store import WorkbenchStore
@@ -125,6 +136,18 @@ def run_worker(database: Path, run_id: str) -> int:
         return 0
     log_path = Path(run["log_path"])
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    if _QUEUE_JOIN_ERROR is not None:
+        exc = _QUEUE_JOIN_ERROR
+        error = f"could not join the worker memory container: {exc}"
+        with log_path.open("a", encoding="utf-8") as log:
+            log.write(f"Workbench run {run_id}\n\n{error}\n")
+        store.update_run(
+            run_id,
+            status="failed",
+            finished_at=time.time(),
+            error=error,
+        )
+        return 1
     now = time.time()
     store.update_run(
         run_id,

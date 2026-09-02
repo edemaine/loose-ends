@@ -26,6 +26,7 @@ from workbench import (
     build_parser,
 )
 import workbench
+import workbench_memory
 from workbench_store import WorkbenchStore
 from workbench_tasks import (
     PlanError,
@@ -272,6 +273,9 @@ class WorkbenchPlanningTests(unittest.TestCase):
         model = (
             PROJECT_ROOT / "src" / "workbench_web" / "review_model.js"
         ).read_text(encoding="utf-8")
+        index = (
+            PROJECT_ROOT / "src" / "workbench_web" / "index.html"
+        ).read_text(encoding="utf-8")
         self.assertIn('research: "/research"', app)
         self.assertIn('window.addEventListener("popstate"', app)
         self.assertIn('since: String(state.eventSequence || 0)', app)
@@ -346,6 +350,8 @@ class WorkbenchPlanningTests(unittest.TestCase):
         self.assertIn("identityFromSearchParams(parameters)", app)
         self.assertIn("reviewModel.groupProblemsByPaper(", app)
         self.assertIn('parameters.set("sort", state.paperSort)', app)
+        self.assertIn('paperSort: "activity"', app)
+        self.assertIn('state.paperSort !== "activity"', app)
         self.assertIn("reviewModel.paperSortOptions", app)
         self.assertIn("reviewModel.sortPapers(", app)
         self.assertIn('node("div", "paper-list-controls")', app)
@@ -480,6 +486,26 @@ class WorkbenchPlanningTests(unittest.TestCase):
         self.assertIn("!schedulerControl.contains(event.target)", app)
         self.assertIn("function adjustWorkerLimit(delta)", app)
         self.assertIn("workerLimitTimer = setTimeout", app)
+        self.assertIn("memoryLimitTimer = setTimeout", app)
+        self.assertIn("body: { memoryLimit: limit }", app)
+        self.assertIn("}, 2000);", app)
+        self.assertIn('data-memory-mode="unlimited"', index)
+        self.assertIn("Total worker memory limit and units", index)
+        self.assertLess(
+            index.index('id="memory-stepper"'),
+            index.index('id="memory-mode"'),
+        )
+        self.assertIn("Per-worker limit", app)
+        self.assertNotIn("Computed per-worker limit", app)
+        self.assertNotIn("predates per-worker enforcement", app)
+        self.assertNotIn("managedWorkers", app)
+        self.assertIn("÷ ${maximumWorkers} maximum workers", app)
+        self.assertLess(
+            index.index('id="worker-status"'),
+            index.index("scheduler-memory-heading"),
+        )
+        self.assertNotIn("Windows measures", index)
+        self.assertIn("\\nCurrent actual usage: ${formatMemoryUsage", app)
         self.assertIn("${counts.active}/${configuredLimit}", app)
         self.assertNotIn("workerApply", app)
         self.assertIn('if (!navigationReady || state.tab !== "activity") return', app)
@@ -542,6 +568,8 @@ class WorkbenchPlanningTests(unittest.TestCase):
         self.assertNotIn("Math.max(previousResult?.weight", model)
         self.assertIn("function paperTitleWithYear", model)
         self.assertIn("function groupProblemsByPaper(items, sort", model)
+        self.assertIn('["activity", "Latest activity"]', model)
+        self.assertIn('function sortPapers(papers, sort = "activity"', model)
         self.assertIn('["results", "Most results (weighted)"]', model)
         styles = (
             PROJECT_ROOT / "src" / "workbench_web" / "styles.css"
@@ -584,6 +612,16 @@ class WorkbenchPlanningTests(unittest.TestCase):
             "https://arxiv.org/abs/2608.04410v1",
         )
         self.assertEqual(records[0]["arxivId"], "2608.04410v1")
+
+    def test_paper_timeline_counts_directory_installation_as_activity(self):
+        with TemporaryDirectory() as temporary:
+            paper = Path(temporary) / "new-paper"
+            paper.mkdir()
+            os.utime(paper, (1_000, 1_000))
+
+            timeline = human_review.paper_timeline(paper, metadata={})
+
+        self.assertEqual(timeline["activityTimestamp"], 1_000)
 
     def test_task_defaults_come_from_cli_parsers(self):
         defaults = task_cli_defaults()
@@ -1659,14 +1697,380 @@ class WorkbenchStoreTests(unittest.TestCase):
             database = state / "workbench.sqlite3"
             store = WorkbenchStore(database, state)
             settings = store.update_scheduler_settings(
-                worker_limit=7, queue_paused=True
+                worker_limit=7,
+                queue_paused=True,
+                memory_limit={"mode": "percent", "value": 125},
             )
             self.assertEqual(settings["workerLimit"], 7)
             self.assertTrue(settings["queuePaused"])
+            self.assertTrue(settings["queueManuallyPaused"])
+            self.assertEqual(
+                settings["memoryLimit"], {"mode": "percent", "value": 125.0}
+            )
 
             reopened = WorkbenchStore(database, state)
             self.assertEqual(reopened.scheduler_settings()["workerLimit"], 7)
             self.assertTrue(reopened.scheduler_settings()["queuePaused"])
+            self.assertEqual(
+                reopened.scheduler_settings()["memoryLimit"],
+                {"mode": "percent", "value": 125.0},
+            )
+
+    def test_scheduler_memory_limit_supports_gb_and_unlimited(self):
+        with TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            store = WorkbenchStore(state / "workbench.sqlite3", state)
+
+            fixed = store.update_scheduler_settings(
+                memory_limit={"mode": "gb", "value": 17.5}
+            )
+            self.assertEqual(
+                fixed["memoryLimit"], {"mode": "gb", "value": 17.5}
+            )
+
+            unlimited = store.update_scheduler_settings(
+                memory_limit={"mode": "unlimited", "value": None}
+            )
+            self.assertEqual(
+                unlimited["memoryLimit"], {"mode": "unlimited", "value": None}
+            )
+
+    def test_total_memory_allocation_is_divided_by_maximum_workers(self):
+        settings = {
+            "workerLimit": 4,
+            "memoryLimit": {"mode": "percent", "value": 50},
+        }
+        physical = 64 * workbench_memory.GB_BYTES
+
+        self.assertEqual(
+            workbench_memory.resolved_limit_bytes(settings, physical),
+            32 * workbench_memory.GB_BYTES,
+        )
+        self.assertEqual(
+            workbench_memory.per_worker_limit_bytes(settings, physical),
+            8 * workbench_memory.GB_BYTES,
+        )
+        settings["workerLimit"] = 2
+        self.assertEqual(
+            workbench_memory.per_worker_limit_bytes(settings, physical),
+            16 * workbench_memory.GB_BYTES,
+        )
+
+    def test_windows_memory_baseline_prefers_installed_capacity(self):
+        with (
+            patch.object(workbench_memory.os, "name", "nt"),
+            patch.object(
+                workbench_memory,
+                "_windows_installed_memory_bytes",
+                return_value=64 * workbench_memory.GB_BYTES,
+            ),
+            patch.object(
+                workbench_memory,
+                "_windows_usable_memory_bytes",
+                return_value=63.7 * workbench_memory.GB_BYTES,
+            ) as usable,
+        ):
+            self.assertEqual(
+                workbench_memory.physical_memory_bytes(),
+                64 * workbench_memory.GB_BYTES,
+            )
+            usable.assert_not_called()
+
+    def test_windows_memory_baseline_falls_back_to_usable_capacity(self):
+        with (
+            patch.object(workbench_memory.os, "name", "nt"),
+            patch.object(
+                workbench_memory,
+                "_windows_installed_memory_bytes",
+                return_value=None,
+            ),
+            patch.object(
+                workbench_memory,
+                "_windows_usable_memory_bytes",
+                return_value=63 * workbench_memory.GB_BYTES,
+            ),
+        ):
+            self.assertEqual(
+                workbench_memory.physical_memory_bytes(),
+                63 * workbench_memory.GB_BYTES,
+            )
+
+    def test_pending_memory_reduction_pauses_only_scheduler_dispatch(self):
+        with TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            store = WorkbenchStore(state / "workbench.sqlite3", state)
+            self.assertTrue(
+                store.update_memory_limit_runtime(
+                    pending=True,
+                    applied_bytes=32 * workbench_memory.GB_BYTES,
+                )
+            )
+            settings = store.scheduler_settings()
+            self.assertTrue(settings["queuePaused"])
+            self.assertFalse(settings["queueManuallyPaused"])
+            self.assertEqual(settings["queuePauseReason"], "memory_limit_pending")
+            self.assertFalse(
+                store.update_memory_limit_runtime(
+                    pending=True,
+                    applied_bytes=32 * workbench_memory.GB_BYTES,
+                )
+            )
+
+    def test_queue_memory_reduction_waits_for_current_usage(self):
+        controller = object.__new__(workbench_memory.QueueMemoryController)
+        controller.physical_bytes = 64 * workbench_memory.GB_BYTES
+        controller.available = True
+        controller.error = None
+        controller.backend = "windows_job"
+        container = object()
+        controller._containers = {"run-1": container}
+        controller._observed_peak = 0
+        controller._container_current_bytes = Mock(
+            return_value=12 * workbench_memory.GB_BYTES
+        )
+        controller._container_limit = Mock(
+            return_value=32 * workbench_memory.GB_BYTES
+        )
+        controller._set_container_limit = Mock()
+
+        snapshot = controller.reconcile(
+            {
+                "workerLimit": 4,
+                "memoryLimit": {"mode": "gb", "value": 32},
+            },
+            {"run-1"},
+        )
+
+        self.assertTrue(snapshot["pending"])
+        self.assertEqual(snapshot["allocationBytes"], 32 * workbench_memory.GB_BYTES)
+        self.assertEqual(snapshot["resolvedBytes"], 8 * workbench_memory.GB_BYTES)
+        self.assertEqual(snapshot["appliedBytes"], 32 * workbench_memory.GB_BYTES)
+        controller._set_container_limit.assert_not_called()
+
+    def test_queue_memory_reports_whether_worker_container_is_nonempty(self):
+        controller = object.__new__(workbench_memory.QueueMemoryController)
+        controller.available = True
+        controller.error = None
+        container = object()
+        controller._containers = {"run-1": container}
+        controller._container_process_ids = Mock(side_effect=[[101, 102], []])
+
+        self.assertTrue(controller.run_has_processes("run-1"))
+        self.assertFalse(controller.run_has_processes("run-1"))
+
+    def test_queue_memory_increase_applies_immediately(self):
+        controller = object.__new__(workbench_memory.QueueMemoryController)
+        controller.physical_bytes = 64 * workbench_memory.GB_BYTES
+        controller.available = True
+        controller.error = None
+        controller.backend = "windows_job"
+        container = object()
+        controller._containers = {"run-1": container}
+        controller._observed_peak = 0
+        controller._container_current_bytes = Mock(
+            return_value=3 * workbench_memory.GB_BYTES
+        )
+        controller._container_limit = Mock(
+            return_value=4 * workbench_memory.GB_BYTES
+        )
+        controller._set_container_limit = Mock()
+
+        snapshot = controller.reconcile(
+            {
+                "workerLimit": 4,
+                "memoryLimit": {"mode": "percent", "value": 50},
+            },
+            {"run-1"},
+        )
+
+        self.assertFalse(snapshot["pending"])
+        self.assertEqual(snapshot["allocationBytes"], 32 * workbench_memory.GB_BYTES)
+        self.assertEqual(snapshot["appliedBytes"], 8 * workbench_memory.GB_BYTES)
+        controller._set_container_limit.assert_called_once_with(
+            container,
+            8 * workbench_memory.GB_BYTES,
+        )
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows Job Objects")
+    def test_windows_worker_jobs_isolate_memory_limit_for_child_trees(self):
+        with TemporaryDirectory() as temporary:
+            database = Path(temporary) / "workbench.sqlite3"
+            controller = workbench_memory.QueueMemoryController(database)
+            peer = None
+            try:
+                settings = {
+                    "workerLimit": 1,
+                    "memoryLimit": {"mode": "gb", "value": 0.1},
+                }
+                container = controller.prepare_run("rogue-run", settings)
+                peer_container = controller.prepare_run("peer-run", settings)
+                self.assertNotEqual(container, peer_container)
+                snapshot = controller.reconcile(
+                    settings,
+                    {"rogue-run", "peer-run"},
+                )
+                self.assertTrue(snapshot["available"])
+                base_environment = os.environ.copy()
+                base_environment["PYTHONPATH"] = os.pathsep.join(
+                    filter(
+                        None,
+                        [
+                            str(PROJECT_ROOT / "src"),
+                            base_environment.get("PYTHONPATH"),
+                        ],
+                    )
+                )
+                environment = base_environment.copy()
+                environment[workbench_memory.QUEUE_JOB_ENV] = container
+                peer_environment = base_environment.copy()
+                peer_environment[workbench_memory.QUEUE_JOB_ENV] = peer_container
+                join = (
+                    "from workbench_memory import "
+                    "join_queue_job_from_environment; "
+                    "join_queue_job_from_environment(); "
+                )
+                peer = subprocess.Popen(
+                    [
+                        sys.executable,
+                        "-c",
+                        join
+                        + "import time; data = bytearray(10 * 1024 * 1024); "
+                        "time.sleep(2); raise SystemExit(3)",
+                    ],
+                    env=peer_environment,
+                )
+                code = (
+                    join + "import sys; "
+                    "\ntry: data = bytearray(200 * 1024 * 1024)"
+                    "\nexcept MemoryError: sys.exit(42)"
+                    "\nsys.exit(3)"
+                )
+                result = subprocess.run(
+                    [sys.executable, "-c", code],
+                    env=environment,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 42)
+                controller.close()
+                controller = workbench_memory.QueueMemoryController(database)
+                reopened = controller.reconcile(settings, {"peer-run"})
+                self.assertGreater(reopened["currentBytes"], 0)
+                self.assertTrue(controller.run_has_processes("peer-run"))
+                self.assertEqual(peer.wait(), 3)
+                self.assertFalse(controller.run_has_processes("peer-run"))
+            finally:
+                if peer is not None and peer.poll() is None:
+                    peer.wait(timeout=5)
+                controller.close()
+
+    def test_linux_cgroup_backend_reconciles_limits_and_membership(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            parent = root / "delegated"
+            parent.mkdir()
+            (parent / "cgroup.controllers").write_text(
+                "cpu memory pids\n", encoding="ascii"
+            )
+            (parent / "cgroup.subtree_control").write_text(
+                "memory\n", encoding="ascii"
+            )
+            database = root / "workbench.sqlite3"
+            manager = workbench_memory._linux_queue_cgroup(database, parent)
+            manager.mkdir()
+            cgroup = workbench_memory._linux_worker_cgroup(
+                database,
+                parent,
+                "run-1",
+            )
+            cgroup.mkdir()
+            (cgroup / "cgroup.procs").write_text("", encoding="ascii")
+            (cgroup / "memory.current").write_text("20000\n", encoding="ascii")
+            (cgroup / "memory.max").write_text("32768\n", encoding="ascii")
+            (cgroup / "memory.swap.current").write_text("0\n", encoding="ascii")
+            (cgroup / "memory.swap.max").write_text("0\n", encoding="ascii")
+            controller = object.__new__(workbench_memory.QueueMemoryController)
+            controller.database = database
+            controller.physical_bytes = 1_000
+            controller.available = True
+            controller.error = None
+            controller.backend = "linux_cgroup_v2"
+            controller._cgroup_parent = parent
+            controller._cgroup = manager
+            controller._containers = {"run-1": cgroup}
+            controller._observed_peak = 0
+
+            desired_gb = 8192 / workbench_memory.GB_BYTES
+            pending = controller.reconcile(
+                {
+                    "workerLimit": 1,
+                    "memoryLimit": {"mode": "gb", "value": desired_gb},
+                },
+                {"run-1"},
+            )
+            self.assertTrue(pending["pending"])
+            self.assertEqual(pending["currentBytes"], 20000)
+            self.assertEqual(pending["peakBytes"], 20000)
+            self.assertEqual(
+                (cgroup / "memory.max").read_text().strip(), "32768"
+            )
+
+            (cgroup / "memory.current").write_text("4096\n", encoding="ascii")
+            applied = controller.reconcile(
+                {
+                    "workerLimit": 1,
+                    "memoryLimit": {"mode": "gb", "value": desired_gb},
+                },
+                {"run-1"},
+            )
+            self.assertFalse(applied["pending"])
+            self.assertEqual(applied["appliedBytes"], 8192)
+            self.assertEqual(
+                (cgroup / "memory.max").read_text().strip(), "8192"
+            )
+            self.assertEqual(
+                (cgroup / "memory.swap.max").read_text().strip(), "0"
+            )
+
+            unlimited = controller.reconcile(
+                {
+                    "workerLimit": 1,
+                    "memoryLimit": {"mode": "unlimited", "value": None},
+                },
+                {"run-1"},
+            )
+            self.assertIsNone(unlimited["appliedBytes"])
+            self.assertEqual((cgroup / "memory.max").read_text().strip(), "max")
+            self.assertEqual(
+                (cgroup / "memory.swap.max").read_text().strip(), "max"
+            )
+
+            with patch.object(workbench_memory.sys, "platform", "linux"), patch.dict(
+                os.environ,
+                {workbench_memory.QUEUE_JOB_ENV: str(cgroup)},
+            ):
+                workbench_memory.join_queue_job_from_environment()
+            self.assertEqual(
+                (cgroup / "cgroup.procs").read_text().strip(), str(os.getpid())
+            )
+            self.assertTrue(controller.run_has_processes("run-1"))
+            (cgroup / "cgroup.procs").write_text("", encoding="ascii")
+            self.assertFalse(controller.run_has_processes("run-1"))
+
+    def test_linux_without_delegation_pauses_a_finite_policy(self):
+        controller = object.__new__(workbench_memory.QueueMemoryController)
+        controller.physical_bytes = 64 * workbench_memory.GB_BYTES
+        controller.available = False
+        controller.error = "delegation unavailable"
+        controller.backend = None
+        controller._containers = {}
+        controller._observed_peak = 0
+
+        with patch.object(workbench_memory.sys, "platform", "linux"):
+            snapshot = controller.reconcile(
+                {"memoryLimit": {"mode": "percent", "value": 50}}
+            )
+        self.assertTrue(snapshot["pending"])
+        self.assertEqual(snapshot["error"], "delegation unavailable")
 
     def test_job_counts_only_latest_retry_for_each_part(self):
         with TemporaryDirectory() as temporary:
@@ -1868,7 +2272,7 @@ class WorkbenchStoreTests(unittest.TestCase):
             self.assertEqual(saved["outputs"], [str(first.resolve()), str(second.resolve())])
             self.assertEqual(saved["status"], "succeeded")
 
-    def test_stale_heartbeat_becomes_interrupted_and_can_retry(self):
+    def test_confirmed_terminated_worker_becomes_interrupted_and_can_retry(self):
         with TemporaryDirectory() as temporary:
             state = Path(temporary)
             store = WorkbenchStore(state / "workbench.sqlite3", state)
@@ -1880,11 +2284,34 @@ class WorkbenchStoreTests(unittest.TestCase):
             store.mark_starting(run["id"])
             store.update_run(run["id"], heartbeat_at=time.time() - 100)
 
-            self.assertEqual(store.mark_stale_runs(older_than=10), [run["id"]])
+            self.assertEqual(store.stale_run_ids(older_than=10), [run["id"]])
+            self.assertTrue(
+                store.mark_run_interrupted_if_stale(run["id"], older_than=10)
+            )
             self.assertEqual(store.get_run(run["id"])["status"], "interrupted")
             retry = store.retry_run(run["id"])
             self.assertEqual(retry["status"], "queued")
             self.assertEqual(retry["retry_of"], run["id"])
+
+    def test_fresh_heartbeat_prevents_stale_candidate_race(self):
+        with TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            store = WorkbenchStore(state / "workbench.sqlite3", state)
+            job = store.create_job(
+                {"action": "solve"},
+                fake_plan([sys.executable, "-c", "pass"]),
+            )
+            run = job["runs"][0]
+            store.mark_starting(run["id"])
+            store.update_run(run["id"], heartbeat_at=time.time() - 100)
+            self.assertEqual(store.stale_run_ids(older_than=10), [run["id"]])
+
+            store.update_run(run["id"], heartbeat_at=time.time())
+
+            self.assertFalse(
+                store.mark_run_interrupted_if_stale(run["id"], older_than=10)
+            )
+            self.assertEqual(store.get_run(run["id"])["status"], "starting")
 
     def test_complete_artifact_lines_are_recovered_after_worker_interruption(self):
         with TemporaryDirectory() as temporary:
@@ -2081,10 +2508,51 @@ class WorkbenchWatchTests(unittest.TestCase):
 
         scheduler.schedule.assert_called_once_with()
 
+    def test_scheduler_interrupts_only_empty_stale_worker_containers(self):
+        with TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            store = WorkbenchStore(state / "workbench.sqlite3", state)
+            runs = []
+            for label in ("live", "terminated", "unknown", "recently_delayed"):
+                job = store.create_job(
+                    {"action": "solve"},
+                    fake_plan([sys.executable, "-c", "pass"]),
+                )
+                run = job["runs"][0]
+                store.mark_starting(run["id"])
+                heartbeat_age = 60 if label == "recently_delayed" else 1_000
+                store.update_run(
+                    run["id"],
+                    heartbeat_at=time.time() - heartbeat_age,
+                )
+                runs.append((label, run))
+            scheduler = object.__new__(workbench.Scheduler)
+            scheduler.store = store
+            scheduler.memory = Mock()
+            liveness = {
+                runs[0][1]["id"]: True,
+                runs[1][1]["id"]: False,
+                runs[2][1]["id"]: None,
+            }
+            scheduler.memory.run_has_processes.side_effect = liveness.get
+            scheduler.memory_lock = threading.Lock()
+
+            interrupted = scheduler._interrupt_terminated_workers()
+
+            self.assertEqual(interrupted, [runs[1][1]["id"]])
+            self.assertEqual(store.get_run(runs[0][1]["id"])["status"], "starting")
+            self.assertEqual(
+                store.get_run(runs[1][1]["id"])["status"], "interrupted"
+            )
+            self.assertEqual(store.get_run(runs[2][1]["id"])["status"], "starting")
+            self.assertEqual(store.get_run(runs[3][1]["id"])["status"], "starting")
+            self.assertEqual(store.active_count(), 3)
+            self.assertEqual(scheduler.memory.run_has_processes.call_count, 3)
+
     def test_idle_scheduler_waits_until_explicitly_woken(self):
         store = Mock()
         store.revision.return_value = 0.0
-        store.mark_stale_runs.return_value = []
+        store.stale_run_ids.return_value = []
         store.active_count.return_value = 0
         store.scheduler_settings.return_value = {
             "workerLimit": 1,
@@ -2100,23 +2568,23 @@ class WorkbenchWatchTests(unittest.TestCase):
         try:
             deadline = time.time() + 2
             while (
-                store.mark_stale_runs.call_count == 0
+                store.stale_run_ids.call_count == 0
                 and time.time() < deadline
             ):
                 time.sleep(0.01)
-            checks = store.mark_stale_runs.call_count
+            checks = store.stale_run_ids.call_count
             self.assertGreater(checks, 0)
             time.sleep(0.55)
-            self.assertEqual(store.mark_stale_runs.call_count, checks)
+            self.assertEqual(store.stale_run_ids.call_count, checks)
 
             scheduler.schedule()
             deadline = time.time() + 2
             while (
-                store.mark_stale_runs.call_count == checks
+                store.stale_run_ids.call_count == checks
                 and time.time() < deadline
             ):
                 time.sleep(0.01)
-            self.assertGreater(store.mark_stale_runs.call_count, checks)
+            self.assertGreater(store.stale_run_ids.call_count, checks)
         finally:
             scheduler.close()
 

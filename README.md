@@ -153,7 +153,10 @@ task starts, the workbench switches automatically to **Activity**, where you
 can follow its status and console output; or use the back button to return.
 Use **Activity** at any time to revisit task history, logs, failures, and output
 paths. The **Workers** control in the top bar sets how many queued CLI runs may
-execute concurrently.
+execute concurrently. The same control sets a total memory allocation as a
+percentage of installed RAM, a fixed number of GB, or infinity. That allocation
+is divided by the maximum worker count to produce an independent limit for each
+worker. The default is 50% of installed RAM.
 
 ## Download arXiv papers
 
@@ -1134,15 +1137,31 @@ installed output before a later phase failed is marked partial so the next
 action can operate on that output without accidentally duplicating it.
 
 Use the worker control in the top bar to change concurrent CLI invocations or
-pause new starts. Task scheduling weights and per-task pause/resume controls are
-available when configuring or viewing a task. Weights are displayed as ⅛×
-through 8× (with 1× as the default), and eligible tasks receive worker starts
-in roughly those proportions. Pausing or lowering the limit never stops an
-already active run. Use `--no-open` to
-avoid opening a browser, `--port` to select another local port, or
-`--state-dir` to place the private task database and logs elsewhere. The
-default binding is local-only. To use the workbench from another machine on a
-trusted network, pass `--host 0.0.0.0` and browse to this machine's IP address.
+pause new starts. On Windows, each worker process tree gets a separate Job
+Object committed-memory limit. On Linux, each worker gets a separate cgroups v2
+`memory.max` limit, with `memory.swap.max` set to zero so the worker cannot evade
+its ceiling by moving allocations into swap; infinity restores both controls to
+`max`. These are ceilings, not reservations. Lowering the computed per-worker
+limit below a running worker's current use temporarily pauses new starts until
+every worker falls below its new limit. Task scheduling weights and per-task
+pause/resume controls are available
+when configuring or viewing a task. Weights are displayed as ⅛× through 8×
+(with 1× as the default), and eligible tasks receive worker starts in roughly
+those proportions. Pausing or lowering the limit never stops an already active
+run. Use `--no-open` to avoid opening a browser, `--port` to select another
+local port, or `--state-dir` to place the private task database and logs
+elsewhere. The default binding is local-only. To use the workbench from another
+machine on a trusted network, pass `--host 0.0.0.0` and browse to this machine's
+IP address.
+
+Linux enforcement requires a writable cgroups v2 subtree delegated to the
+workbench with the memory controller enabled. By default, the workbench creates
+a manager cgroup and one child cgroup per worker beneath its current cgroup. A
+service manager or container runtime can instead provide an already-delegated
+parent through `LOOSE_ENDS_CGROUP_ROOT`. If a finite policy is configured but delegation is
+unavailable, the queue pauses and the worker popover reports the setup error;
+select infinity to run without enforcement.
+
 IP-address access and the machine's own hostnames are accepted; use repeatable
 `--allowed-host NAME` for an additional trusted DNS name. Network clients can
 view project data and launch CLI tasks, so do not expose the port to an
