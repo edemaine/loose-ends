@@ -1476,6 +1476,85 @@ function addAction(parent, label, action, targets, primary = false) {
   parent.append(button(label, () => openTask(action, targets), `button${primary ? " primary" : ""}`));
 }
 
+function visualizationResourceUrl(visualization, relative = visualization.entryPoint) {
+  const resource = String(relative || "").split("/").map(encodeURIComponent).join("/");
+  return `/api/visualizations/${encodeURIComponent(visualization.key)}/${resource}`;
+}
+
+function visualizationVerdictClass(value) {
+  if (value === "well_supported" || value === "works" || value === "complete") return "success";
+  if (value === "minor_gaps" || value === "minor_issues") return "warn";
+  if (value === "major_gaps" || value === "major_issues") return "error";
+  if (value === "incorrect" || value === "unusable" || value === "not_self_contained") return "error";
+  return "neutral";
+}
+
+function renderVisualizationExperience(item) {
+  const visualizations = item.visualizations || [];
+  const shell = node("div", "visualization-shell");
+  if (!visualizations.length) {
+    shell.append(node("p", "", "No visualization is installed."));
+    return shell;
+  }
+
+  const controls = node("div", "visualization-picker");
+  const mount = node("div");
+  let selected = visualizations[0];
+
+  function renderSelected() {
+    mount.replaceChildren();
+    const header = node("section", "visualization-summary panel");
+    const title = node("div", "visualization-title");
+    title.append(node("h2", "", selected.title || selected.name));
+    const badges = node("div", "badges");
+    badges.append(
+      badge(`fidelity: ${reviewModel.humanize(selected.fidelity || "unreviewed")}`, visualizationVerdictClass(selected.fidelity)),
+      badge(`exposition: ${reviewModel.humanize(selected.expositionQuality || "unreviewed")}`, visualizationVerdictClass(selected.expositionQuality)),
+      badge(`interaction: ${reviewModel.humanize(selected.interactionQuality || "unreviewed")}`, visualizationVerdictClass(selected.interactionQuality)),
+    );
+    title.append(badges);
+    header.append(title);
+    if (selected.summary) header.append(node("p", "", selected.summary));
+    if (selected.reviewSummary) {
+      header.append(node("p", "visualization-review-summary", `Independent review: ${selected.reviewSummary}`));
+    }
+    if (selected.claimRefs?.length) {
+      header.append(node("small", "visualization-claims", `Represents ${selected.claimRefs.join(", ")}`));
+    }
+    appendStringList(header, "Limitations", selected.limitations);
+    appendStringList(header, "Independent-review gaps", selected.blockingGaps);
+    mount.append(header);
+
+    const frame = node("iframe", "visualization-frame");
+    frame.title = selected.title || "Interactive mathematical visualization";
+    frame.src = visualizationResourceUrl(selected);
+    frame.loading = "lazy";
+    frame.referrerPolicy = "no-referrer";
+    frame.setAttribute("sandbox", "allow-scripts");
+    mount.append(frame);
+  }
+
+  if (visualizations.length > 1) {
+    const select = node("select");
+    visualizations.forEach(value => {
+      const option = node("option", "", `${value.name} · ${value.title}`);
+      option.value = value.key;
+      select.append(option);
+    });
+    select.addEventListener("change", () => {
+      selected = visualizations.find(value => value.key === select.value) || visualizations[0];
+      renderSelected();
+    });
+    const label = node("label", "");
+    label.append(node("span", "", "Visualization"), select);
+    controls.append(label);
+    shell.append(controls);
+  }
+  shell.append(mount);
+  renderSelected();
+  return shell;
+}
+
 function olderVersionWarning(kind, currentName, latestName, route, selectLatest) {
   const warning = node("aside", "version-warning");
   warning.setAttribute("aria-label", `Older ${kind}`);
@@ -1621,6 +1700,7 @@ function renderReviewDetail(item) {
   addAction(actions, attempt ? "Solve again" : "Solve", "solve", [problem], true);
   if (attempt) {
     addAction(actions, item.attemptStatus === "reviewed" ? "Review again" : "Review", "review", [attempt]);
+    addAction(actions, item.visualizationCount ? "Visualize again" : "Visualize", "visualize", [attempt]);
     addAction(actions, "Write this result", "write", [attempt]);
   }
   shell.append(actions);
@@ -1675,7 +1755,8 @@ function renderReviewDetail(item) {
   });
   shell.append(tabbar);
   const section = node("section", "section");
-  if (state.detailTab === "attempt") section.append(markdown(item.solverAttempt, "Loading solver attempt…"));
+  if (state.detailTab === "visualize") section.append(renderVisualizationExperience(item));
+  else if (state.detailTab === "attempt") section.append(markdown(item.solverAttempt, "Loading solver attempt…"));
   else if (state.detailTab === "critique") section.append(markdown(item.critique, "No critique is installed."));
   else if (state.detailTab === "triage") section.append(markdown(item.triageReport, "Loading triage report…"));
   else if (state.detailTab === "literature") section.append(markdown(item.literatureReport, "No literature report is installed."));
@@ -3217,11 +3298,13 @@ function outputRoute(path) {
       "critique.md", "review-result.json", "review-manifest.json",
       "review-events.jsonl", "review-run.log",
     ]);
-    return {
+    const route = {
       tab: "research",
       review,
       detail: critiqueFiles.has(filename) ? "critique" : "attempt",
     };
+    if (path.split(/[\\/]/).includes("visualizations")) route.detail = "visualize";
+    return route;
   }
   const problem = state.catalog.reviews.find(
     item => pathContains(`${item.paperDirectory}/${item.problemId}`, path),
@@ -3247,6 +3330,7 @@ function outputRoute(path) {
 function outputRouteLabel(route) {
   if (route.tab === "papers") return "Go to paper";
   if (route.tab === "manuscripts") return "Go to manuscript";
+  if (route.detail === "visualize") return "Go to visualization";
   if (route.review?.attemptDirectory && route.detail !== "literature" && route.detail !== "triage") {
     return "Go to attempt";
   }
@@ -3362,7 +3446,7 @@ const actionNames = {
   download: "Download from arXiv",
   metadata: "Extract paper metadata",
   analyze: "Analyze papers", triage: "Triage problems", literature: "Search literature",
-  solve: "Solve problems", review: "Review attempts", write: "Write paper", revise: "Revise manuscript",
+  solve: "Solve problems", review: "Review attempts", visualize: "Visualize attempts", write: "Write paper", revise: "Revise manuscript",
 };
 
 const taskActionTitles = {
@@ -3373,6 +3457,7 @@ const taskActionTitles = {
   literature: "Literature review",
   solve: "Problem solving",
   review: "Solution review",
+  visualize: "Result visualization",
   write: "Paper writing",
   revise: "Manuscript revision",
 };
@@ -3518,6 +3603,7 @@ function promptLabel(action) {
     metadata: "Metadata-extractor direction",
     analyze: "Analyzer direction", triage: "Triage direction", literature: "Search direction",
     solve: "Solver direction", review: "Critic direction", write: "Writer direction", revise: "Revision direction",
+    visualize: "Visualization-designer direction",
   }[action];
 }
 
@@ -3730,8 +3816,13 @@ function renderTaskConfiguration(errorMessage = "") {
     type: "textarea", value: options.prompt || "", full: true,
     help: "Added to the standard task instructions without replacing validation safeguards.",
   }));
-  if (["solve", "write", "revise"].includes(task.action)) {
-    grid.append(field("reviewPrompt", task.action === "solve" ? "Solution-critic direction" : "Paper-critic direction", {
+  if (["solve", "visualize", "write", "revise"].includes(task.action)) {
+    const reviewLabel = task.action === "solve"
+      ? "Solution-critic direction"
+      : task.action === "visualize"
+        ? "Fidelity-reviewer direction"
+        : "Paper-critic direction";
+    grid.append(field("reviewPrompt", reviewLabel, {
       type: "textarea", value: options.reviewPrompt || "", full: true,
     }));
   }
@@ -3805,13 +3896,13 @@ function renderTaskConfiguration(errorMessage = "") {
     options: [["", `Default (${taskDefaults.reasoningEffort || "unavailable"})`], ...["low", "medium", "high", "xhigh", "max", "ultra"].map(value => [value, value])],
   }));
   advancedGrid.append(checkbox("fast", "Fast service tier", "Uses additional credits.", options.fast));
-  if (["literature", "solve", "review", "write", "revise"].includes(task.action)) {
+  if (["literature", "solve", "review", "visualize", "write", "revise"].includes(task.action)) {
     advancedGrid.append(field("webSearch", "Web search", {
       type: "select", value: options.webSearch || "",
       options: [["", `Default (${reviewModel.titleize(taskDefaults.webSearch || "unavailable")})`], ["live", "Live"], ["indexed", "Indexed"], ["disabled", "Disabled"]],
     }));
   }
-  if (["solve", "write", "revise"].includes(task.action)) {
+  if (["solve", "visualize", "write", "revise"].includes(task.action)) {
     advancedGrid.append(field("reviewModel", "Critic model", { value: options.reviewModel || "", help: "Blank inherits the primary model." }));
     advancedGrid.append(field("reviewReasoningEffort", "Critic reasoning", {
       type: "select", value: options.reviewReasoningEffort || "",

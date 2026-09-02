@@ -37,6 +37,7 @@ import ingest_paper
 import open_problem_common as common
 import review_solutions
 import write_paper
+import visualizations
 from workbench_store import ACTIVE_STATUSES, WorkbenchStore
 from workbench_worker import recover_run_artifacts
 from workbench_tasks import (
@@ -73,6 +74,9 @@ IGNORED_PREFIXES = (
     ".literature-install-",
     ".draft-install-",
     ".paper-review-install-",
+    ".visualization-install-",
+    ".visualization-review-run-",
+    ".visualize-run-",
     ".paper-install-",
     ".triage-install-",
 )
@@ -102,6 +106,10 @@ CATALOG_FILE_NAMES = {
     "main.pdf",
     "readiness.md",
     "paper-critique.md",
+    visualizations.MANIFEST_NAME,
+    visualizations.REVIEW_NAME,
+    visualizations.CRITIQUE_NAME,
+    "index.html",
 }
 
 
@@ -346,7 +354,9 @@ def _catalog_root_signature(root: Path) -> str:
             part.casefold() for part in current.relative_to(root).parts
         }
         include_directory_files = bool(
-            relative_parts.intersection({"artifacts", "figures", "code"})
+            relative_parts.intersection(
+                {"artifacts", "figures", "code", visualizations.DIRECTORY_NAME}
+            )
         )
         for name in sorted(file_names):
             if (
@@ -1174,6 +1184,25 @@ class CatalogManager:
         value["fileCount"] = len(value["files"])
         return value
 
+    def visualization_file(self, key: str, relative: str) -> Path:
+        """Resolve a resource from a catalogued visualization package."""
+        with self.lock:
+            packages = [
+                package
+                for item in self.catalog.get("reviews", [])
+                for package in item.get("visualizations", [])
+                if isinstance(package, dict) and package.get("key") == key
+            ]
+        if len(packages) != 1:
+            raise KeyError(key)
+        directory = Path(packages[0]["directory"]).resolve()
+        if not any(_relative_to(directory, root.resolve()) for root in self.paths):
+            raise KeyError(key)
+        try:
+            return visualizations.resolve_file(directory, relative)
+        except (FileNotFoundError, ValueError) as exc:
+            raise KeyError(key) from exc
+
     def close(self) -> None:
         self.stopping.set()
         self.pending.set()
@@ -1199,7 +1228,11 @@ class ChangeHandler(FileSystemEventHandler):
         parts = {part.casefold() for part in value.parts}
         return (
             value.name.casefold() in CATALOG_FILE_NAMES
-            or bool(parts.intersection({"artifacts", "figures", "code"}))
+            or bool(
+                parts.intersection(
+                    {"artifacts", "figures", "code", visualizations.DIRECTORY_NAME}
+                )
+            )
         )
 
     @staticmethod
@@ -2095,6 +2128,13 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
             elif path == "/api/review-detail":
                 key = parse_qs(parsed.query).get("key", [""])[0]
                 self.send_json(self.app.catalog.review_detail(key))
+            elif match := re.fullmatch(
+                r"/api/visualizations/([0-9a-f]{24})/(.+)", path
+            ):
+                resource = self.app.catalog.visualization_file(
+                    match.group(1), unquote(match.group(2))
+                )
+                self._send_visualization_file(resource)
             elif path == "/api/jobs":
                 self.send_json({"jobs": self.app.store.list_jobs()})
             elif match := re.fullmatch(r"/api/jobs/([0-9a-f-]+)", path):
@@ -2314,6 +2354,42 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                     break
                 self.wfile.write(chunk)
                 remaining -= len(chunk)
+
+    def _send_visualization_file(self, path: Path) -> None:
+        """Serve one sandboxed app resource with a network-denying policy."""
+        data = path.read_bytes()
+        content_type = (
+            mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        )
+        if path.suffix.casefold() in {
+            ".html", ".css", ".js", ".json", ".md", ".svg", ".txt"
+        }:
+            content_type += "; charset=utf-8"
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        # A sandboxed iframe without allow-same-origin has the opaque `null`
+        # origin. Scope this CORS exception to package resources so local
+        # fetch/module/WASM loads work without exposing the Workbench API.
+        self.send_header("Access-Control-Allow-Origin", "null")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'none'; "
+            "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data: blob:; "
+            "font-src 'self' data:; "
+            "media-src 'self' data: blob:; "
+            "connect-src 'self'; object-src 'none'; frame-src 'none'; "
+            "worker-src 'none'; base-uri 'none'; form-action 'none'; "
+            "navigate-to 'none'; "
+            "frame-ancestors 'self'",
+        )
+        self.end_headers()
+        self.wfile.write(data)
 
     def _send_manuscript_zip(self, value: str) -> None:
         if not value:

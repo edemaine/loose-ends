@@ -29,7 +29,10 @@ Loose Ends enables the following research workflow:
 6. **Review attempts.** Have independent critics assess correctness, coverage,
    importance, and remaining gaps, while preserving the full research history
    for later attempts and human inspection.
-7. **Write and revise papers.** Turn selected results into traced, cited LaTeX
+7. **Visualize results.** Build purpose-designed interactive companions for
+   selected attempts, then independently audit their mathematical fidelity and
+   behavior before presenting them beside the proof.
+8. **Write and revise papers.** Turn selected results into traced, cited LaTeX
    manuscripts, compile them, critique them independently, and iterate toward
    expert human review.
 
@@ -130,7 +133,12 @@ Your web browser should automatically open the server at
    tabs; the attempt list in the sidebar retains earlier rounds. To handle
    attempts still awaiting a critic, filter for **Awaiting review**, select
    them, and choose **Review**.
-6. **Write and revise a paper.** (This requires LaTeX including `latexmk`.)
+6. **Visualize a result.** Open a solver attempt and choose **Visualize**. The
+   visualization designer creates a purpose-built static web application and a
+   separate critic audits its mathematical fidelity and interactions. When the
+   task finishes, open the attempt's **Visualize** tab. Multiple visualizations
+   remain available so different explanatory approaches can coexist.
+7. **Write and revise a paper.** (This requires LaTeX including `latexmk`.)
    Select one or more results in **Research** and choose **Write paper**,
    or open an attempt and choose **Write this result**.
    You can request multiple automatic rounds of writing, reviewing, and
@@ -779,6 +787,61 @@ earlier result. Human priority is derived deterministically from those axes
 instead of being a free critic judgment. The critic does not assess novelty;
 it may use live web search only to verify an external theorem invoked by the
 attempt. Literature changes therefore do not invalidate mathematical reviews.
+
+## Visualize a result
+
+`src/visualize_result.py` creates a standalone interactive mathematical
+exposition for a specific solver attempt. The generated visualization is
+free-form HTML, CSS, and JavaScript designed for that result; the contract
+intentionally does not prescribe whether it behaves as a construction player,
+algorithm visualizer, object explorer, proof walkthrough, parameter
+experiment, or a combination. Its primary reading path must nevertheless
+introduce the problem, visibly state the precise result, build its hypotheses,
+explain the proof or argument step by step, and return to the conclusion. An
+interactive example or laboratory by itself is not considered complete.
+The exposition is written for professional mathematicians: formal statements
+and source numbering remain explicit, intuition is labeled separately, the
+current proof goal stays visible, and a genuine construction playground is
+included whenever the mathematics reasonably supports one.
+
+Preview a run without starting Codex:
+
+```sh
+python src/visualize_result.py papers/.../OP-001/attempt-001 --dry-run
+```
+
+Generate the visualization and run its independent fidelity review:
+
+```sh
+python src/visualize_result.py papers/.../OP-001/attempt-001
+```
+
+The result is installed beneath the attempt:
+
+```text
+attempt-001/
+└── visualizations/
+    └── visualization-001/
+        ├── visualization.json
+        ├── fidelity-review.json
+        ├── fidelity-critique.md
+        ├── index.html
+        ├── verification.md
+        └── ... bundled application assets
+```
+
+Every application is served in a script-enabled sandboxed iframe. Generated
+code does not receive the workbench origin, parent-page access, forms, popups,
+persistent browser storage, or network access. Libraries and other reusable
+assets must be bundled inside the visualization package. The manifest records
+the represented `C-###` claims, limitations, verification checks, source
+attempt digest, model configuration, and independent fidelity verdict.
+
+Visualizations are explanatory artifacts, not proof certificates. The critic
+separately assesses mathematical fidelity, exposition quality, and interaction
+quality. Its verdicts and blocking gaps remain visible above the embedded app,
+including when a technically functional visualization is mathematically
+misleading or fails to explain the result as a self-contained narrative.
 
 ## Write a paper
 

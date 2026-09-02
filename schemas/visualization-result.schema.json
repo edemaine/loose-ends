@@ -1,0 +1,66 @@
+{
+  "type": "object",
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["complete", "partial"]
+    },
+    "title": {"type": "string"},
+    "summary": {"type": "string"},
+    "entry_point": {"type": "string"},
+    "claim_refs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^C-[0-9]{3,}$"
+      }
+    },
+    "concepts": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "limitations": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "verification_checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {"type": "string"},
+          "method": {"type": "string"},
+          "result": {
+            "type": "string",
+            "enum": ["passed", "warning"]
+          },
+          "details": {"type": "string"}
+        },
+        "required": ["name", "method", "result", "details"],
+        "additionalProperties": false
+      }
+    },
+    "files": {
+      "type": "array",
+      "minItems": 2,
+      "items": {"type": "string"}
+    },
+    "warnings": {
+      "type": "array",
+      "items": {"type": "string"}
+    }
+  },
+  "required": [
+    "status",
+    "title",
+    "summary",
+    "entry_point",
+    "claim_refs",
+    "concepts",
+    "limitations",
+    "verification_checks",
+    "files",
+    "warnings"
+  ],
+  "additionalProperties": false
+}

@@ -1058,6 +1058,47 @@ class WorkbenchPlanningTests(unittest.TestCase):
             self.assertIn("Try small cases.", argv)
             self.assertIn("Check the boundary case.", argv)
 
+    def test_visualization_plan_targets_attempt_and_preserves_reviewer_settings(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = make_paper(root)
+            attempt = paper / "OP-001" / "attempt-001"
+            attempt.mkdir(parents=True)
+            common.write_json(
+                attempt / "solver-result.json",
+                {
+                    "claimed_result_type": "partial_result",
+                    "summary": "A construction.",
+                    "checkable_claims": [],
+                },
+            )
+            plan = build_plan(
+                {
+                    "action": "visualize",
+                    "targets": [
+                        {"kind": "attempt", "path": str(attempt), "label": "attempt-001"}
+                    ],
+                    "options": {
+                        "prompt": "Use the square example.",
+                        "reviewPrompt": "Audit degenerate inputs.",
+                        "reviewReasoningEffort": "high",
+                    },
+                },
+                project_root=PROJECT_ROOT,
+                allowed_roots=[root],
+                manuscripts=root / "manuscripts",
+                catalog_version=9,
+            )
+
+            argv = plan["units"][0]["argv"]
+            self.assertIn("visualize_result.py", argv[2])
+            self.assertIn("Use the square example.", argv)
+            self.assertIn("Audit degenerate inputs.", argv)
+            self.assertEqual(
+                argv[argv.index("--review-reasoning-effort") + 1], "high"
+            )
+            self.assertIn(f"problem:{attempt.parent.resolve()}", plan["units"][0]["resources"])
+
     def test_arxiv_download_plan_is_scoped_to_a_configured_paper_root(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1950,6 +1991,24 @@ class WorkbenchWatchTests(unittest.TestCase):
             [str(PROJECT_ROOT / "papers" / "metadata.json")]
         )
 
+    def test_watchdog_schedules_visualization_asset_changes(self):
+        catalog = Mock()
+        handler = ChangeHandler(catalog)
+        path = (
+            PROJECT_ROOT / "papers" / "paper" / "OP-001" / "attempt-001"
+            / "visualizations" / "visualization-001" / "app.js"
+        )
+
+        handler.on_any_event(
+            SimpleNamespace(
+                event_type="modified",
+                is_directory=False,
+                src_path=str(path),
+            )
+        )
+
+        catalog.schedule.assert_called_once_with([str(path)])
+
     def test_watchdog_ignores_files_outside_the_catalog_model(self):
         catalog = Mock()
         handler = ChangeHandler(catalog)
@@ -2185,6 +2244,31 @@ class WorkbenchWatchTests(unittest.TestCase):
                 time.sleep(0.1)
 
             self.assertGreater(manager.version, initial)
+
+
+class VisualizationResponseTests(unittest.TestCase):
+    def test_visualization_headers_allow_only_local_package_connections(self):
+        with TemporaryDirectory() as temporary:
+            resource = Path(temporary) / "app.js"
+            resource.write_text("export const value = 1;", encoding="utf-8")
+            handler = object.__new__(workbench.WorkbenchHandler)
+            handler.wfile = BytesIO()
+            handler.send_response = Mock()
+            headers = {}
+            handler.send_header = lambda name, value: headers.__setitem__(
+                name, value
+            )
+            handler.end_headers = Mock()
+
+            handler._send_visualization_file(resource)
+
+            self.assertEqual(headers["Access-Control-Allow-Origin"], "null")
+            policy = headers["Content-Security-Policy"]
+            self.assertIn("default-src 'none'", policy)
+            self.assertIn("connect-src 'self'", policy)
+            self.assertIn("worker-src 'none'", policy)
+            self.assertNotIn("http:", policy)
+            self.assertEqual(handler.wfile.getvalue(), resource.read_bytes())
 
 
 if __name__ == "__main__":

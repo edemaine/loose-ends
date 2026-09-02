@@ -21,6 +21,7 @@ import webbrowser
 import codex_cli
 import open_problem_common as common
 import review_solutions
+import visualizations
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -253,6 +254,18 @@ def _review_file_records(
                 path for path in artifacts.rglob("*") if path.is_file()
             )
             paths.extend(sorted(artifact_paths, key=lambda path: path.as_posix()))
+        visualization_root = attempt_directory / visualizations.DIRECTORY_NAME
+        if visualization_root.is_dir():
+            paths.extend(
+                sorted(
+                    (
+                        path
+                        for path in visualization_root.rglob("*")
+                        if path.is_file()
+                    ),
+                    key=lambda path: path.as_posix(),
+                )
+            )
     files = []
     for path in paths:
         if not path.is_file():
@@ -725,6 +738,11 @@ def build_review_catalog(
             if include_files
             else []
         )
+        installed_visualizations = (
+            visualizations.discover(attempt.directory)
+            if attempt is not None
+            else []
+        )
         data.append(
             {
                 "id": f"review-{index + 1}",
@@ -858,6 +876,8 @@ def build_review_catalog(
                     "recommended_next_steps", []
                 ),
                 "warnings": review_result.get("warnings", []),
+                "visualizations": installed_visualizations,
+                "visualizationCount": len(installed_visualizations),
                 "files": files,
                 "fileCount": len(files),
                 "critique": (

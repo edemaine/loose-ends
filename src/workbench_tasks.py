@@ -28,6 +28,7 @@ ACTIONS = {
     "literature",
     "solve",
     "review",
+    "visualize",
     "write",
     "revise",
 }
@@ -49,6 +50,7 @@ def task_cli_defaults() -> dict[str, dict[str, str]]:
     import review_solutions
     import solve_open_problems
     import triage_open_problems
+    import visualize_result
     import write_paper
 
     modules = {
@@ -58,6 +60,7 @@ def task_cli_defaults() -> dict[str, dict[str, str]]:
         "literature": literature_review,
         "solve": solve_open_problems,
         "review": review_solutions,
+        "visualize": visualize_result,
         "write": write_paper,
         "revise": write_paper,
     }
@@ -673,6 +676,27 @@ def build_plan(
             units.append(
                 _unit(
                     label=f"Review {target['label']}",
+                    argv=argv,
+                    project_root=project_root,
+                    targets=[target],
+                )
+            )
+
+    elif action == "visualize":
+        _require(targets, {"attempt"}, action)
+        for target in targets:
+            attempt = Path(target["path"])
+            argv = [
+                python,
+                "-u",
+                str(script / "visualize_result.py"),
+                str(attempt),
+            ]
+            _common_arguments(argv, options, web_search=True)
+            _review_arguments(argv, options)
+            units.append(
+                _unit(
+                    label=f"Visualize {target['label']}",
                     argv=argv,
                     project_root=project_root,
                     targets=[target],
