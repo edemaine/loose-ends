@@ -378,6 +378,14 @@ class WorkbenchPlanningTests(unittest.TestCase):
             app,
         )
         self.assertIn("reviewModel.paperFiltersFromSearchParams(parameters)", app)
+        self.assertIn("manuscriptFiltersOpen: false", app)
+        self.assertIn("function renderManuscriptFilters()", app)
+        self.assertIn("reviewModel.filterManuscripts(", app)
+        self.assertIn(
+            "reviewModel.manuscriptFiltersToSearchParams(parameters, state.manuscriptFilters)",
+            app,
+        )
+        self.assertIn("reviewModel.manuscriptFiltersFromSearchParams(parameters)", app)
         self.assertIn("revealSidebarSelection: false", app)
         self.assertIn("sidebarScroll: { research: 0, papers: 0, manuscripts: 0, activity: 0 }", app)
         self.assertIn('sidebar.querySelector(".research-filters")', app)
@@ -571,6 +579,13 @@ class WorkbenchPlanningTests(unittest.TestCase):
         self.assertIn('["missing", "Needs metadata extraction"]', model)
         self.assertIn('["missing", "Needs analysis"]', model)
         self.assertIn('["none", "Analyzed, no open problems"]', model)
+        self.assertIn("function createDefaultManuscriptFilters()", model)
+        self.assertIn("function filterManuscripts(manuscripts, filters, query", model)
+        self.assertIn("function manuscriptFiltersFromSearchParams(parameters)", model)
+        self.assertIn("function manuscriptFiltersToSearchParams(parameters, filters)", model)
+        self.assertIn('["attention", "Needs attention"]', model)
+        self.assertIn('["stale", "Tracked sources updated"]', model)
+        self.assertIn('["pinned", "Has pinned problem inputs"]', model)
         self.assertIn("const initialPriorities = [...reviewModel.priorityLevels]", app)
         self.assertIn('["attempt", "Attempt (current)"]', model)
         self.assertIn('triage: "triage"', model)
@@ -847,6 +862,7 @@ class WorkbenchPlanningTests(unittest.TestCase):
             )
             self.assertTrue(sources["problems"][0]["pinned"])
             self.assertEqual(sources["pinning"], {"pinned": 1, "tracking": 0})
+            self.assertEqual(sources["freshness"], {"current": 0, "stale": 0})
 
             manifest["input_selectors"] = [
                 {"kind": "problem", "path": str(paper / "OP-001")}
@@ -859,6 +875,15 @@ class WorkbenchPlanningTests(unittest.TestCase):
                         "paperDirectory": str(paper),
                         "problemId": "OP-001",
                         "problemTitle": "Test conjecture",
+                        "attemptName": "attempt-002",
+                        "attemptNumber": 2,
+                    },
+                    {
+                        "paperDirectory": str(paper),
+                        "problemId": "OP-001",
+                        "problemTitle": "Old title",
+                        "attemptName": "attempt-001",
+                        "attemptNumber": 1,
                     }
                 ],
             )
@@ -868,6 +893,9 @@ class WorkbenchPlanningTests(unittest.TestCase):
                 "problem",
             )
             self.assertEqual(tracking["pinning"], {"pinned": 0, "tracking": 1})
+            self.assertEqual(tracking["problems"][0]["currentAttemptName"], "attempt-002")
+            self.assertTrue(tracking["problems"][0]["stale"])
+            self.assertEqual(tracking["freshness"], {"current": 0, "stale": 1})
 
             manifest["input_selectors"] = [
                 {"kind": "paper", "path": str(paper)},
@@ -889,6 +917,30 @@ class WorkbenchPlanningTests(unittest.TestCase):
             )
             self.assertTrue(overridden["problems"][0]["pinned"])
             self.assertEqual(overridden["problems"][0]["selectorKind"], "pin")
+            self.assertFalse(overridden["problems"][0]["stale"])
+
+    def test_manuscript_dependency_fingerprint_tracks_latest_attempt(self):
+        paper = {
+            "path": "paper",
+            "title": "Paper",
+        }
+        first = {
+            "paperDirectory": "paper",
+            "problemId": "OP-001",
+            "problemTitle": "Problem",
+            "attemptName": "attempt-001",
+            "attemptNumber": 1,
+        }
+        second = {
+            **first,
+            "attemptName": "attempt-002",
+            "attemptNumber": 2,
+        }
+
+        before = CatalogManager._source_fingerprint([paper], [first])
+        after = CatalogManager._source_fingerprint([paper], [second, first])
+
+        self.assertNotEqual(before, after)
 
     def test_manuscript_inventory_reports_draft_progress(self):
         with TemporaryDirectory() as temporary:

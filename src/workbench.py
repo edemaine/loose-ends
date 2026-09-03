@@ -419,6 +419,25 @@ def _review_inventory(
     )
 
 
+def _latest_problem_review_lookup(
+    reviews: Iterable[dict],
+) -> dict[tuple[str, str], dict]:
+    latest: dict[tuple[str, str], dict] = {}
+    for item in reviews:
+        key = (
+            os.path.normcase(str(Path(item["paperDirectory"]))),
+            item["problemId"],
+        )
+        previous = latest.get(key)
+        if (
+            previous is None
+            or int(item.get("attemptNumber", -1) or -1)
+            > int(previous.get("attemptNumber", -1) or -1)
+        ):
+            latest[key] = item
+    return latest
+
+
 def _manuscript_sources(
     manifest: dict,
     papers: list[dict],
@@ -433,13 +452,7 @@ def _manuscript_sources(
             for item in papers
         }
     if problem_lookup is None:
-        problem_lookup = {
-            (
-                os.path.normcase(str(Path(item["paperDirectory"]))),
-                item["problemId"],
-            ): item
-            for item in reviews
-        }
+        problem_lookup = _latest_problem_review_lookup(reviews)
     source_papers: dict[str, dict] = {}
     source_problems: dict[tuple[str, str], dict] = {}
     paper_selectors: set[str] = set()
@@ -480,6 +493,9 @@ def _manuscript_sources(
                 "title": str(review.get("problemTitle") or problem_id),
             },
         )
+        current_attempt_name = review.get("attemptName", "")
+        if isinstance(current_attempt_name, str) and current_attempt_name:
+            record["currentAttemptName"] = current_attempt_name
         if selector_kind is not None:
             record["selectorKind"] = selector_kind
             record["pinned"] = selector_kind in {"attempt", "pin"}
@@ -548,6 +564,16 @@ def _manuscript_sources(
 
     pinned = sum(bool(item.get("pinned")) for item in source_problems.values())
     tracking = len(source_problems) - pinned
+    stale = 0
+    for record in source_problems.values():
+        current_attempt = record.get("currentAttemptName", "")
+        recorded_attempt = record.get("attemptName", "")
+        record["stale"] = bool(
+            not record.get("pinned")
+            and current_attempt
+            and current_attempt != recorded_attempt
+        )
+        stale += int(record["stale"])
 
     return {
         "papers": sorted(
@@ -564,6 +590,10 @@ def _manuscript_sources(
         "pinning": {
             "pinned": pinned,
             "tracking": tracking,
+        },
+        "freshness": {
+            "current": tracking - stale,
+            "stale": stale,
         },
     }
 
@@ -582,13 +612,7 @@ def _manuscript_inventory(
         os.path.normcase(str(Path(item["path"]))): item
         for item in papers
     }
-    problem_lookup = {
-        (
-            os.path.normcase(str(Path(item["paperDirectory"]))),
-            item["problemId"],
-        ): item
-        for item in reviews
-    }
+    problem_lookup = _latest_problem_review_lookup(reviews)
     draft_total = sum(
         1
         for manuscript in directory.iterdir()
@@ -800,15 +824,14 @@ class CatalogManager:
     @staticmethod
     def _source_fingerprint(papers: list[dict], reviews: list[dict]) -> str:
         problems = {
-            (
-                str(item.get("paperDirectory", "")),
-                str(item.get("problemId", "")),
-            ): {
+            key: {
                 "paperDirectory": item.get("paperDirectory"),
                 "problemId": item.get("problemId"),
                 "problemTitle": item.get("problemTitle"),
+                "attemptName": item.get("attemptName"),
+                "attemptNumber": item.get("attemptNumber"),
             }
-            for item in reviews
+            for key, item in _latest_problem_review_lookup(reviews).items()
         }
         dependencies = {
             "papers": [
