@@ -97,6 +97,28 @@
     ["results", "Most results (weighted)"],
     ["problems", "Most open problems"],
   ]);
+  const paperFilterOptions = Object.freeze({
+    metadata: [
+      ["all", "Any metadata status"],
+      ["missing", "Needs metadata extraction"],
+      ["complete", "Metadata complete"],
+    ],
+    analysis: [
+      ["all", "Any analysis status"],
+      ["missing", "Needs analysis"],
+      ["complete", "Analyzed"],
+    ],
+    problems: [
+      ["all", "Any open-problem count"],
+      ["present", "Has open problems"],
+      ["none", "Analyzed, no open problems"],
+    ],
+  });
+  const paperFilterParameters = Object.freeze({
+    metadata: "metadata",
+    analysis: "analysis",
+    problems: "problems",
+  });
 
   function humanize(value, fallback = "unknown") {
     return String(value || fallback).replaceAll("_", " ");
@@ -174,6 +196,52 @@
         item.literatureStatus, item.literatureSummary, item.legacyVerdict,
       ].join(" ").toLowerCase().includes(needle);
     });
+  }
+
+  function createDefaultPaperFilters() {
+    return { metadata: "all", analysis: "all", problems: "all" };
+  }
+
+  function matchesPaper(paper, filters) {
+    if (filters.metadata === "missing" && paper.metadataComplete) return false;
+    if (filters.metadata === "complete" && !paper.metadataComplete) return false;
+    if (filters.analysis === "missing" && paper.analyzed) return false;
+    if (filters.analysis === "complete" && !paper.analyzed) return false;
+    const problemCount = Number(paper.problemCount) || 0;
+    if (filters.problems === "present" && problemCount === 0) return false;
+    if (filters.problems === "none" && (!paper.analyzed || problemCount !== 0)) return false;
+    return true;
+  }
+
+  function filterPapers(papers, filters, query = "") {
+    const needle = query.trim().toLowerCase();
+    return papers.filter(paper => {
+      if (!matchesPaper(paper, filters)) return false;
+      if (!needle) return true;
+      return [
+        paper.title, paper.name, ...(paper.authors || []), paper.path,
+        paper.arxivId, paper.doi, paper.url, paper.analysisStatus,
+      ].join(" ").toLowerCase().includes(needle);
+    });
+  }
+
+  function paperFiltersFromSearchParams(parameters) {
+    const filters = createDefaultPaperFilters();
+    Object.entries(paperFilterParameters).forEach(([key, parameter]) => {
+      const requested = parameters.get(parameter);
+      const allowed = new Set(paperFilterOptions[key].map(([value]) => value));
+      if (requested && allowed.has(requested)) filters[key] = requested;
+    });
+    return filters;
+  }
+
+  function paperFiltersToSearchParams(parameters, filters) {
+    const defaults = createDefaultPaperFilters();
+    Object.entries(paperFilterParameters).forEach(([key, parameter]) => {
+      parameters.delete(parameter);
+      if (filters[key] !== defaults[key]) parameters.set(parameter, filters[key]);
+    });
+    return parameters;
   }
 
   function compareProblems(left, right) {
@@ -578,12 +646,18 @@
     priorityLevels,
     freshnessLevels,
     paperSortOptions,
+    paperFilterOptions,
     humanize,
     titleize,
     statusLabel,
     createDefaultFilters,
     matches,
     filterItems,
+    createDefaultPaperFilters,
+    matchesPaper,
+    filterPapers,
+    paperFiltersFromSearchParams,
+    paperFiltersToSearchParams,
     compareProblems,
     latestProblems,
     attemptsForProblem,

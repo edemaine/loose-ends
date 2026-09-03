@@ -22,6 +22,8 @@ const state = {
   selectedProblem: "",
   researchFilters: reviewModel.createDefaultFilters(),
   researchFiltersOpen: false,
+  paperFilters: reviewModel.createDefaultPaperFilters(),
+  paperFiltersOpen: false,
   revealSidebarSelection: false,
   revealSidebarSecondarySelection: false,
   sidebarScroll: { research: 0, papers: 0, manuscripts: 0, activity: 0 },
@@ -163,6 +165,7 @@ function currentUrl() {
     reviewModel.identityToSearchParams(parameters, item);
     if (item && state.detailTab && state.detailTab !== "attempt") parameters.set("detail", state.detailTab);
   } else if (state.tab === "papers") {
+    reviewModel.paperFiltersToSearchParams(parameters, state.paperFilters);
     const paper = state.catalog.papers.find(value => value.key === state.selectedPaper);
     if (paper) parameters.set("paper", paper.urlKey || paper.path);
   } else if (state.tab === "manuscripts") {
@@ -247,6 +250,7 @@ function applyLocation({ scrollY } = {}) {
     state.revealSidebarSecondarySelection = Boolean(requested);
     state.detailTab = parameters.get("detail") || "attempt";
   } else if (state.tab === "papers") {
+    state.paperFilters = reviewModel.paperFiltersFromSearchParams(parameters);
     const requested = parameters.get("paper");
     const paper = state.catalog.papers.find(
       item => item.urlKey === requested || item.path === requested,
@@ -717,10 +721,7 @@ function visibleProblemTargets() {
 }
 
 function visiblePaperTargets() {
-  const query = state.search.trim().toLowerCase();
-  return state.catalog.papers
-    .filter(paper => !query || `${paper.title} ${paper.name} ${paper.authors.join(" ")}`.toLowerCase().includes(query))
-    .map(paperTarget);
+  return filteredPapers().map(paperTarget);
 }
 
 function updateVisibleSelectionControl(input, targets, noun) {
@@ -1361,6 +1362,14 @@ function filteredReviews() {
   );
 }
 
+function filteredPapers() {
+  return reviewModel.filterPapers(
+    state.catalog.papers,
+    state.paperFilters,
+    state.search,
+  );
+}
+
 function filterControl(label, key, options) {
   const wrapper = node("label", "filter-control");
   wrapper.append(node("span", "", label));
@@ -1446,6 +1455,54 @@ function renderResearchFilters() {
   return details;
 }
 
+function paperFilterControl(label, key, options) {
+  const wrapper = node("label", "filter-control");
+  wrapper.append(node("span", "", label));
+  const select = node("select");
+  select.dataset.paperFilterKey = key;
+  options.forEach(([value, text]) => {
+    const option = node("option", "", text);
+    option.value = value;
+    option.selected = state.paperFilters[key] === value;
+    select.append(option);
+  });
+  select.addEventListener("change", () => {
+    state.paperFilters[key] = select.value;
+    state.selectedPaper = "";
+    syncNavigation({ replace: true });
+  });
+  wrapper.append(select);
+  return wrapper;
+}
+
+function renderPaperFilters() {
+  const details = node("details", "research-filters paper-filters");
+  details.open = state.paperFiltersOpen;
+  details.addEventListener("toggle", () => {
+    state.paperFiltersOpen = details.open;
+  });
+  const summary = node("summary");
+  summary.append(node("span", "", "Paper filters"));
+  summary.append(visiblePaperSelectionControl());
+  details.append(summary);
+  const controls = node("div", "research-filter-grid paper-filter-grid");
+  controls.append(
+    paperFilterControl("Metadata", "metadata", reviewModel.paperFilterOptions.metadata),
+    paperFilterControl("Analysis", "analysis", reviewModel.paperFilterOptions.analysis),
+    paperFilterControl("Open problems", "problems", reviewModel.paperFilterOptions.problems),
+  );
+  const footer = node("div", "filter-footer");
+  footer.append(node("span", "", "Paper processing status"));
+  footer.append(button("Reset", () => {
+    state.paperFilters = reviewModel.createDefaultPaperFilters();
+    state.selectedPaper = "";
+    syncNavigation({ replace: true });
+  }, "filter-reset"));
+  controls.append(footer);
+  details.append(controls);
+  return details;
+}
+
 function syncSidebarControls(tab, controls) {
   const search = controls.querySelector("input.search");
   if (search && search.value !== state.search) search.value = state.search;
@@ -1456,6 +1513,14 @@ function syncSidebarControls(tab, controls) {
     manuscriptSort.value = state.manuscriptSort;
   }
   if (tab === "papers") {
+    const details = controls.querySelector(".paper-filters");
+    if (details && details.open !== state.paperFiltersOpen) {
+      details.open = state.paperFiltersOpen;
+    }
+    controls.querySelectorAll("select[data-paper-filter-key]").forEach(select => {
+      const value = state.paperFilters[select.dataset.paperFilterKey];
+      if (select.value !== value) select.value = value;
+    });
     updateVisiblePaperSelectionControl(
       controls.querySelector("input[data-select-visible-papers]"),
     );
@@ -1929,14 +1994,13 @@ function renderPapers() {
     controls.append(
       sidebarSearch("Search source papers…"),
       paperSortControl(),
-      visiblePaperSelectionControl(),
+      renderPaperFilters(),
       addActions,
     );
     return controls;
   });
-  const query = state.search.trim().toLowerCase();
   const papers = reviewModel.sortPapers(
-    state.catalog.papers.filter(paper => !query || `${paper.title} ${paper.name} ${paper.authors.join(" ")}`.toLowerCase().includes(query)),
+    filteredPapers(),
     state.paperSort,
     state.catalog.reviews,
   );
