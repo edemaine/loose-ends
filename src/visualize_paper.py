@@ -42,9 +42,12 @@ DEFAULT_REVIEW_SCHEMA_PATH = PROJECT_ROOT / "schemas" / "visualization-review.sc
 WIDGET_API_PATH = PROJECT_ROOT / "prompts" / "visualization-widget-api.md"
 READER_DIRECTORY = PROJECT_ROOT / "src" / "workbench_web" / "reader"
 DEFAULT_ANCHOR = visualizations.DEFAULT_ANCHOR
+NOTES_ANCHOR = visualizations.NOTES_ANCHOR
+PSEUDO_ANCHORS = {DEFAULT_ANCHOR, NOTES_ANCHOR}
 TRANSIENT_FAILURE_MARKERS = ("at capacity", "rate limit", "overloaded", "temporarily unavailable")
 MAX_TRANSIENT_RETRIES = 2
 DEFAULT_REPAIR_ROUNDS = 1
+NOTES_ONLY_REASONING_EFFORT = "medium"
 
 
 @dataclass(frozen=True)
@@ -150,13 +153,13 @@ def resolve_anchors(document: dict, anchors: list[str]) -> list[str]:
     described = visualizations.anchor_descriptions(document)
     resolved: list[str] = []
     for anchor in anchors:
-        if anchor == DEFAULT_ANCHOR:
+        if anchor in PSEUDO_ANCHORS:
             resolved.append(anchor)
             continue
         if anchor not in described:
             raise common.CodexError(
                 f"anchor {anchor!r} is not a statement or proof of the document; "
-                "see document.json for valid ids"
+                f"see document.json for valid ids (or use `{NOTES_ANCHOR}` to address reader notes)"
             )
         resolved.append(anchor)
     return list(dict.fromkeys(resolved)) or [DEFAULT_ANCHOR]
@@ -206,17 +209,58 @@ def _stage_existing(inputs: Path, source: SourceRef, manifest: dict) -> None:
     common.write_json(existing / visualizations.MANIFEST_NAME, manifest)
 
 
-def _request(document: dict, anchors: list[str], manifest: dict) -> dict:
+def _reader_notes(source: SourceRef, document: dict) -> list[dict]:
+    """Open reader notes with the text of the paragraph they point at."""
+    text = {paragraph["id"]: paragraph.get("text", "") for paragraph in document.get("paragraphs", [])}
+    described = visualizations.anchor_descriptions(document)
+    notes = []
+    for note in visualizations.open_notes(source.package):
+        anchor = note.get("anchor", "")
+        container = ""
+        for proof in document.get("proofs", []):
+            if anchor in proof.get("paragraphs", []):
+                container = proof["id"]
+        for statement in document.get("statements", []):
+            if anchor in statement.get("paragraphs", []) or anchor == statement["id"]:
+                container = statement["id"]
+        if note.get("widget"):
+            container = anchor
+        previous = None
+        if note.get("revises"):
+            previous = next((entry for entry in visualizations.load_explanations(source.package) if isinstance(entry, dict) and entry.get("id") == note["revises"]), None)
+        notes.append({
+            "id": note["id"],
+            "anchor": anchor,
+            "container": container,
+            "container_label": described.get(container, {}).get("label", ""),
+            "quote": note.get("quote", ""),
+            "latex": note.get("latex", ""),
+            "message": note.get("message", ""),
+            "revises": note.get("revises", ""),
+            "widget": note.get("widget", ""),
+            "step": note.get("step"),
+            "step_title": note.get("step_title", ""),
+            "follows": note.get("follows", ""),
+            "previous_answer": {"title": previous.get("title", ""), "text": previous.get("text", "")} if previous else None,
+            "paragraph_text": text.get(anchor, ""),
+        })
+    return notes
+
+
+def _request(document: dict, anchors: list[str], manifest: dict, notes: list[dict] | None = None) -> dict:
     described = visualizations.anchor_descriptions(document)
     wants_default = DEFAULT_ANCHOR in anchors
+    wants_notes = NOTES_ANCHOR in anchors
     return {
+        "reader_notes": notes or [],
+        "notes_only": wants_notes and not wants_default and not [a for a in anchors if a not in PSEUDO_ANCHORS],
         "anchors": anchors,
         "annotations": wants_default,
         "main_result_widget": wants_default,
         "proof_outlines": wants_default,
         "widgets": [
             {**described[anchor], "widget_id": visualizations.widget_id(anchor)}
-            for anchor in anchors if anchor != DEFAULT_ANCHOR
+            for anchor in anchors if anchor not in PSEUDO_ANCHORS
         ],
         "existing_widgets": [
             {"id": widget.get("id"), "anchor": widget.get("anchor"), "kind": widget.get("kind"), "title": widget.get("title")}
@@ -251,6 +295,27 @@ def _render_prompt(template: str, document: dict, request: dict) -> str:
                 f"{': ' + widget['title'] if widget.get('title') else ''}), "
                 f"directory `output/widgets/{widget['widget_id']}/`."
             )
+    if request.get("reader_notes"):
+        lines.append("")
+        lines.append(
+            "The reader marked these passages as unclear (also in "
+            "`inputs/reader-notes.json`). Address every one: add a "
+            "phrase-level proof step whose picture explains the passage, a "
+            "glossary entry, or a short clarifying note in the widget, and "
+            "list the ids you addressed in `notes_addressed`. A note inside a "
+            "proof that has no widget yet asks for a proof widget on that proof."
+        )
+        for note in request["reader_notes"]:
+            where = f" in {note['container_label']} (`{note['container']}`)" if note.get("container") else ""
+            message = f' Reader says: "{note["message"]}"' if note.get("message") else ""
+            follow_up = ""
+            if note.get("previous_answer"):
+                follow_up = f" This follows up an earlier explanation (`{note['revises']}`, \"{note['previous_answer']['title']}\") that did not satisfy the reader; replace it."
+            if note.get("widget"):
+                step = f" at step {note['step'] + 1} (\"{note.get('step_title', '')}\")" if isinstance(note.get("step"), int) else ""
+                lines.append(f"- `{note['id']}` about widget `{note['widget']}`{step} (anchored at `{note['anchor']}`): \"{note['message'] or note['quote']}\". Fix the widget accordingly when regenerating it.")
+                continue
+            lines.append(f"- `{note['id']}` at `{note['anchor']}`{where}: \"{note['quote']}\".{message}{follow_up}")
     if request["existing_widgets"]:
         lines.append("")
         lines.append("Existing widgets (under `inputs/existing/`): " + ", ".join(
@@ -265,12 +330,15 @@ def _render_prompt(template: str, document: dict, request: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _expectations(document: dict, anchors: list[str]) -> dict:
+def _expectations(document: dict, anchors: list[str], notes: list[dict] | None = None) -> dict:
     return {
         "anchors": anchors,
-        "annotations_required": DEFAULT_ANCHOR in anchors,
+        "annotations_required": DEFAULT_ANCHOR in anchors or NOTES_ANCHOR in anchors,
         "document_ids": paper_document.anchor_ids(document),
         "proof_paragraphs": {proof["id"]: list(proof.get("paragraphs", [])) for proof in document.get("proofs", [])},
+        "paragraph_text": {paragraph["id"]: paragraph.get("text", "") for paragraph in document.get("paragraphs", [])},
+        "note_ids": [note["id"] for note in notes or []],
+        "note_containers": sorted({note["container"] for note in notes or [] if note.get("container")}),
     }
 
 
@@ -292,6 +360,8 @@ def _review_generated(
         generated = inputs / "generated"
         shutil.copytree(generated_workspace / visualization_validation.OUTPUT_DIRECTORY, generated)
         shutil.copyfile(generated_workspace / "agent-result.json", generated / "agent-result.json")
+        if (generated_workspace / "inputs" / "reader-notes.json").is_file():
+            shutil.copyfile(generated_workspace / "inputs" / "reader-notes.json", inputs / "reader-notes.json")
         codex_cli.grant_sandbox_read_access(inputs)
         widget_ids = [widget["id"] for widget in generated_result.get("widgets", []) if isinstance(widget, dict)]
         report = codex_cli.run_validated_codex(
@@ -382,6 +452,7 @@ def _install(
                 "limitations": widget.get("limitations", []),
                 "entry": visualizations.WIDGET_ENTRY_NAME,
                 "steps": (common.load_json(target / visualizations.WIDGET_MANIFEST_NAME) or {}).get("steps", []),
+                "examples": (common.load_json(target / visualizations.WIDGET_MANIFEST_NAME) or {}).get("examples", []),
                 "run": run_name,
                 "generated_at": now,
                 "model": options.model,
@@ -430,6 +501,10 @@ def _install(
             "review_reasoning_effort": review_options.reasoning_effort,
             "review_fast_mode": review_options.fast,
         })
+        addressed = [note_id for note_id in generated_result.get("notes_addressed", []) if isinstance(note_id, str)]
+        if addressed:
+            visualizations.mark_notes_addressed(package, addressed, run_name)
+            manifest["runs"][-1]["notes_addressed"] = addressed
         manifest["generated_at"] = now
         visualizations.write_manifest(package, manifest)
     except (OSError, ValueError, KeyError) as exc:
@@ -543,24 +618,32 @@ def visualize(
     review_options: codex_cli.ModelOptions,
     review_web_search: str,
     rebuild_document: bool = False,
-    repair_rounds: int = DEFAULT_REPAIR_ROUNDS,
+    repair_rounds: int | None = None,
 ) -> RunOutcome:
     document, manifest = ensure_document(source, rebuild=rebuild_document)
     anchors = resolve_anchors(document, anchors)
+    notes_only = anchors == [NOTES_ANCHOR]
+    if notes_only and not options.reasoning_effort:
+        # Notes-only runs produce annotations, not widgets: medium effort is enough.
+        options = codex_cli.ModelOptions(options.model, NOTES_ONLY_REASONING_EFFORT, options.fast)
+    if repair_rounds is None:
+        repair_rounds = 0 if notes_only else DEFAULT_REPAIR_ROUNDS
     workspace = Path(tempfile.mkdtemp(prefix=".visualize-run-", dir=source.directory)).resolve()
     review_workspace: Path | None = None
     review_result: dict | None = None
     try:
         inputs = _stage_common_inputs(workspace, source, document)
         _stage_existing(inputs, source, manifest)
-        request = _request(document, anchors, manifest)
+        notes = _reader_notes(source, document)
+        request = _request(document, anchors, manifest, notes)
         common.write_json(inputs / "request.json", request)
+        common.write_json(inputs / "reader-notes.json", {"notes": notes})
         codex_cli.grant_sandbox_read_access(inputs)
         rendered_prompt = _render_prompt(prompt, document, request)
         validator = codex_cli.OutputValidator(
             Path(visualization_validation.__file__).resolve(),
             visualization_validation.validate,
-            _expectations(document, anchors),
+            _expectations(document, anchors, notes),
         )
         retries = 0
         while True:
@@ -640,8 +723,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rebuild-document", action="store_true", help="reconvert the source even if a document exists")
     parser.add_argument("--skip-review", action="store_true", help="do not run the independent fidelity review")
     parser.add_argument(
-        "--repair-rounds", type=int, default=DEFAULT_REPAIR_ROUNDS, metavar="N",
-        help="designer repair rounds after a review with blocking gaps (default: %(default)s)",
+        "--repair-rounds", type=int, default=None, metavar="N",
+        help=f"designer repair rounds after a review with blocking gaps (default: {DEFAULT_REPAIR_ROUNDS}, or 0 for notes-only runs)",
     )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--codex", default="codex")
@@ -735,7 +818,7 @@ def main(argv: list[str] | None = None) -> int:
                 review_config_digest=review_config_digest, review_options=review_options,
                 review_web_search=args.review_web_search or args.web_search,
                 rebuild_document=args.rebuild_document,
-                repair_rounds=max(0, args.repair_rounds),
+                repair_rounds=None if args.repair_rounds is None else max(0, args.repair_rounds),
             )
             print(
                 f"Installed {outcome.run_directory}: widgets {', '.join(outcome.widgets) or 'none'}; "

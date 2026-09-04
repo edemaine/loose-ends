@@ -20,7 +20,13 @@
     proofsVisible: false,
     labels: new Map(),
     stepControllers: new Map(),
+    notes: [],
+    noteHighlight: null,
   };
+  const HAS_HIGHLIGHT_API = typeof CSS !== "undefined" && "highlights" in CSS && typeof Highlight !== "undefined";
+  // One shared highlight for the active proof step; panels clear and refill it.
+  const stepHighlight = HAS_HIGHLIGHT_API ? new Highlight() : null;
+  if (stepHighlight) CSS.highlights.set("step-active", stepHighlight);
   const embedded = window.parent !== window;
   const content = document.getElementById("content");
   const outlineList = document.getElementById("outline-list");
@@ -141,6 +147,10 @@
   /** Render text containing $...$ and $$...$$ spans into the element. */
   function renderRichText(text, element) {
     element.replaceChildren();
+    text = String(text || "")
+      .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "")
+      .replace(/\\\((.*?)\\\)/gs, (_, inner) => `$${inner}$`)
+      .replace(/\\\[(.*?)\\\]/gs, (_, inner) => `$$${inner}$$`);
     const pattern = /\$\$([\s\S]+?)\$\$|\$([^$]+?)\$/g;
     let index = 0;
     let match;
@@ -190,6 +200,57 @@
     state.proofsVisible = visible;
     content.querySelectorAll(".proof").forEach(proof => proof.classList.toggle("collapsed", !visible));
     document.getElementById("toggle-proofs").textContent = visible ? "Hide proofs" : "Show proofs";
+  }
+
+  /** Find `phrase` (whitespace- and case-insensitive) in the prose of `element`; returns a Range or null. */
+  function findPhraseRange(element, phrase) {
+    // Phrases are matched against prose only, so drop any $...$ formulas.
+    const needle = String(phrase || "").replace(/\$\$[\s\S]*?\$\$|\$[^$]*\$/g, " ").replace(/\s+/g, " ").trim().toLowerCase();
+    if (!needle || !element) return null;
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT, {
+      acceptNode(text) {
+        return text.parentElement && text.parentElement.closest(".math, .env-actions, .proof-actions, button") ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
+      },
+    });
+    let haystack = "";
+    const map = [];
+    let lastSpace = true;
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      const value = node.nodeValue;
+      for (let index = 0; index < value.length; index += 1) {
+        const char = value[index];
+        if (/\s/.test(char)) {
+          if (lastSpace) continue;
+          haystack += " ";
+          map.push([node, index]);
+          lastSpace = true;
+        } else {
+          haystack += char.toLowerCase();
+          map.push([node, index]);
+          lastSpace = false;
+        }
+      }
+    }
+    // Exact match first; then the longest prefix of words that occurs, which
+    // tolerates quotes copied from rendered math ("the ith corner").
+    const words = needle.split(" ");
+    const candidates = [needle];
+    for (let count = words.length - 1; count >= 2; count -= 1) candidates.push(words.slice(0, count).join(" "));
+    for (const candidate of candidates) {
+      const start = haystack.indexOf(candidate);
+      if (start < 0) continue;
+      const end = start + candidate.length - 1;
+      const range = document.createRange();
+      range.setStart(map[start][0], map[start][1]);
+      range.setEnd(map[end][0], map[end][1] + 1);
+      return range;
+    }
+    return null;
+  }
+
+  function scrollToRectTop(top, smooth = true) {
+    window.scrollTo({ top: top + window.scrollY - SCROLL_OFFSET, behavior: smooth ? "smooth" : "auto" });
   }
 
   const SCROLL_OFFSET = 60;      // where a revealed element's top lands
@@ -369,7 +430,11 @@
 
   function applyGlossary() {
     const glossary = (state.annotations && state.annotations.glossary) || [];
-    if (!glossary.length) return;
+    if (!glossary.length) {
+      state.glossary = new Map();
+      wirePopover();
+      return;
+    }
     const entries = glossary.map((entry, index) => ({
       ...entry,
       key: entry.id || `term-${index}`,
@@ -443,6 +508,53 @@
     wirePopover();
   }
 
+  /** Mark phrases that have an inline explanation with a small bubble marker. */
+  function attachExplanation(entry, index = 0) {
+    if (!state.glossary) state.glossary = new Map();
+    const key = `explain-${entry.id || index}`;
+    const existing = content.querySelector(`.explain-mark[data-term="${CSS.escape(key)}"]`);
+    if (existing) existing.remove();
+    const quick = entry.provenance === "quick";
+    state.glossary.set(key, {
+      term: entry.title || "Why?",
+      kind: quick ? "quick answer, unreviewed" : "explanation",
+      gloss: entry.text,
+      anchor: null,
+      explanation: entry,
+    });
+    const marker = node("button", `explain-mark${quick ? " quick" : ""}`, "?");
+    marker.type = "button";
+    marker.dataset.term = key;
+    marker.classList.add("term");
+    marker.title = quick ? "Quick answer (unreviewed)" : "Explanation";
+    const placed = placeMarker(marker, entry.anchor, { latex: entry.latex, phrase: entry.phrase });
+    if (!placed) return null;
+    if (placed.range && HAS_HIGHLIGHT_API) {
+      if (!state.explainHighlight) {
+        state.explainHighlight = new Highlight();
+        CSS.highlights.set("explained", state.explainHighlight);
+      }
+      state.explainHighlight.add(placed.range);
+    }
+    if (placed.math) placed.math.classList.add("explained-math");
+    return marker;
+  }
+
+  /** Replace every explanation bubble with the given list. */
+  function resyncExplanations(list) {
+    content.querySelectorAll(".explain-mark:not(.pending)").forEach(element => element.remove());
+    content.querySelectorAll(".explained-math").forEach(element => element.classList.remove("explained-math"));
+    if (state.explainHighlight) state.explainHighlight.clear();
+    if (!state.annotations) state.annotations = { glossary: [], proof_outlines: {}, explanations: [] };
+    state.annotations.explanations = Array.isArray(list) ? list : [];
+    state.annotations.explanations.forEach((entry, index) => attachExplanation(entry, index));
+  }
+
+  function applyExplanations() {
+    const explanations = (state.annotations && state.annotations.explanations) || [];
+    explanations.forEach((entry, index) => attachExplanation(entry, index));
+  }
+
   function wirePopover() {
     let hideTimer = null;
     let pinned = false;
@@ -477,8 +589,19 @@
           reveal(entry.anchor);
         });
         popover.append(jump);
+      } else if (entry.kind === "background") {
+        popover.append(node("div", "popover-source", "Not defined in the paper."));
       }
       if (entry.source) popover.append(node("div", "popover-source", entry.source));
+      if (entry.explanation) {
+        const revise = button("Unclear?", () => {
+          hide(true);
+          openReviseForm(entry.explanation, termElement);
+        }, "mini");
+        const actions = node("div", "popover-actions");
+        actions.append(revise);
+        popover.append(actions);
+      }
       popover.hidden = false;
       const rect = termElement.getBoundingClientRect();
       const width = popover.offsetWidth;
@@ -539,17 +662,43 @@
     const card = node("section", "widget-card");
     card.dataset.widget = widget.id;
     const head = node("div", "widget-head");
-    head.append(node("strong", "", widget.title || "Visualization"));
+    head.append(node("strong", "widget-title", widget.title || "Visualization"));
+    const meta = node("div", "widget-meta");
     const review = widget.review || null;
-    if (review) {
-      head.append(badge(`fidelity: ${humanize(review.fidelity || "unreviewed")}`, verdictClass(review.fidelity)));
-      if (review.interaction_quality) head.append(badge(`interaction: ${humanize(review.interaction_quality)}`, verdictClass(review.interaction_quality)));
+    if (review && review.fidelity && review.fidelity !== "unreviewed") {
+      meta.append(badge(humanize(review.fidelity), verdictClass(review.fidelity)));
+      if (review.interaction_quality) meta.append(badge(humanize(review.interaction_quality), verdictClass(review.interaction_quality)));
     } else {
-      head.append(badge("unreviewed", "neutral"));
+      meta.append(badge("unreviewed", "neutral"));
     }
-    head.append(node("span", "spacer"));
-    head.append(button("Details", () => card.classList.toggle("details-open")));
+    meta.append(node("span", "spacer"));
+    const improve = button("Improve…", () => openImproveForm(widget, card));
+    improve.title = "Report something off in this visualization as a whole";
+    meta.append(improve);
+    meta.append(button("Details", () => card.classList.toggle("details-open")));
+    head.append(meta);
     card.append(head);
+    let exampleSelect = null;
+    if (Array.isArray(widget.examples) && widget.examples.length) {
+      const bar = node("div", "widget-examples");
+      const label = node("label");
+      label.append(node("span", "", "Running example"));
+      exampleSelect = node("select");
+      widget.examples.forEach(example => {
+        const option = node("option", "", example.label || example.id);
+        option.value = example.id;
+        if (example.note) option.title = example.note;
+        exampleSelect.append(option);
+      });
+      label.append(exampleSelect);
+      bar.append(label);
+      const note = node("span", "widget-example-note");
+      const updateNote = () => { const chosen = widget.examples.find(item => item.id === exampleSelect.value); note.textContent = chosen && chosen.note ? chosen.note : ""; };
+      updateNote();
+      exampleSelect.addEventListener("change", updateNote);
+      bar.append(note);
+      card.append(bar);
+    }
     const body = node("div", "widget-body");
     card.append(body);
     const details = node("div", "widget-details");
@@ -572,7 +721,7 @@
     });
     if (widget.generated_at) details.append(node("p", "", `Generated ${widget.generated_at}${widget.model ? ` · ${widget.model}` : ""}`));
     card.append(details);
-    return { card, body };
+    return { card, body, exampleSelect };
   }
 
   /** Map a pointer event to the SVG's viewBox coordinates, independent of CSS scaling. */
@@ -633,6 +782,24 @@
     const list = node("ol", "steps");
     let active = -1;
     let instance = null;
+    // Each step targets either a phrase range inside one of its paragraphs or its first paragraph.
+    const targets = steps.map(step => {
+      const elements = (step.paragraphs || []).map(id => document.getElementById(id)).filter(Boolean);
+      let range = null;
+      if (step.phrase) {
+        for (const element of elements) {
+          range = findPhraseRange(element, step.phrase);
+          if (range) break;
+        }
+      }
+      return { elements, range };
+    });
+    const targetTop = index => {
+      const target = targets[index];
+      if (!target) return Infinity;
+      if (target.range) return target.range.getBoundingClientRect().top;
+      return target.elements[0] ? target.elements[0].getBoundingClientRect().top : Infinity;
+    };
     const items = steps.map((step, index) => {
       const item = node("li", "step");
       item.append(node("span", "step-index", String(index + 1)));
@@ -651,35 +818,102 @@
       return item;
     });
     let lockUntil = 0;
+    // Keep the sticky panel on screen while the last steps reach the reading
+    // line: pad the text column so the proof does not end above the panel.
+    const ensureRunway = () => {
+      const body = proof.querySelector(":scope > .proof-body");
+      const text = body && body.querySelector(":scope > .proof-text");
+      const panel = body && body.querySelector(":scope > .proof-panel");
+      if (!text || !panel || !steps.length) return;
+      const last = targets[steps.length - 1];
+      const lastTop = last.range ? last.range.getBoundingClientRect().top : (last.elements[0] ? last.elements[0].getBoundingClientRect().top : null);
+      if (lastTop === null) return;
+      text.style.paddingBottom = "0px";
+      const remaining = text.getBoundingClientRect().bottom - lastTop;
+      const needed = panel.offsetHeight + 52 - READING_LINE;
+      text.style.paddingBottom = `${Math.max(0, Math.ceil(needed - remaining))}px`;
+    };
+    window.addEventListener("resize", ensureRunway);
     const controller = {
       setStep(index, { scroll = false, fromWidget = false } = {}) {
         if (index < 0 || index >= steps.length) return;
         active = index;
         items.forEach((item, position) => item.classList.toggle("active", position === index));
-        const ids = new Set(steps[index].paragraphs || []);
+        if (controller.onChange) controller.onChange(index);
+        const target = targets[index];
+        const usePhrase = Boolean(target.range && stepHighlight);
+        const ids = new Set(usePhrase ? [] : (steps[index].paragraphs || []));
         paragraphs.forEach(paragraph => paragraph.classList.toggle("step-active", ids.has(paragraph.id)));
+        if (stepHighlight) {
+          stepHighlight.clear();
+          if (usePhrase) stepHighlight.add(target.range);
+        }
         if (scroll) {
-          const first = (steps[index].paragraphs || []).map(id => document.getElementById(id)).find(Boolean);
+          const first = target.elements[0];
           if (first) {
             // Ignore scroll-following while the smooth scroll is in flight.
             lockUntil = Date.now() + 1200;
-            reveal(first.id, { flash: false });
+            let ancestor = first.parentElement;
+            while (ancestor) {
+              if (ancestor.classList && (ancestor.classList.contains("sec") || ancestor.classList.contains("proof"))) ancestor.classList.remove("collapsed");
+              ancestor = ancestor.parentElement;
+            }
+            scrollToRectTop(target.range ? target.range.getBoundingClientRect().top : first.getBoundingClientRect().top);
           }
         }
         if (instance && instance.setStep && !fromWidget) {
           try { instance.setStep(index, steps[index]); } catch (error) { console.error(error); }
         }
       },
-      attach(value) { instance = value; },
+      attach(value) { instance = value; requestAnimationFrame(ensureRunway); },
       get active() { return active; },
+      get instance() { return instance; },
+      refresh() { if (active >= 0) controller.setStep(active); requestAnimationFrame(ensureRunway); },
+      ensureRunway,
     };
     if (steps.length) {
+      // Current step stays adjacent to the picture; the full list scrolls.
+      const current = node("div", "step-current");
       const nav = node("div", "step-nav");
-      nav.append(
-        button("◀ Previous", () => controller.setStep(Math.max(0, active - 1), { scroll: true })),
-        button("Next ▶", () => controller.setStep(Math.min(steps.length - 1, active + 1), { scroll: true })),
-      );
-      body.append(list, nav);
+      const counter = node("span", "step-counter");
+      const previous = button("◀", () => controller.setStep(Math.max(0, active - 1), { scroll: true }));
+      const next = button("▶", () => controller.setStep(Math.min(steps.length - 1, active + 1), { scroll: true }));
+      const expand = button("All steps", () => {
+        list.classList.toggle("expanded");
+        expand.textContent = list.classList.contains("expanded") ? "Fewer" : "All steps";
+      });
+      nav.append(previous, counter, next, node("span", "spacer"), expand);
+      const currentText = node("div", "step-current-text");
+      body.append(current, nav, list);
+      current.append(currentText);
+      const stepImprove = button("Improve…", () => {
+        const card = proof.querySelector(".proof-panel .widget-card");
+        const widget = card && card.dataset.widget ? state.widgets.find(item => item.id === card.dataset.widget) : null;
+        if (widget) openImproveForm(widget, card, { step: active, stepTitle: steps[active] && steps[active].title });
+      }, "mini step-improve");
+      stepImprove.title = "Report something off in this step's picture";
+      current.append(stepImprove);
+      controller.stepImprove = stepImprove;
+      list.classList.add("compact");
+      controller.onChange = index => {
+        counter.textContent = `Step ${index + 1} of ${steps.length}`;
+        currentText.replaceChildren();
+        const title = node("div", "step-title");
+        renderRichText(steps[index].title || `Step ${index + 1}`, title);
+        currentText.append(title);
+        if (steps[index].note || steps[index].summary) {
+          const note = node("div", "step-note");
+          renderRichText(steps[index].note || steps[index].summary, note);
+          currentText.append(note);
+        }
+        previous.disabled = index === 0;
+        next.disabled = index === steps.length - 1;
+        const item = items[index];
+        if (item && !list.classList.contains("expanded")) {
+          const offset = item.getBoundingClientRect().top - list.getBoundingClientRect().top + list.scrollTop;
+          list.scrollTop = Math.max(0, offset - list.clientHeight / 2 + item.offsetHeight / 2);
+        }
+      };
     }
     // Follow the reader's scroll position through the proof: the current
     // step is the one containing the last paragraph whose top has passed
@@ -688,7 +922,6 @@
     if (steps.length) {
       const lookup = new Map();
       steps.forEach((step, index) => (step.paragraphs || []).forEach(id => lookup.set(id, index)));
-      const tracked = paragraphs.filter(paragraph => lookup.has(paragraph.id));
       let scheduled = false;
       const sync = () => {
         scheduled = false;
@@ -696,9 +929,9 @@
         if (!proof.isConnected || proof.classList.contains("collapsed")) return;
         const proofRect = proof.getBoundingClientRect();
         if (proofRect.bottom < 0 || proofRect.top > window.innerHeight) return;
-        let index = lookup.get(tracked[0]?.id) ?? 0;
-        for (const paragraph of tracked) {
-          if (paragraph.getBoundingClientRect().top <= READING_LINE) index = lookup.get(paragraph.id);
+        let index = 0;
+        for (let position = 0; position < steps.length; position += 1) {
+          if (targetTop(position) <= READING_LINE) index = position;
           else break;
         }
         if (index !== active) controller.setStep(index);
@@ -738,7 +971,7 @@
         showNotice(`Widget "${widget.title || widget.id}" targets a missing anchor ${widget.anchor}.`);
         continue;
       }
-      const { card, body } = widgetCard(widget);
+      const { card, body, exampleSelect } = widgetCard(widget);
       let controller = null;
       if (target.classList.contains("proof")) {
         handledProofs.add(target.id);
@@ -761,11 +994,19 @@
         body.replaceChildren(node("div", "widget-error", "Widget script could not be loaded."));
         continue;
       }
+      if (controller) state.stepControllers.set(widget.id, controller);
       const mount = () => {
         const instance = mountWidget(widget, body, controller);
+        state.instances.set(widget.id, { mount: () => {}, instance });
         if (controller && instance) {
           controller.attach(instance);
           controller.setStep(0);
+        }
+        if (exampleSelect && instance) {
+          exampleSelect.addEventListener("change", () => {
+            try { if (instance.setExample) instance.setExample(exampleSelect.value); } catch (error) { console.error(error); }
+            if (controller) controller.refresh();
+          });
         }
       };
       if (state.factories.has(widget.id)) mount();
@@ -792,7 +1033,405 @@
       card.append(host);
       panel.append(card);
       controller.setStep(0);
+      requestAnimationFrame(controller.ensureRunway);
     });
+  }
+
+  // ------------------------------------------------------------------
+  // Reader notes ("I don't get this")
+  // ------------------------------------------------------------------
+
+  const noteButton = node("button", "note-button", "I don't get this");
+  noteButton.type = "button";
+  noteButton.hidden = true;
+  document.body.append(noteButton);
+  const noteForm = node("div", "note-form");
+  noteForm.hidden = true;
+  document.body.append(noteForm);
+  const notesPanel = node("div", "notes-panel");
+  notesPanel.hidden = true;
+  document.body.append(notesPanel);
+  let notesButton = null;
+  let pendingSelection = null;
+
+  function selectionAnchor(range) {
+    let element = range.startContainer.nodeType === Node.TEXT_NODE ? range.startContainer.parentElement : range.startContainer;
+    if (!element || !content.contains(element)) return null;
+    const paragraph = element.closest(".par[id], figcaption, li");
+    if (paragraph && paragraph.id) return paragraph.id;
+    const holder = element.closest("[id]");
+    return holder && content.contains(holder) ? holder.id : null;
+  }
+
+  function hideNoteUi() {
+    noteButton.hidden = true;
+    noteForm.hidden = true;
+    pendingSelection = null;
+  }
+
+  function onSelectionChange() {
+    if (!noteForm.hidden) return;
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed || !selection.rangeCount) { noteButton.hidden = true; return; }
+    const range = selection.getRangeAt(0);
+    const quote = selection.toString().replace(/\s+/g, " ").trim();
+    const anchor = selectionAnchor(range);
+    if (!anchor || quote.length < 1 || quote.length > 1500) { noteButton.hidden = true; return; }
+    const startElement = range.startContainer.nodeType === Node.TEXT_NODE ? range.startContainer.parentElement : range.startContainer;
+    const mathElement = startElement && startElement.closest(".math");
+    const latex = mathElement ? (mathElement.dataset.latex || "") : "";
+    if (!latex && quote.length < 3) { noteButton.hidden = true; return; }
+    pendingSelection = { anchor, quote, latex };
+    const rect = range.getBoundingClientRect();
+    noteButton.style.left = `${Math.min(rect.right + window.scrollX + 6, window.scrollX + window.innerWidth - 150)}px`;
+    noteButton.style.top = `${rect.bottom + window.scrollY + 6}px`;
+    noteButton.hidden = false;
+  }
+
+  function openNoteForm() {
+    if (!pendingSelection) return;
+    showNoteForm(pendingSelection, { left: noteButton.style.left, top: noteButton.style.top });
+  }
+
+  /** Reopen the form on an existing explanation so the reader can ask again. */
+  function openReviseForm(explanation, marker) {
+    const rect = marker.getBoundingClientRect();
+    showNoteForm({
+      anchor: explanation.anchor,
+      quote: explanation.phrase || explanation.title || "",
+      latex: explanation.latex || "",
+      revises: explanation.id,
+      previousTitle: explanation.title || "",
+    }, { left: `${Math.min(rect.left + window.scrollX, window.scrollX + window.innerWidth - 340)}px`, top: `${rect.bottom + window.scrollY + 6}px` });
+  }
+
+  function showNoteForm(selection, position) {
+    const { anchor, quote, latex, revises } = selection;
+    noteForm.replaceChildren();
+    if (revises || selection.follows) {
+      noteForm.append(node("div", "note-form-title", `Ask again about “${selection.previousTitle || "the explanation"}”`));
+    } else {
+      const quoteNode = node("div", "note-form-quote");
+      if (latex) renderLatex(latex, quoteNode, false);
+      else quoteNode.textContent = `“${quote.length > 160 ? quote.slice(0, 157) + "…" : quote}”`;
+      noteForm.append(quoteNode);
+    }
+    const textarea = node("textarea");
+    textarea.placeholder = revises ? "What is still unclear, or what should change?" : "What is unclear? (optional)";
+    textarea.rows = 3;
+    noteForm.append(textarea);
+    const actions = node("div", "note-form-actions");
+    const noteFor = () => ({ anchor, quote, latex, revises: revises || "", follows: selection.follows || "", message: textarea.value.trim() });
+    actions.append(
+      button("Answer now", () => { askNow(noteFor()); hideNoteUi(); window.getSelection()?.removeAllRanges(); }, "mini accent"),
+      button("Add to list", () => { addNote(noteFor()); hideNoteUi(); window.getSelection()?.removeAllRanges(); }, "mini"),
+      button("Cancel", () => hideNoteUi()),
+    );
+    noteForm.append(actions);
+    noteForm.style.left = position.left;
+    noteForm.style.top = position.top;
+    noteButton.hidden = true;
+    noteForm.hidden = false;
+    textarea.focus();
+  }
+
+  function addNote(note) {
+    if (embedded) {
+      window.parent.postMessage({ type: "loose-ends:note", action: "add", note }, "*");
+      return;
+    }
+    state.notes.push({ ...note, id: `local-${state.notes.length + 1}`, created_at: new Date().toISOString(), addressed_run: null, local: true });
+    showNotice("Notes are only kept for this page outside the workbench.");
+    renderNotes();
+  }
+
+  /** Find the rendered formula in `element` whose LaTeX matches. */
+  function findMathElement(element, latex) {
+    const wanted = normalizeLatex(latex);
+    if (!wanted || !element) return null;
+    return [...element.querySelectorAll(".math")].find(item => normalizeLatex(item.dataset.latex || item.textContent) === wanted) || null;
+  }
+
+  /** Insert `marker` after the formula, after the phrase, or at the end of the anchor. */
+  function placeMarker(marker, anchorId, { latex, phrase }) {
+    const element = document.getElementById(anchorId);
+    if (!element) return null;
+    const math = latex ? findMathElement(element, latex) : null;
+    if (math) {
+      math.insertAdjacentElement("afterend", marker);
+      return { math };
+    }
+    const range = phrase ? findPhraseRange(element, phrase) : null;
+    if (range) {
+      const end = document.createRange();
+      end.setStart(range.endContainer, range.endOffset);
+      end.collapse(true);
+      end.insertNode(range ? marker : marker);
+      return { range };
+    }
+    element.append(marker);
+    return { fallback: true };
+  }
+
+  /** Report a problem with a widget: fix it now or queue it for the next run. */
+  function openImproveForm(widget, card, { step = null, stepTitle = "", follows = "" } = {}) {
+    const rect = (step !== null && card.querySelector(".step-current") ? card.querySelector(".step-current") : card.querySelector(".widget-head")).getBoundingClientRect();
+    noteForm.replaceChildren();
+    const titleNode = node("div", "note-form-title");
+    if (step !== null) renderRichText(`Improve step ${step + 1}: ${stepTitle || ""}`, titleNode);
+    else titleNode.textContent = `Improve “${widget.title || widget.id}”`;
+    noteForm.append(titleNode);
+    const textarea = node("textarea");
+    textarea.placeholder = follows ? "What is still wrong?" : "What is off, or what should it do instead?";
+    textarea.rows = 3;
+    noteForm.append(textarea);
+    const actions = node("div", "note-form-actions");
+    const noteFor = () => ({
+      anchor: widget.anchor, widget: widget.id, quote: step !== null ? `${widget.title || widget.id}, step ${step + 1}` : (widget.title || widget.id),
+      step: step === null ? undefined : step, step_title: stepTitle ? String(stepTitle) : "", follows: follows || "",
+      message: textarea.value.trim(),
+    });
+    actions.append(
+      button("Fix now", () => {
+        const note = noteFor();
+        if (!note.message) { textarea.focus(); return; }
+        hideNoteUi();
+        fixWidgetNow(widget, card, note);
+      }, "mini accent"),
+      button("Add to list", () => { const note = noteFor(); if (!note.message) { textarea.focus(); return; } addNote(note); hideNoteUi(); }, "mini"),
+      button("Cancel", () => hideNoteUi()),
+    );
+    noteForm.append(actions);
+    noteForm.style.left = `${Math.min(rect.left + window.scrollX, window.scrollX + window.innerWidth - 340)}px`;
+    noteForm.style.top = `${rect.bottom + window.scrollY + 6}px`;
+    noteButton.hidden = true;
+    noteForm.hidden = false;
+    textarea.focus();
+  }
+
+  function fixWidgetNow(widget, card, note) {
+    if (!embedded) {
+      showNotice("Fix now needs the workbench; the request was kept as a note instead.");
+      addNote(note);
+      return;
+    }
+    const status = node("span", "badge warn widget-fixing", "fixing…");
+    card.querySelector(".widget-head .spacer").after(status);
+    const token = `fix-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    state.pendingFixes = state.pendingFixes || new Map();
+    state.pendingFixes.set(token, { widget, card });
+    addPendingRequest(token, { ...note, status: "fixing…" });
+    window.parent.postMessage({ type: "loose-ends:fix-widget", token, note }, "*");
+  }
+
+  async function reloadWidget(widget, card, summary) {
+    const body = card.querySelector(".widget-body");
+    const registered = state.instances.get(widget.id);
+    try { if (registered && registered.instance && registered.instance.destroy) registered.instance.destroy(); } catch (_) { /* ignore */ }
+    body.replaceChildren(node("div", "loading", "Reloading widget…"));
+    const fresh = await fetchJson(`widgets/${encodeURIComponent(widget.id)}/widget.json?v=${Date.now()}`, true);
+    if (fresh) Object.assign(widget, { title: fresh.title, summary: fresh.summary, steps: fresh.steps || widget.steps, examples: fresh.examples || widget.examples, limitations: fresh.limitations });
+    widget.review = { fidelity: "unreviewed", interaction_quality: "unreviewed", summary: `Quick fix applied without review: ${summary || ""}` };
+    state.factories.delete(widget.id);
+    await new Promise(resolve => {
+      const script = document.createElement("script");
+      script.src = `widgets/${encodeURIComponent(widget.id)}/${widget.entry || "widget.js"}?v=${Date.now()}`;
+      script.addEventListener("load", () => resolve(true));
+      script.addEventListener("error", () => resolve(false));
+      document.head.append(script);
+    });
+    body.replaceChildren();
+    const controller = state.stepControllers.get(widget.id) || null;
+    const instance = mountWidget(widget, body, controller);
+    if (controller && instance) { controller.attach(instance); controller.refresh(); }
+    state.instances.set(widget.id, { mount: () => {}, instance });
+    const head = card.querySelector(".widget-head");
+    head.querySelectorAll(".badge").forEach(element => element.remove());
+    const title = head.querySelector("strong");
+    title.textContent = widget.title || "Visualization";
+    title.after(badge("fixed, unreviewed", "warn"));
+  }
+
+  function showFixResult(token, data) {
+    clearPendingRequest(token);
+    const pending = state.pendingFixes && state.pendingFixes.get(token);
+    if (state.pendingFixes) state.pendingFixes.delete(token);
+    if (!pending) return;
+    pending.card.querySelectorAll(".widget-fixing").forEach(element => element.remove());
+    if (Array.isArray(data.notes)) { state.notes = data.notes; renderNotes(); }
+    if (!data.ok) {
+      showNotice(`Quick fix failed: ${data.error || "unknown error"}. The request was kept in the notes list.`);
+      return;
+    }
+    reloadWidget(pending.widget, pending.card, data.summary);
+  }
+
+  /** Ask the workbench for an immediate explanation of the selected passage. */
+  function askNow(note) {
+    if (!embedded) {
+      showNotice("Answer now needs the workbench; the note was kept locally instead.");
+      addNote(note);
+      return;
+    }
+    const pending = node("span", "explain-mark pending", "…");
+    pending.title = "Thinking…";
+    const old = note.revises ? content.querySelector(`.explain-mark[data-term="${CSS.escape(`explain-${note.revises}`)}"]`) : null;
+    if (old) old.replaceWith(pending);
+    else placeMarker(pending, note.anchor, { latex: note.latex, phrase: note.quote });
+    const token = `ask-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    state.pendingAsks = state.pendingAsks || new Map();
+    state.pendingAsks.set(token, pending);
+    addPendingRequest(token, { ...note, status: "answering…" });
+    window.parent.postMessage({ type: "loose-ends:explain", token, note }, "*");
+  }
+
+  function addPendingRequest(token, note) {
+    state.pendingRequests = state.pendingRequests || new Map();
+    state.pendingRequests.set(token, note);
+    renderNotes();
+  }
+
+  function clearPendingRequest(token) {
+    if (state.pendingRequests) state.pendingRequests.delete(token);
+  }
+
+  function showQuickAnswer(token, data) {
+    clearPendingRequest(token);
+    const pending = state.pendingAsks && state.pendingAsks.get(token);
+    if (state.pendingAsks) state.pendingAsks.delete(token);
+    if (!data.ok) {
+      if (pending) pending.remove();
+      showNotice(`Quick answer failed: ${data.error || "unknown error"}. The note was kept in the list.`);
+      if (Array.isArray(data.notes)) { state.notes = data.notes; renderNotes(); }
+      return;
+    }
+    if (Array.isArray(data.notes)) state.notes = data.notes;
+    if (Array.isArray(data.glossary) && state.annotations) state.annotations.glossary = data.glossary;
+    if (pending) pending.remove();
+    resyncExplanations(Array.isArray(data.explanations) ? data.explanations : ((state.annotations && state.annotations.explanations) || []));
+    renderNotes();
+    const entry = data.explanation;
+    if (entry) {
+      const key = `explain-${entry.id}`;
+      const marker = content.querySelector(`.explain-mark[data-term="${CSS.escape(key)}"]`);
+      if (marker) marker.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    }
+  }
+
+  function removeNote(noteId) {
+    if (embedded && !String(noteId).startsWith("local-")) {
+      window.parent.postMessage({ type: "loose-ends:note", action: "remove", id: noteId }, "*");
+      return;
+    }
+    state.notes = state.notes.filter(note => note.id !== noteId);
+    if (state.annotations && Array.isArray(state.annotations.explanations)) {
+      resyncExplanations(state.annotations.explanations.filter(entry => entry.note !== noteId));
+    }
+    renderNotes();
+  }
+
+  function renderNotes() {
+    const open = state.notes.filter(note => !note.addressed_run);
+    if (notesButton) notesButton.textContent = `Notes (${open.length}${state.notes.length > open.length ? ` of ${state.notes.length}` : ""})`;
+    // Highlight the quoted passages.
+    if (HAS_HIGHLIGHT_API) {
+      if (!state.noteHighlight) {
+        state.noteHighlight = new Highlight();
+        CSS.highlights.set("reader-note", state.noteHighlight);
+      }
+      state.noteHighlight.clear();
+      content.querySelectorAll(".noted-math").forEach(element => element.classList.remove("noted-math"));
+      state.notes.forEach(note => {
+        if (note.addressed_run) return;
+        const element = document.getElementById(note.anchor);
+        if (!element) return;
+        const math = note.latex ? findMathElement(element, note.latex) : null;
+        if (math) { math.classList.add("noted-math"); return; }
+        const range = findPhraseRange(element, note.quote);
+        if (range) state.noteHighlight.add(range);
+      });
+    }
+    // Panel contents.
+    notesPanel.replaceChildren();
+    const head = node("div", "notes-panel-head");
+    head.append(node("strong", "", "Reader notes"));
+    head.append(node("span", "spacer"));
+    head.append(button("Close", () => { notesPanel.hidden = true; }));
+    notesPanel.append(head);
+    if (!state.notes.length) {
+      notesPanel.append(node("p", "notes-empty", "Select any passage you do not follow and choose “I don't get this”. The next visualization run explains the noted passages."));
+    }
+    const list = node("ul", "notes-list");
+    (state.pendingRequests ? [...state.pendingRequests.values()] : []).forEach(request => {
+      const item = node("li", "note-item pending");
+      item.append(node("div", "note-quote", request.widget ? `Widget: ${request.quote}` : `“${request.quote.slice(0, 140)}”`));
+      if (request.message) item.append(node("div", "note-message", request.message));
+      const meta = node("div", "note-meta");
+      meta.append(node("span", "note-status", request.status));
+      item.append(meta);
+      list.append(item);
+    });
+    state.notes.forEach(note => {
+      const item = node("li", `note-item${note.addressed_run ? " addressed" : ""}`);
+      const quoteNode = node("div", "note-quote");
+      if (note.widget) quoteNode.textContent = `Widget: ${note.quote}`;
+      else if (note.latex) renderLatex(note.latex, quoteNode, false);
+      else quoteNode.textContent = `“${note.quote.length > 140 ? note.quote.slice(0, 137) + "…" : note.quote}”`;
+      item.append(quoteNode);
+      if (note.message) item.append(node("div", "note-message", note.message));
+      if (note.outcome) item.append(node("div", "note-outcome", `→ ${note.outcome}`));
+      const meta = node("div", "note-meta");
+      meta.append(node("span", "", note.addressed_run ? `addressed in ${note.addressed_run}` : "open"));
+      meta.append(button("Go to", () => {
+        reveal(note.anchor, { flash: true });
+      }));
+      meta.append(button("Unclear?", () => followUp(note)));
+      meta.append(button("Remove", () => removeNote(note.id)));
+      item.append(meta);
+      list.append(item);
+    });
+    notesPanel.append(list);
+    if (open.length) {
+      const containers = [...new Set(open.map(note => {
+        const element = document.getElementById(note.anchor);
+        const holder = element && element.closest(".proof, .env");
+        return holder ? holder.id : null;
+      }).filter(Boolean))];
+      notesPanel.append(button(`Explain ${open.length} open note${open.length === 1 ? "" : "s"}`, () => requestVisualization(["notes", ...containers], "notes"), "tool primary"));
+    }
+  }
+
+  /** Ask again about a note: revise its quick answer, or file a follow-up request. */
+  function followUp(note) {
+    notesPanel.hidden = true;
+    if (note.widget) {
+      const widget = state.widgets.find(item => item.id === note.widget);
+      const card = widget ? content.querySelector(`.widget-card[data-widget="${CSS.escape(widget.id)}"]`) : null;
+      if (!widget || !card) { showNotice("That widget is not mounted on this page."); return; }
+      openImproveForm(widget, card, { step: Number.isInteger(note.step) ? note.step : null, stepTitle: note.step_title || "", follows: note.id });
+      return;
+    }
+    const explanation = ((state.annotations && state.annotations.explanations) || []).find(entry => entry.note === note.id);
+    const element = document.getElementById(note.anchor);
+    const rect = element ? element.getBoundingClientRect() : { left: 40, bottom: 60 };
+    showNoteForm({
+      anchor: note.anchor, quote: note.quote, latex: note.latex || "",
+      revises: explanation ? explanation.id : "", follows: explanation ? "" : note.id,
+      previousTitle: explanation ? explanation.title : note.message || note.quote,
+    }, { left: `${Math.min(rect.left + window.scrollX, window.scrollX + window.innerWidth - 340)}px`, top: `${rect.bottom + window.scrollY + 6}px` });
+  }
+
+  function wireNotes() {
+    notesButton = button("Notes (0)", () => {
+      notesPanel.hidden = !notesPanel.hidden;
+      if (!notesPanel.hidden) renderNotes();
+    }, "tool");
+    toolbarActions.prepend(notesButton);
+    document.addEventListener("selectionchange", () => { clearTimeout(wireNotes.timer); wireNotes.timer = setTimeout(onSelectionChange, 200); });
+    noteButton.addEventListener("mousedown", event => event.preventDefault());
+    noteButton.addEventListener("click", openNoteForm);
+    document.addEventListener("keydown", event => { if (event.key === "Escape") hideNoteUi(); });
+    renderNotes();
   }
 
   // ------------------------------------------------------------------
@@ -814,6 +1453,8 @@
       state.widgets = (state.manifest.widgets || []).filter(widget => widget && widget.id && widget.anchor);
       if (state.manifest.annotations) state.annotations = await fetchJson(state.manifest.annotations, true);
     }
+    const notes = await fetchJson("notes.json", true);
+    state.notes = notes && Array.isArray(notes.notes) ? notes.notes : [];
     document.title = `${state.doc.title || "Paper"} · Loose Ends reader`;
     typeset(content);
     makeCollapsible();
@@ -822,7 +1463,10 @@
     addStatementActions();
     buildToolbar();
     applyGlossary();
+    applyExplanations();
+    if (!state.glossary || !state.popoverWired) { /* popover wiring happens in applyGlossary when entries exist */ }
     await mountWidgets();
+    wireNotes();
     const warnings = (state.doc.warnings || []).length;
     if (warnings) showNotice(`${warnings} conversion warning${warnings === 1 ? "" : "s"}: ${state.doc.warnings.join(" · ")}`);
     if (location.hash) reveal(decodeURIComponent(location.hash.slice(1)));
@@ -831,6 +1475,13 @@
   window.addEventListener("message", event => {
     const data = event.data || {};
     if (data.type === "loose-ends:reveal" && data.id) reveal(String(data.id));
+    if (data.type === "loose-ends:notes" && Array.isArray(data.notes)) {
+      state.notes = data.notes;
+      if (Array.isArray(data.explanations)) resyncExplanations(data.explanations);
+      renderNotes();
+    }
+    if (data.type === "loose-ends:explained" && data.token) showQuickAnswer(data.token, data);
+    if (data.type === "loose-ends:widget-fixed" && data.token) showFixResult(data.token, data);
   });
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);

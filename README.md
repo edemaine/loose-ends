@@ -817,7 +817,39 @@ An LLM run then adds aids anchored to those identifiers:
 * **proof outlines**: the 2 to 5 substantive steps of the main proofs,
   mapped to their paragraphs and shown beside the proof;
 * **statement and proof widgets on demand**: an illustration for a lemma, or
-  a running example that advances step by step as you read a proof.
+  a running example that advances step by step as you read a proof, with a
+  selector for the generic example and the special cases the proof
+  distinguishes, and steps that can point at a phrase inside a paragraph;
+* **background vocabulary and inline explanations**: terms the paper uses
+  without defining them get a sourced definition, and skipped side
+  computations get a small "?" bubble at the phrase in question.
+
+While reading, select any passage you do not follow and choose **I don't
+get this**, optionally adding a message. **Answer now** asks Codex for an
+immediate explanation using only the passage, its proof or statement, and
+the glossary (about 15 seconds at low reasoning effort); the answer appears
+as a bubble marked "quick answer, unreviewed", and the next full run
+verifies, promotes, or replaces it. **Add to list** keeps the note for a
+batch run instead. Notes are kept with the package, highlighted in the
+text, and listed under **Notes** in the reader toolbar; **Explain open
+notes** starts a notes-only run (medium effort, no repair rounds) that must
+address each note (as a proof step with a picture, an explanation bubble,
+or a glossary entry) and marks it as addressed. The same quick path is
+available from the command line:
+
+```sh
+python src/explain_note.py manuscripts/.../draft-002 --anchor par-48 \
+  --quote "The exterior turn at the ith corner is" --message "Why a multiple?"
+``` Proof
+  widgets declare their running examples (a generic, non-trivial default
+  plus the special cases the proof distinguishes) which the reader offers
+  in a selector, and their steps may point at a phrase inside a paragraph
+  so that one paragraph can carry several pictures.
+* **reader notes**: select any passage you do not follow and choose
+  "I don't get this", optionally with a message. Notes are saved with the
+  package, highlighted in the text, and handed to the next run, which must
+  explain each noted passage (a new proof step, glossary entry, or note)
+  and report which notes it addressed.
 
 Convert only (no LLM):
 

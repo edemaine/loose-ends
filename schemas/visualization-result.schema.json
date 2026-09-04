@@ -35,6 +35,7 @@
         "additionalProperties": false
       }
     },
+    "notes_addressed": {"type": "array", "items": {"type": "string"}},
     "warnings": {"type": "array", "items": {"type": "string"}}
   },
   "required": ["status", "summary", "annotations_updated", "widgets", "verification_checks", "warnings"],

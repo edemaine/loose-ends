@@ -33,11 +33,16 @@ RUNS_DIRECTORY = "runs"
 WIDGET_MANIFEST_NAME = "widget.json"
 WIDGET_ENTRY_NAME = "widget.js"
 WIDGET_REVIEW_NAME = "review.json"
+NOTES_NAME = "notes.json"
+NOTE_ID_RE = re.compile(r"^note-[0-9]{3,}$")
+MAX_NOTES = 200
+MAX_NOTE_TEXT = 2000
 RUN_RE = re.compile(r"^run-([0-9]{3,})$")
 WIDGET_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,80}$")
 READER_FILES = {"reader.html", "reader.js", "reader.css"}
 MANIFEST_SCHEMA_VERSION = 2
 DEFAULT_ANCHOR = "default"
+NOTES_ANCHOR = "notes"
 
 
 def package_key(directory: Path) -> str:
@@ -130,9 +135,122 @@ def discover(source_directory: Path) -> dict | None:
             for widget in widgets
         ],
         "widgetCount": len(widgets),
+        "noteCount": len(load_notes(directory)),
+        "openNoteCount": len(open_notes(directory)),
         "runCount": len(runs),
         "latestRun": latest,
     }
+
+
+def load_notes(directory: Path) -> list[dict]:
+    """Return the reader's notes for one package (oldest first)."""
+    value = common.load_json(directory / NOTES_NAME)
+    notes = value.get("notes") if isinstance(value, dict) else None
+    return [note for note in notes if isinstance(note, dict) and isinstance(note.get("id"), str)] if isinstance(notes, list) else []
+
+
+def write_notes(directory: Path, notes: list[dict]) -> None:
+    common.write_json(directory / NOTES_NAME, {"schema_version": 1, "notes": notes})
+
+
+def add_note(directory: Path, note: dict) -> dict:
+    """Validate and append one reader note; returns the stored note."""
+    anchor = note.get("anchor")
+    quote = note.get("quote")
+    message = note.get("message", "")
+    if not isinstance(anchor, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9:._-]{0,120}", anchor):
+        raise ValueError("note anchor must be an element id")
+    if not isinstance(quote, str) or not quote.strip() or len(quote) > MAX_NOTE_TEXT:
+        raise ValueError("note quote must be nonempty text")
+    if not isinstance(message, str) or len(message) > MAX_NOTE_TEXT:
+        raise ValueError("note message must be text")
+    latex = note.get("latex", "")
+    if latex is None:
+        latex = ""
+    if not isinstance(latex, str) or len(latex) > MAX_NOTE_TEXT:
+        raise ValueError("note latex must be text")
+    revises = note.get("revises") or ""
+    if not isinstance(revises, str) or len(revises) > 200:
+        raise ValueError("revises must name an explanation id")
+    widget = note.get("widget") or ""
+    if not isinstance(widget, str) or (widget and not WIDGET_ID_RE.fullmatch(widget)):
+        raise ValueError("widget must be a widget id")
+    if widget and not (directory / WIDGETS_DIRECTORY / widget / WIDGET_MANIFEST_NAME).is_file():
+        raise ValueError(f"unknown widget {widget}")
+    step = note.get("step")
+    if step is not None and (isinstance(step, bool) or not isinstance(step, int) or step < 0 or step > 200):
+        raise ValueError("step must be a step index")
+    step_title = note.get("step_title") or ""
+    if not isinstance(step_title, str) or len(step_title) > 300:
+        raise ValueError("step_title must be short text")
+    follows = note.get("follows") or ""
+    if not isinstance(follows, str) or (follows and not NOTE_ID_RE.fullmatch(follows)):
+        raise ValueError("follows must name a note id")
+    notes = load_notes(directory)
+    if len(notes) >= MAX_NOTES:
+        raise ValueError(f"at most {MAX_NOTES} notes are kept per package")
+    numbers = [int(match.group(0)[5:]) for item in notes if (match := NOTE_ID_RE.fullmatch(item["id"]))]
+    stored = {
+        "id": f"note-{max(numbers, default=0) + 1:03d}",
+        "anchor": anchor,
+        "quote": quote.strip(),
+        "message": message.strip(),
+        "latex": latex.strip(),
+        "revises": revises.strip(),
+        "widget": widget,
+        "step": step,
+        "step_title": step_title.strip(),
+        "follows": follows,
+        "created_at": common.utc_now(),
+        "addressed_run": None,
+        "outcome": "",
+    }
+    notes.append(stored)
+    write_notes(directory, notes)
+    return stored
+
+
+def remove_note(directory: Path, note_id: str) -> bool:
+    """Remove a note and any quick explanation that answered it."""
+    notes = load_notes(directory)
+    kept = [note for note in notes if note["id"] != note_id]
+    if len(kept) == len(notes):
+        return False
+    write_notes(directory, kept)
+    annotations = common.load_json(directory / ANNOTATIONS_NAME)
+    if isinstance(annotations, dict) and isinstance(annotations.get("explanations"), list):
+        remaining = [entry for entry in annotations["explanations"] if not (isinstance(entry, dict) and entry.get("note") == note_id)]
+        if len(remaining) != len(annotations["explanations"]):
+            annotations["explanations"] = remaining
+            common.write_json(directory / ANNOTATIONS_NAME, annotations)
+    return True
+
+
+def load_explanations(directory: Path) -> list:
+    annotations = common.load_json(directory / ANNOTATIONS_NAME)
+    if not isinstance(annotations, dict):
+        return []
+    explanations = annotations.get("explanations")
+    return explanations if isinstance(explanations, list) else []
+
+
+def mark_notes_addressed(directory: Path, note_ids: list[str], run_name: str, outcome: str = "") -> None:
+    notes = load_notes(directory)
+    wanted = set(note_ids)
+    for note in notes:
+        if note["id"] in wanted:
+            note["addressed_run"] = run_name
+            if outcome:
+                note["outcome"] = outcome[:500]
+    write_notes(directory, notes)
+
+
+def find_note(directory: Path, note_id: str) -> dict | None:
+    return next((note for note in load_notes(directory) if note["id"] == note_id), None)
+
+
+def open_notes(directory: Path) -> list[dict]:
+    return [note for note in load_notes(directory) if not note.get("addressed_run")]
 
 
 def resolve_file(directory: Path, relative_value: str) -> Path:

@@ -81,6 +81,8 @@ IGNORED_PREFIXES = (
     ".visualization-install-",
     ".visualization-review-run-",
     ".visualize-run-",
+    ".explain-run-",
+    ".fix-run-",
     ".paper-install-",
     ".triage-install-",
 )
@@ -112,11 +114,12 @@ CATALOG_FILE_NAMES = {
     "readiness.md",
     "paper-critique.md",
     visualizations.MANIFEST_NAME,
-    visualizations.ANNOTATIONS_NAME,
     visualizations.WIDGET_MANIFEST_NAME,
     visualizations.WIDGET_REVIEW_NAME,
     paper_document.DOCUMENT_JSON,
 }
+# Files the reader changes while open; never rebuild the catalog for them.
+LIVE_READER_FILES = {visualizations.NOTES_NAME, visualizations.ANNOTATIONS_NAME}
 
 
 def _read_json(path: Path) -> dict:
@@ -369,6 +372,11 @@ def _catalog_root_signature(root: Path) -> str:
                 name.casefold() not in CATALOG_FILE_NAMES
                 and not include_directory_files
             ):
+                continue
+            if name.casefold() in LIVE_READER_FILES:
+                # Reader notes and quick answers change while the reader is
+                # open; the workbench updates their counts in place instead
+                # of rebuilding the catalog (which would reload the reader).
                 continue
             path = current / name
             try:
@@ -1191,8 +1199,8 @@ class CatalogManager:
         value["fileCount"] = len(value["files"])
         return value
 
-    def visualization_file(self, key: str, relative: str) -> Path:
-        """Resolve a resource from a catalogued visualization package."""
+    def visualization_directory(self, key: str) -> Path:
+        """Return the package directory for a catalogued visualization key."""
         with self.lock:
             packages = [
                 draft.get("visualization")
@@ -1207,12 +1215,111 @@ class CatalogManager:
         roots = [*self.paths, self.manuscripts]
         if not any(_relative_to(directory, root.resolve()) for root in roots):
             raise KeyError(key)
+        return directory
+
+    def visualization_file(self, key: str, relative: str) -> Path:
+        """Resolve a resource from a catalogued visualization package."""
+        directory = self.visualization_directory(key)
         if relative in visualizations.READER_FILES:
             return READER_DIRECTORY / relative
         try:
             return visualizations.resolve_file(directory, relative)
         except (FileNotFoundError, ValueError) as exc:
             raise KeyError(key) from exc
+
+    def quick_explain(self, key: str, body: object, *, runner=None) -> dict:
+        """Answer one reader note now with a small Codex turn."""
+        directory = self.visualization_directory(key)
+        if not isinstance(body, dict) or not isinstance(body.get("note"), dict):
+            raise ValueError("a note is required")
+        note = visualizations.add_note(directory, body["note"])
+        source = directory.parent
+        argv = [
+            sys.executable, "-u", str(PROJECT_ROOT / "src" / "explain_note.py"),
+            str(source), "--note-id", note["id"],
+        ]
+        run = runner or (lambda command: subprocess.run(
+            command, cwd=str(PROJECT_ROOT), capture_output=True, text=True,
+            encoding="utf-8", timeout=300, check=False,
+        ))
+        try:
+            completed = run(argv)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise RuntimeError(f"could not run the quick explanation: {exc}") from exc
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout or "").strip().splitlines()
+            raise RuntimeError(detail[-1] if detail else f"quick explanation exited with {completed.returncode}")
+        try:
+            payload = json.loads((completed.stdout or "").strip().splitlines()[-1])
+        except (ValueError, IndexError) as exc:
+            raise RuntimeError("quick explanation produced no result") from exc
+        annotations = common.load_json(directory / visualizations.ANNOTATIONS_NAME)
+        return {
+            "note": note["id"],
+            "explanation": payload.get("explanation"),
+            "explanations": (annotations or {}).get("explanations", []) if isinstance(annotations, dict) else [],
+            "glossary": (annotations or {}).get("glossary", []) if isinstance(annotations, dict) else [],
+            "notes": visualizations.load_notes(directory),
+        }
+
+    def quick_fix_widget(self, key: str, body: object, *, runner=None) -> dict:
+        """Apply a reader's fix request to a widget with a small Codex turn."""
+        directory = self.visualization_directory(key)
+        if not isinstance(body, dict) or not isinstance(body.get("note"), dict):
+            raise ValueError("a note is required")
+        note = visualizations.add_note(directory, body["note"])
+        if not note.get("widget"):
+            raise ValueError("the note must name a widget")
+        argv = [
+            sys.executable, "-u", str(PROJECT_ROOT / "src" / "fix_widget.py"),
+            str(directory.parent), "--note-id", note["id"],
+        ]
+        run = runner or (lambda command: subprocess.run(
+            command, cwd=str(PROJECT_ROOT), capture_output=True, text=True,
+            encoding="utf-8", timeout=1000, check=False,
+        ))
+        try:
+            completed = run(argv)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise RuntimeError(f"could not run the quick fix: {exc}") from exc
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout or "").strip().splitlines()
+            raise RuntimeError(detail[-1] if detail else f"quick fix exited with {completed.returncode}")
+        try:
+            payload = json.loads((completed.stdout or "").strip().splitlines()[-1])
+        except (ValueError, IndexError) as exc:
+            raise RuntimeError("quick fix produced no result") from exc
+        record = visualizations.discover(directory.parent) or {}
+        return {
+            "note": note["id"],
+            "widget": payload.get("widget"),
+            "summary": payload.get("summary", ""),
+            "widgets": record.get("widgets", []),
+            "notes": visualizations.load_notes(directory),
+        }
+
+    def update_notes(self, key: str, body: object) -> dict:
+        """Add or remove one reader note and return the current list."""
+        directory = self.visualization_directory(key)
+        if not isinstance(body, dict):
+            raise ValueError("request body must be an object")
+        action = body.get("action")
+        if action == "add":
+            note = body.get("note")
+            if not isinstance(note, dict):
+                raise ValueError("note is required")
+            visualizations.add_note(directory, note)
+        elif action == "remove":
+            note_id = body.get("id")
+            if not isinstance(note_id, str) or not visualizations.NOTE_ID_RE.fullmatch(note_id):
+                raise ValueError("a note id is required")
+            visualizations.remove_note(directory, note_id)
+        elif action != "list":
+            raise ValueError("action must be add, remove, or list")
+        return {
+            "notes": visualizations.load_notes(directory),
+            "explanations": visualizations.load_explanations(directory),
+        }
 
     def close(self) -> None:
         self.stopping.set()
@@ -1237,6 +1344,8 @@ class ChangeHandler(FileSystemEventHandler):
     def relevant_file(path: str) -> bool:
         value = Path(path)
         parts = {part.casefold() for part in value.parts}
+        if value.name.casefold() in LIVE_READER_FILES:
+            return False
         return (
             value.name.casefold() in CATALOG_FILE_NAMES
             or bool(
@@ -2301,6 +2410,37 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/plans":
                 self.send_json(self.app.create_plan(body), 201)
+            elif match := re.fullmatch(
+                r"/api/visualizations/([0-9a-f]{24})/fix-widget", parsed.path
+            ):
+                try:
+                    self.send_json(self.app.catalog.quick_fix_widget(match.group(1), body))
+                except KeyError:
+                    self.send_error_json(404, "visualization not found")
+                except ValueError as exc:
+                    self.send_error_json(400, str(exc))
+                except RuntimeError as exc:
+                    self.send_error_json(502, str(exc))
+            elif match := re.fullmatch(
+                r"/api/visualizations/([0-9a-f]{24})/explain", parsed.path
+            ):
+                try:
+                    self.send_json(self.app.catalog.quick_explain(match.group(1), body))
+                except KeyError:
+                    self.send_error_json(404, "visualization not found")
+                except ValueError as exc:
+                    self.send_error_json(400, str(exc))
+                except RuntimeError as exc:
+                    self.send_error_json(502, str(exc))
+            elif match := re.fullmatch(
+                r"/api/visualizations/([0-9a-f]{24})/notes", parsed.path
+            ):
+                try:
+                    self.send_json(self.app.catalog.update_notes(match.group(1), body))
+                except KeyError:
+                    self.send_error_json(404, "visualization not found")
+                except ValueError as exc:
+                    self.send_error_json(400, str(exc))
             elif parsed.path == "/api/paper-imports":
                 self.send_json(self.app.create_paper_import(), 201)
             elif match := re.fullmatch(

@@ -35,7 +35,11 @@ anchor replaces the old one, and a new `annotations.json` replaces the old
 one, so carry forward everything that is still correct. An existing widget
 directory may contain `review.json`, the independent critic's verdict on
 it: when you are asked for the same anchor again, fix those findings rather
-than starting from scratch.
+than starting from scratch. Existing `explanations` entries with
+`"provenance": "quick"` were answered instantly and never reviewed: check
+each one, keep it without the `provenance` field if it is right, rewrite it
+if not, and replace it with a proof step or picture when the note it
+answers (`note`) needed one.
 
 Read `inputs/reader/WIDGET-API.md` before writing any widget. The reader
 mounts your code; it does not run standalone.
@@ -61,9 +65,38 @@ step through, a definition recalled at the point of use.
   names it. Snap to the natural discrete structure when the theorem is
   about a discrete structure.
 - **Proof widgets follow the text.** Steps must correspond to the proof's
-  paragraphs in order. At each step the running example shows the state the
-  paragraph establishes, not a summary of the whole proof. Keep captions
-  to one line; the reader is reading the proof itself on the left.
+  paragraphs in order, and to parts of a paragraph (`phrase`) whenever a
+  paragraph performs several operations: one picture per construction,
+  not one per paragraph. At each step the running example shows the state
+  the text establishes, labelled with the text's own notation ($s_0$,
+  $\rho_0$, $P^*$, ...), not a summary of the whole proof. Keep captions to
+  one line; the reader is reading the proof itself on the left.
+- **Running examples are generic and non-trivial.** Choose the default
+  example so that the statement being proved is genuinely not obvious for
+  it: roughly 5 to 15 vertices, elements, or parts for geometric and
+  combinatorial objects, in general position with respect to everything
+  the proof does not rely on. A one-tile square or an equilateral triangle
+  illustrates nothing. Declare the examples in `examples`; add one for each
+  special case the proof branches on (parallel sides, degenerate corners,
+  the empty case), so the reader can re-run the proof on that case.
+- **Pictures are computed, never sketched.** A proof picture shows the
+  actual objects of the running example after the actual operation the
+  text performs, with the map the text names ($F_i=\rho_i\rho_0$ applied
+  to $P^*$, not a look-alike). When a step is too abstract to compute for
+  the example, show what is certain and mark the rest "not depicted"; an
+  invented picture is worse than none.
+- **Reader notes come first.** If `inputs/request.json` lists
+  `reader_notes`, passages a reader marked as unclear, treat them as the
+  highest-priority requests. Choose the lightest form that genuinely
+  answers the note: an inline explanation for a skipped computation or
+  case, a background glossary entry for an undefined term, a phrase-level
+  proof step with a picture when the difficulty is geometric, or a
+  clarifying note inside an existing widget. Put the id in
+  `notes_addressed`. When the request anchors include `notes` (and
+  `notes_only` is true), this run's whole job is to address the notes
+  through `output/annotations.json`: rewrite it carrying every existing
+  entry forward and adding what the notes need; no widget is required
+  unless a note asks for one.
 - **Glossary entries are recalls, not lectures.** One or two sentences in
   the paper's own words, with formulas, and the anchor of the defining
   element (a paragraph, a definition environment, or a statement). Include
@@ -116,7 +149,29 @@ Write everything beneath `output/`:
   ```
 
   `main_result` names a statement id. Every `anchor` is an id from
-  `document.json`. Every `proof_outlines` key is a proof id and its steps
+  `document.json`. Two more kinds of entry are welcome:
+
+  - **Background vocabulary.** A term the paper uses but never defines
+    (`monodromy`, `holonomy`, `deck transformation`, a named theorem) gets a
+    glossary entry with `"kind": "background"`, no `anchor`, a standard
+    definition in one or two sentences, and a `source` naming where the
+    definition comes from (a textbook, a standard reference). Mark clearly
+    what is standard and what the paper adds.
+  - **Inline explanations.** A short side argument the text skips, such
+    as a one-line computation ("why $\pi-\alpha_i=(q-m_i)\pi/q$") or an
+    implicit case check, goes in `explanations`:
+
+    ```json
+    "explanations": [
+      {"id": "exterior-turn", "anchor": "par-48", "phrase": "The exterior turn",
+       "title": "Why $(q-m_i)\\pi/q$", "text": "The exterior angle is $\\pi-\\alpha_i$ and $\\alpha_i=m_i\\pi/q$, so ..."}
+    ]
+    ```
+
+    The reader marks the phrase with a small bubble; hovering shows the
+    text. Use this whenever a reader would otherwise stop to verify a
+    line, without breaking the flow of the proof. `phrase` must occur in
+    the anchored paragraph. Every `proof_outlines` key is a proof id and its steps
   partition that proof's substantive paragraphs in reading order (2 to 5
   steps for outlines). `kind` is free text such as `definition`,
   `notation`, `convention`, or `object`.
@@ -129,7 +184,8 @@ Write everything beneath `output/`:
   the exact `widget.json` fields and the runtime API.
 
 - `agent-result.json` describing the run: `annotations_updated`, one entry
-  per widget with its files listed as `output/widgets/<id>/...` paths, the
+  per widget with its files listed as `output/widgets/<id>/...` paths,
+  `notes_addressed` (ids of reader notes this run resolves), the
   verification checks you performed (at least `node --check` for every
   widget script and a computed check of every displayed number or example),
   and honest `warnings` for anything you could not verify.

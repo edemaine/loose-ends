@@ -2634,7 +2634,13 @@ function renderManuscripts() {
   }
   const actions = node("div", "actions");
   addAction(actions, draft.verdict === "unreviewed" ? "Resume review" : "Revise", "revise", [draftTarget(draft)], true);
-  addAction(actions, draft.visualization ? "Visualize more" : "Visualize", "visualize", [draftTarget(draft)]);
+  const openNotes = draft.visualization?.openNoteCount || 0;
+  addAction(
+    actions,
+    openNotes ? `Visualize (${openNotes} note${openNotes === 1 ? "" : "s"})` : draft.visualization ? "Visualize more" : "Visualize",
+    "visualize",
+    [draftTarget(draft)],
+  );
   const pdf = draft.files.find(path => path.endsWith("main.pdf"));
   if (pdf) {
     const open = node("a", "button", "Open PDF");
@@ -2754,16 +2760,24 @@ function renderDraftReader(manuscript, draft) {
     return panel;
   }
   const badges = node("div", "badges");
-  badges.append(badge(`${visualization.glossaryCount} definitions`, "neutral"));
+  badges.append(badge(`${visualization.glossaryCount} definitions`, "neutral glossary-badge"));
   badges.append(badge(`${visualization.widgetCount} widget${visualization.widgetCount === 1 ? "" : "s"}`, "neutral"));
+  const notesBadge = badge(`${visualization.openNoteCount || 0} open note${visualization.openNoteCount === 1 ? "" : "s"}`, "warn notes-badge");
+  notesBadge.hidden = !visualization.openNoteCount;
+  badges.append(notesBadge);
   (visualization.widgets || []).forEach(widget => {
     badges.append(badge(`${widget.title}: ${reviewModel.humanize(widget.fidelity)}`, verdictClass(widget.fidelity)));
   });
   head.append(badges);
   const fullscreen = button("Fullscreen", () => {
-    panel.classList.toggle("fullscreen");
-    fullscreen.textContent = panel.classList.contains("fullscreen") ? "Exit fullscreen" : "Fullscreen";
+    state.readerFullscreen = !panel.classList.contains("fullscreen");
+    panel.classList.toggle("fullscreen", state.readerFullscreen);
+    fullscreen.textContent = state.readerFullscreen ? "Exit fullscreen" : "Fullscreen";
   }, "button");
+  if (state.readerFullscreen) {
+    panel.classList.add("fullscreen");
+    fullscreen.textContent = "Exit fullscreen";
+  }
   head.append(fullscreen);
   panel.append(head);
   if (visualization.warnings?.length) {
@@ -2780,17 +2794,91 @@ function renderDraftReader(manuscript, draft) {
   return panel;
 }
 
-window.addEventListener("message", event => {
+window.addEventListener("message", async event => {
   const data = event.data;
-  if (!data || data.type !== "loose-ends:visualize") return;
+  if (!data || typeof data.type !== "string" || !data.type.startsWith("loose-ends:")) return;
   const frame = [...document.querySelectorAll("iframe.reader-frame")].find(item => item.contentWindow === event.source);
   if (!frame) return;
   const draft = state.catalog.manuscripts.flatMap(item => item.drafts).find(item => item.key === frame.dataset.draftKey);
   if (!draft) return;
-  const anchors = Array.isArray(data.anchors) ? data.anchors.filter(value => typeof value === "string") : [];
-  openTask("visualize", [draftTarget(draft)], {
-    anchors: anchors.filter(value => value !== "default").join(" "),
-  });
+  if (data.type === "loose-ends:visualize") {
+    const anchors = Array.isArray(data.anchors) ? data.anchors.filter(value => typeof value === "string") : [];
+    openTask("visualize", [draftTarget(draft)], {
+      anchors: anchors.filter(value => value !== "default").join(" "),
+    });
+  } else if (data.type === "loose-ends:fix-widget" && draft.visualization) {
+    try {
+      const result = await api(`/api/visualizations/${encodeURIComponent(draft.visualization.key)}/fix-widget`, {
+        method: "POST",
+        body: JSON.stringify({ note: data.note }),
+      });
+      event.source.postMessage({ type: "loose-ends:widget-fixed", token: data.token, ok: true, ...result }, "*");
+      if (Array.isArray(result.widgets)) draft.visualization.widgets = result.widgets;
+    } catch (error) {
+      let notes = null;
+      try {
+        const listing = await api(`/api/visualizations/${encodeURIComponent(draft.visualization.key)}/notes`, { method: "POST", body: JSON.stringify({ action: "list" }) });
+        notes = listing.notes || null;
+      } catch (_) { notes = null; }
+      event.source.postMessage({ type: "loose-ends:widget-fixed", token: data.token, ok: false, error: error.message || String(error), notes }, "*");
+    }
+  } else if (data.type === "loose-ends:explain" && draft.visualization) {
+    try {
+      const result = await api(`/api/visualizations/${encodeURIComponent(draft.visualization.key)}/explain`, {
+        method: "POST",
+        body: JSON.stringify({ note: data.note }),
+      });
+      event.source.postMessage({ type: "loose-ends:explained", token: data.token, ok: true, ...result }, "*");
+      // Update counts in place; the catalog does not rebuild for quick answers.
+      const notes = result.notes || [];
+      draft.visualization.noteCount = notes.length;
+      draft.visualization.openNoteCount = notes.filter(note => !note.addressed_run).length;
+      if (Array.isArray(result.glossary)) draft.visualization.glossaryCount = result.glossary.length;
+      const panel = frame.closest(".reader-panel");
+      if (panel) {
+        const notesBadge = panel.querySelector(".badge.notes-badge");
+        if (notesBadge) {
+          notesBadge.textContent = `${draft.visualization.openNoteCount} open note${draft.visualization.openNoteCount === 1 ? "" : "s"}`;
+          notesBadge.hidden = draft.visualization.openNoteCount === 0;
+        }
+        const glossaryBadge = panel.querySelector(".badge.glossary-badge");
+        if (glossaryBadge) glossaryBadge.textContent = `${draft.visualization.glossaryCount} definitions`;
+      }
+    } catch (error) {
+      let notes = null;
+      try {
+        const listing = await api(`/api/visualizations/${encodeURIComponent(draft.visualization.key)}/notes`, { method: "POST", body: JSON.stringify({ action: "list" }) });
+        notes = listing.notes || null;
+      } catch (_) { notes = null; }
+      event.source.postMessage({ type: "loose-ends:explained", token: data.token, ok: false, error: error.message || String(error), notes }, "*");
+    }
+  } else if (data.type === "loose-ends:note" && draft.visualization) {
+    try {
+      const result = await api(`/api/visualizations/${encodeURIComponent(draft.visualization.key)}/notes`, {
+        method: "POST",
+        body: JSON.stringify(data.action === "remove" ? { action: "remove", id: data.id } : { action: "add", note: data.note }),
+      });
+      const notes = result.notes || [];
+      event.source.postMessage({ type: "loose-ends:notes", notes, explanations: result.explanations || null }, "*");
+      // Update the counts in place; the catalog does not rebuild for notes.
+      draft.visualization.noteCount = notes.length;
+      draft.visualization.openNoteCount = notes.filter(note => !note.addressed_run).length;
+      const panel = frame.closest(".reader-panel");
+      const badge = panel && panel.querySelector(".badge.notes-badge");
+      const count = draft.visualization.openNoteCount;
+      if (badge) {
+        badge.textContent = `${count} open note${count === 1 ? "" : "s"}`;
+        badge.hidden = count === 0;
+      }
+      main.querySelectorAll(".actions .button").forEach(element => {
+        if (/^Visualize/.test(element.textContent)) {
+          element.textContent = count ? `Visualize (${count} note${count === 1 ? "" : "s"})` : "Visualize more";
+        }
+      });
+    } catch (error) {
+      showNotice(`Could not save the reader note: ${error.message || error}`);
+    }
+  }
 });
 
 function renderActivity({ preserveDetail = false } = {}) {

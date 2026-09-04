@@ -2451,6 +2451,16 @@ class WorkbenchWatchTests(unittest.TestCase):
 
         catalog.schedule.assert_called_once_with([str(path)])
 
+    def test_watchdog_ignores_live_reader_files(self):
+        catalog = Mock()
+        handler = ChangeHandler(catalog)
+        base = PROJECT_ROOT / "manuscripts" / "paper" / "draft-001" / "visualization"
+        for name in ("notes.json", "annotations.json"):
+            handler.on_any_event(
+                SimpleNamespace(event_type="modified", is_directory=False, src_path=str(base / name))
+            )
+        catalog.schedule.assert_not_called()
+
     def test_watchdog_ignores_files_outside_the_catalog_model(self):
         catalog = Mock()
         handler = ChangeHandler(catalog)
@@ -2745,6 +2755,53 @@ class UnsupportedMemoryPlatformTests(unittest.TestCase):
             snapshot = controller.reconcile(settings, {"run-1"})
             self.assertFalse(snapshot["pending"])
             self.assertIn("requires", snapshot["error"])
+
+
+class ReaderNoteEndpointTests(unittest.TestCase):
+    def test_update_notes_adds_and_removes_through_the_catalog(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package = root / "manuscripts" / "paper" / "draft-001" / "visualization"
+            package.mkdir(parents=True)
+            manager = object.__new__(workbench.CatalogManager)
+            manager.lock = threading.Lock()
+            manager.paths = [root / "papers"]
+            manager.manuscripts = root / "manuscripts"
+            manager.catalog = {"manuscripts": [{"drafts": [{"visualization": {"key": "k" * 24, "directory": str(package)}}]}]}
+
+            result = manager.update_notes("k" * 24, {"action": "add", "note": {"anchor": "par-3", "quote": "some passage", "message": "why?"}})
+            self.assertEqual(result["notes"][0]["id"], "note-001")
+            result = manager.update_notes("k" * 24, {"action": "remove", "id": "note-001"})
+            self.assertEqual(result["notes"], [])
+            with self.assertRaises(ValueError):
+                manager.update_notes("k" * 24, {"action": "explode"})
+            with self.assertRaises(KeyError):
+                manager.update_notes("x" * 24, {"action": "add", "note": {}})
+
+    def test_quick_explain_runs_the_script_and_returns_the_answer(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package = root / "manuscripts" / "paper" / "draft-001" / "visualization"
+            package.mkdir(parents=True)
+            manager = object.__new__(workbench.CatalogManager)
+            manager.lock = threading.Lock()
+            manager.paths = [root / "papers"]
+            manager.manuscripts = root / "manuscripts"
+            manager.catalog = {"manuscripts": [{"drafts": [{"visualization": {"key": "k" * 24, "directory": str(package)}}]}]}
+            commands = []
+
+            def runner(command):
+                commands.append(command)
+                (package / "annotations.json").write_text(json.dumps({"glossary": [], "explanations": [{"id": "quick-note-001", "anchor": "par-3", "phrase": "some", "text": "Because.", "provenance": "quick"}]}), encoding="utf-8")
+                return SimpleNamespace(returncode=0, stdout=json.dumps({"note": "note-001", "explanation": {"id": "quick-note-001"}}) + "\n", stderr="")
+
+            result = manager.quick_explain("k" * 24, {"note": {"anchor": "par-3", "quote": "some passage", "message": ""}}, runner=runner)
+            self.assertEqual(result["note"], "note-001")
+            self.assertEqual(result["explanations"][0]["provenance"], "quick")
+            self.assertIn("--note-id", commands[0])
+            failing = lambda command: SimpleNamespace(returncode=1, stdout="", stderr="explain_note.py: error: boom\n")
+            with self.assertRaises(RuntimeError):
+                manager.quick_explain("k" * 24, {"note": {"anchor": "par-3", "quote": "other passage", "message": ""}}, runner=failing)
 
 
 class VisualizationResponseTests(unittest.TestCase):

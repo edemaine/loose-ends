@@ -14,6 +14,7 @@ LooseEnds.registerWidget("<id>", function (container, api) {
   // Build the widget inside `container` (an empty <div>) using DOM or SVG.
   return {
     setStep(index, step) { /* proof widgets: show step `index` */ },
+    setExample(id) { /* switch the running example declared in widget.json */ },
     destroy() { /* optional cleanup */ },
   };
 });
@@ -55,8 +56,14 @@ be in `widget.js` or in files beside it, referenced through `api.assetUrl`.
   "title": "Reflecting a lattice polygon",
   "summary": "One sentence saying what the reader can see or do.",
   "limitations": ["Optional list of honest limitations."],
+  "examples": [
+    {"id": "generic", "label": "Generic octagon, 8 vertices", "note": "no two sides parallel to the seam"},
+    {"id": "parallel", "label": "Rectangle: parallel supporting lines", "note": "the translation case of the transition $F_i$"}
+  ],
   "steps": [
-    {"title": "Reflect $P$ across a side", "paragraphs": ["par-48", "par-49"], "note": "optional one-line note"}
+    {"title": "Choose the side $s_0$", "paragraphs": ["par-48"], "phrase": "choose a side", "note": "optional one-line note"},
+    {"title": "Reflect: $P^* = \\rho_0(P)$", "paragraphs": ["par-48"], "phrase": "Put"},
+    {"title": "Vertices of $P^*$ stay in the lattice", "paragraphs": ["par-49"]}
   ]
 }
 ```
@@ -64,7 +71,24 @@ be in `widget.js` or in files beside it, referenced through `api.assetUrl`.
 `kind` is `statement` or `proof`. `steps` is required for proof widgets and
 must be omitted (or empty) for statement widgets. Every paragraph id in a step
 must belong to the anchored proof, in reading order, covering the proof's
-substantive paragraphs without overlap. Titles and notes may contain `$...$`.
+substantive paragraphs. Titles and notes may contain `$...$`.
+
+A step may point at part of a paragraph: `phrase` is a short prose fragment
+that occurs verbatim in one of the step's paragraphs (a few words are enough;
+avoid formulas). The reader highlights and scrolls to that fragment instead
+of the whole paragraph, so several steps can share a paragraph as long as
+each names a distinct phrase. Use this whenever a paragraph performs more
+than one construction: one picture per operation, not one per paragraph.
+
+`examples` lists the running examples the reader can choose from; the
+reader shows them as a selector above the steps and calls
+`instance.setExample(id)` when the choice changes, then `setStep` again.
+The first example is the default and must be generic: a typical instance
+large enough that the statement being proved is not obvious for it (for
+geometric or combinatorial objects, roughly 5 to 15 vertices, elements, or
+parts), avoiding coincidences the proof does not rely on. Add further
+examples for the special cases the proof branches on, named as the proof
+names them. Statement widgets may also declare `examples`.
 
 ## Layout and behaviour
 
@@ -75,6 +99,14 @@ substantive paragraphs without overlap. Titles and notes may contain `$...$`.
   `width: 100%`, controls that wrap. Prefer SVG. Keep the initial state
   meaningful: the reader should understand the statement better at a
   glance, before touching any control.
+- Label everything with the paper's own notation. If the text says "choose
+  a side $s_0$ and let $\\rho_0$ be reflection in its supporting line", the
+  picture shows $P$, the side labelled $s_0$, the supporting line dashed,
+  and, at the next step, $P^* = \\rho_0(P)$ labelled as such. A picture
+  without the text's labels does not help the reader follow the text.
+- Do not add your own step tabs or step navigation inside a proof widget:
+  the reader's panel lists the steps, follows the reader's scrolling, and
+  calls `setStep`. Spend the space on the drawing and its labels instead.
 - A proof widget is mounted in a sticky side panel beside the proof text.
   The panel is about 360px wide; design for that width and at most ~420px
   of height above the step list. The reader calls `setStep(index, step)`
@@ -107,6 +139,13 @@ substantive paragraphs without overlap. Titles and notes may contain `$...$`.
 - **Pointer mapping.** Use `api.svgPoint(svg, event)`, then snap in world
   coordinates. Do not compute positions from `getBoundingClientRect`
   ratios.
+- **Draw only what you have computed.** Every point, line, tile, and
+  pairing in a picture must come from a computation on the running example
+  that you ran and checked; a schematic that merely evokes a step (an
+  invented number of cover sheets, a decorative holonomy loop) is a
+  fidelity defect. If a step of the proof cannot be computed for the
+  example, show the objects that are certain, label the step
+  "not depicted", and say so in the caption.
 - **Prove it works before finishing.** Write a Node harness with a small
   DOM stub, mount the widget, simulate the exact sequence a reader will try
   (add three points, remove one, clear, load each preset, switch each tab)
