@@ -97,6 +97,62 @@
     ["results", "Most results (weighted)"],
     ["problems", "Most open problems"],
   ]);
+  const paperFilterOptions = Object.freeze({
+    metadata: [
+      ["all", "Any metadata status"],
+      ["missing", "Needs metadata extraction"],
+      ["complete", "Metadata complete"],
+    ],
+    analysis: [
+      ["all", "Any analysis status"],
+      ["missing", "Needs analysis"],
+      ["complete", "Analyzed"],
+    ],
+    problems: [
+      ["all", "Any open-problem count"],
+      ["present", "Has open problems"],
+      ["none", "Analyzed, no open problems"],
+    ],
+  });
+  const paperFilterParameters = Object.freeze({
+    metadata: "metadata",
+    analysis: "analysis",
+    problems: "problems",
+  });
+  const manuscriptFilterOptions = Object.freeze({
+    verdict: [
+      ["all", "Any review verdict"],
+      ["attention", "Needs attention"],
+      ["unreviewed", "Unreviewed"],
+      ["invalid", "Invalid"],
+      ["needs_research", "Needs research"],
+      ["needs_major_revision", "Needs major revision"],
+      ["needs_minor_revision", "Needs minor revision"],
+      ["ready_for_expert_review", "Ready for expert review"],
+    ],
+    freshness: [
+      ["all", "Any source freshness"],
+      ["stale", "Tracked sources updated"],
+      ["current", "Tracked sources current"],
+    ],
+    status: [
+      ["all", "Any draft status"],
+      ["draft_complete", "Draft complete"],
+      ["blocked", "Blocked"],
+    ],
+    pinning: [
+      ["all", "Any source policy"],
+      ["pinned", "Has pinned problem inputs"],
+      ["tracking", "Fully tracks latest results"],
+      ["none", "No problem inputs"],
+    ],
+  });
+  const manuscriptFilterParameters = Object.freeze({
+    verdict: "verdict",
+    freshness: "source_freshness",
+    status: "draft_status",
+    pinning: "source_policy",
+  });
 
   function humanize(value, fallback = "unknown") {
     return String(value || fallback).replaceAll("_", " ");
@@ -174,6 +230,112 @@
         item.literatureStatus, item.literatureSummary, item.legacyVerdict,
       ].join(" ").toLowerCase().includes(needle);
     });
+  }
+
+  function createDefaultPaperFilters() {
+    return { metadata: "all", analysis: "all", problems: "all" };
+  }
+
+  function matchesPaper(paper, filters) {
+    if (filters.metadata === "missing" && paper.metadataComplete) return false;
+    if (filters.metadata === "complete" && !paper.metadataComplete) return false;
+    if (filters.analysis === "missing" && paper.analyzed) return false;
+    if (filters.analysis === "complete" && !paper.analyzed) return false;
+    const problemCount = Number(paper.problemCount) || 0;
+    if (filters.problems === "present" && problemCount === 0) return false;
+    if (filters.problems === "none" && (!paper.analyzed || problemCount !== 0)) return false;
+    return true;
+  }
+
+  function filterPapers(papers, filters, query = "") {
+    const needle = query.trim().toLowerCase();
+    return papers.filter(paper => {
+      if (!matchesPaper(paper, filters)) return false;
+      if (!needle) return true;
+      return [
+        paper.title, paper.name, ...(paper.authors || []), paper.path,
+        paper.arxivId, paper.doi, paper.url, paper.analysisStatus,
+      ].join(" ").toLowerCase().includes(needle);
+    });
+  }
+
+  function paperFiltersFromSearchParams(parameters) {
+    const filters = createDefaultPaperFilters();
+    Object.entries(paperFilterParameters).forEach(([key, parameter]) => {
+      const requested = parameters.get(parameter);
+      const allowed = new Set(paperFilterOptions[key].map(([value]) => value));
+      if (requested && allowed.has(requested)) filters[key] = requested;
+    });
+    return filters;
+  }
+
+  function paperFiltersToSearchParams(parameters, filters) {
+    const defaults = createDefaultPaperFilters();
+    Object.entries(paperFilterParameters).forEach(([key, parameter]) => {
+      parameters.delete(parameter);
+      if (filters[key] !== defaults[key]) parameters.set(parameter, filters[key]);
+    });
+    return parameters;
+  }
+
+  function createDefaultManuscriptFilters() {
+    return { verdict: "all", freshness: "all", status: "all", pinning: "all" };
+  }
+
+  function matchesManuscript(manuscript, filters) {
+    const latest = manuscript.latest || {};
+    const verdict = latest.verdict || "unreviewed";
+    if (filters.verdict === "attention" && verdict === "ready_for_expert_review") return false;
+    if (!["all", "attention"].includes(filters.verdict) && verdict !== filters.verdict) return false;
+    if (filters.status !== "all" && latest.status !== filters.status) return false;
+    const sources = latest.sources || {};
+    const problems = sources.problems || [];
+    const tracking = Number(sources.pinning?.tracking) || 0;
+    const pinned = Number(sources.pinning?.pinned) || 0;
+    const stale = Number(sources.freshness?.stale) || 0;
+    if (filters.freshness === "stale" && stale === 0) return false;
+    if (filters.freshness === "current" && (tracking === 0 || stale !== 0)) return false;
+    if (filters.pinning === "pinned" && pinned === 0) return false;
+    if (filters.pinning === "tracking" && (problems.length === 0 || pinned !== 0)) return false;
+    if (filters.pinning === "none" && problems.length !== 0) return false;
+    return true;
+  }
+
+  function filterManuscripts(manuscripts, filters, query = "") {
+    const needle = query.trim().toLowerCase();
+    return manuscripts.filter(manuscript => {
+      if (!matchesManuscript(manuscript, filters)) return false;
+      if (!needle) return true;
+      const latest = manuscript.latest || {};
+      const sources = latest.sources || {};
+      return [
+        manuscript.name, latest.title, latest.abstract, latest.status, latest.verdict,
+        ...(sources.papers || []).flatMap(source => [source.title, source.path]),
+        ...(sources.problems || []).flatMap(source => [
+          source.id, source.title, source.paperTitle, source.attemptName,
+          source.currentAttemptName,
+        ]),
+      ].join(" ").replaceAll("_", " ").toLowerCase().includes(needle);
+    });
+  }
+
+  function manuscriptFiltersFromSearchParams(parameters) {
+    const filters = createDefaultManuscriptFilters();
+    Object.entries(manuscriptFilterParameters).forEach(([key, parameter]) => {
+      const requested = parameters.get(parameter);
+      const allowed = new Set(manuscriptFilterOptions[key].map(([value]) => value));
+      if (requested && allowed.has(requested)) filters[key] = requested;
+    });
+    return filters;
+  }
+
+  function manuscriptFiltersToSearchParams(parameters, filters) {
+    const defaults = createDefaultManuscriptFilters();
+    Object.entries(manuscriptFilterParameters).forEach(([key, parameter]) => {
+      parameters.delete(parameter);
+      if (filters[key] !== defaults[key]) parameters.set(parameter, filters[key]);
+    });
+    return parameters;
   }
 
   function compareProblems(left, right) {
@@ -578,12 +740,24 @@
     priorityLevels,
     freshnessLevels,
     paperSortOptions,
+    paperFilterOptions,
+    manuscriptFilterOptions,
     humanize,
     titleize,
     statusLabel,
     createDefaultFilters,
     matches,
     filterItems,
+    createDefaultPaperFilters,
+    matchesPaper,
+    filterPapers,
+    paperFiltersFromSearchParams,
+    paperFiltersToSearchParams,
+    createDefaultManuscriptFilters,
+    matchesManuscript,
+    filterManuscripts,
+    manuscriptFiltersFromSearchParams,
+    manuscriptFiltersToSearchParams,
     compareProblems,
     latestProblems,
     attemptsForProblem,

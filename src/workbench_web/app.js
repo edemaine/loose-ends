@@ -22,12 +22,16 @@ const state = {
   selectedProblem: "",
   researchFilters: reviewModel.createDefaultFilters(),
   researchFiltersOpen: false,
+  paperFilters: reviewModel.createDefaultPaperFilters(),
+  paperFiltersOpen: false,
   revealSidebarSelection: false,
   revealSidebarSecondarySelection: false,
   sidebarScroll: { research: 0, papers: 0, manuscripts: 0, activity: 0 },
   sidebarSecondaryScroll: { research: 0, manuscripts: 0 },
   paperSort: "activity",
   manuscriptSort: "latest",
+  manuscriptFilters: reviewModel.createDefaultManuscriptFilters(),
+  manuscriptFiltersOpen: false,
   selectedPaper: "",
   selectedManuscript: "",
   selectedDraft: "",
@@ -163,9 +167,11 @@ function currentUrl() {
     reviewModel.identityToSearchParams(parameters, item);
     if (item && state.detailTab && state.detailTab !== "attempt") parameters.set("detail", state.detailTab);
   } else if (state.tab === "papers") {
+    reviewModel.paperFiltersToSearchParams(parameters, state.paperFilters);
     const paper = state.catalog.papers.find(value => value.key === state.selectedPaper);
     if (paper) parameters.set("paper", paper.urlKey || paper.path);
   } else if (state.tab === "manuscripts") {
+    reviewModel.manuscriptFiltersToSearchParams(parameters, state.manuscriptFilters);
     const manuscript = state.catalog.manuscripts.find(value => value.key === state.selectedManuscript);
     if (manuscript) {
       parameters.set("manuscript", manuscript.urlKey || manuscript.path);
@@ -247,6 +253,7 @@ function applyLocation({ scrollY } = {}) {
     state.revealSidebarSecondarySelection = Boolean(requested);
     state.detailTab = parameters.get("detail") || "attempt";
   } else if (state.tab === "papers") {
+    state.paperFilters = reviewModel.paperFiltersFromSearchParams(parameters);
     const requested = parameters.get("paper");
     const paper = state.catalog.papers.find(
       item => item.urlKey === requested || item.path === requested,
@@ -254,6 +261,7 @@ function applyLocation({ scrollY } = {}) {
     state.selectedPaper = paper?.key || "";
     state.revealSidebarSelection = Boolean(paper);
   } else if (state.tab === "manuscripts") {
+    state.manuscriptFilters = reviewModel.manuscriptFiltersFromSearchParams(parameters);
     const requested = parameters.get("manuscript");
     const manuscript = state.catalog.manuscripts.find(
       item => item.urlKey === requested || item.path === requested,
@@ -717,10 +725,7 @@ function visibleProblemTargets() {
 }
 
 function visiblePaperTargets() {
-  const query = state.search.trim().toLowerCase();
-  return state.catalog.papers
-    .filter(paper => !query || `${paper.title} ${paper.name} ${paper.authors.join(" ")}`.toLowerCase().includes(query))
-    .map(paperTarget);
+  return filteredPapers().map(paperTarget);
 }
 
 function updateVisibleSelectionControl(input, targets, noun) {
@@ -1361,6 +1366,22 @@ function filteredReviews() {
   );
 }
 
+function filteredPapers() {
+  return reviewModel.filterPapers(
+    state.catalog.papers,
+    state.paperFilters,
+    state.search,
+  );
+}
+
+function filteredManuscripts() {
+  return reviewModel.filterManuscripts(
+    state.catalog.manuscripts,
+    state.manuscriptFilters,
+    state.search,
+  );
+}
+
 function filterControl(label, key, options) {
   const wrapper = node("label", "filter-control");
   wrapper.append(node("span", "", label));
@@ -1446,6 +1467,104 @@ function renderResearchFilters() {
   return details;
 }
 
+function paperFilterControl(label, key, options) {
+  const wrapper = node("label", "filter-control");
+  wrapper.append(node("span", "", label));
+  const select = node("select");
+  select.dataset.paperFilterKey = key;
+  options.forEach(([value, text]) => {
+    const option = node("option", "", text);
+    option.value = value;
+    option.selected = state.paperFilters[key] === value;
+    select.append(option);
+  });
+  select.addEventListener("change", () => {
+    state.paperFilters[key] = select.value;
+    state.selectedPaper = "";
+    syncNavigation({ replace: true });
+  });
+  wrapper.append(select);
+  return wrapper;
+}
+
+function renderPaperFilters() {
+  const details = node("details", "research-filters paper-filters");
+  details.open = state.paperFiltersOpen;
+  details.addEventListener("toggle", () => {
+    state.paperFiltersOpen = details.open;
+  });
+  const summary = node("summary");
+  summary.append(node("span", "", "Paper filters"));
+  summary.append(visiblePaperSelectionControl());
+  details.append(summary);
+  const controls = node("div", "research-filter-grid paper-filter-grid");
+  controls.append(
+    paperFilterControl("Metadata", "metadata", reviewModel.paperFilterOptions.metadata),
+    paperFilterControl("Analysis", "analysis", reviewModel.paperFilterOptions.analysis),
+    paperFilterControl("Open problems", "problems", reviewModel.paperFilterOptions.problems),
+  );
+  const footer = node("div", "filter-footer");
+  footer.append(node("span", "", "Paper processing status"));
+  footer.append(button("Reset", () => {
+    state.paperFilters = reviewModel.createDefaultPaperFilters();
+    state.selectedPaper = "";
+    syncNavigation({ replace: true });
+  }, "filter-reset"));
+  controls.append(footer);
+  details.append(controls);
+  return details;
+}
+
+function manuscriptFilterControl(label, key, options) {
+  const wrapper = node("label", "filter-control");
+  wrapper.append(node("span", "", label));
+  const select = node("select");
+  select.dataset.manuscriptFilterKey = key;
+  options.forEach(([value, text]) => {
+    const option = node("option", "", text);
+    option.value = value;
+    option.selected = state.manuscriptFilters[key] === value;
+    select.append(option);
+  });
+  select.addEventListener("change", () => {
+    state.manuscriptFilters[key] = select.value;
+    state.selectedManuscript = "";
+    state.selectedDraft = "";
+    syncNavigation({ replace: true });
+  });
+  wrapper.append(select);
+  return wrapper;
+}
+
+function renderManuscriptFilters() {
+  const details = node("details", "research-filters manuscript-filters");
+  details.open = state.manuscriptFiltersOpen;
+  details.addEventListener("toggle", () => {
+    state.manuscriptFiltersOpen = details.open;
+  });
+  const summary = node("summary");
+  summary.append(node("span", "", "Manuscript filters"));
+  details.append(summary);
+  const controls = node("div", "research-filter-grid");
+  controls.append(
+    manuscriptFilterControl("Review verdict", "verdict", reviewModel.manuscriptFilterOptions.verdict),
+    manuscriptFilterControl("Source freshness", "freshness", reviewModel.manuscriptFilterOptions.freshness),
+    manuscriptFilterControl("Draft status", "status", reviewModel.manuscriptFilterOptions.status),
+    manuscriptFilterControl("Source policy", "pinning", reviewModel.manuscriptFilterOptions.pinning),
+  );
+  const footer = node("div", "filter-footer");
+  footer.append(node("span", "", "Latest draft status and inputs"));
+  footer.append(button("Reset", () => {
+    state.manuscriptFilters = reviewModel.createDefaultManuscriptFilters();
+    state.selectedManuscript = "";
+    state.selectedDraft = "";
+    syncNavigation({ replace: true });
+  }, "filter-reset"));
+  controls.append(footer);
+  details.append(controls);
+  return details;
+}
+
 function syncSidebarControls(tab, controls) {
   const search = controls.querySelector("input.search");
   if (search && search.value !== state.search) search.value = state.search;
@@ -1455,7 +1574,25 @@ function syncSidebarControls(tab, controls) {
   if (manuscriptSort && manuscriptSort.value !== state.manuscriptSort) {
     manuscriptSort.value = state.manuscriptSort;
   }
+  if (tab === "manuscripts") {
+    const details = controls.querySelector(".manuscript-filters");
+    if (details && details.open !== state.manuscriptFiltersOpen) {
+      details.open = state.manuscriptFiltersOpen;
+    }
+    controls.querySelectorAll("select[data-manuscript-filter-key]").forEach(select => {
+      const value = state.manuscriptFilters[select.dataset.manuscriptFilterKey];
+      if (select.value !== value) select.value = value;
+    });
+  }
   if (tab === "papers") {
+    const details = controls.querySelector(".paper-filters");
+    if (details && details.open !== state.paperFiltersOpen) {
+      details.open = state.paperFiltersOpen;
+    }
+    controls.querySelectorAll("select[data-paper-filter-key]").forEach(select => {
+      const value = state.paperFilters[select.dataset.paperFilterKey];
+      if (select.value !== value) select.value = value;
+    });
     updateVisiblePaperSelectionControl(
       controls.querySelector("input[data-select-visible-papers]"),
     );
@@ -1929,14 +2066,13 @@ function renderPapers() {
     controls.append(
       sidebarSearch("Search source papers…"),
       paperSortControl(),
-      visiblePaperSelectionControl(),
+      renderPaperFilters(),
       addActions,
     );
     return controls;
   });
-  const query = state.search.trim().toLowerCase();
   const papers = reviewModel.sortPapers(
-    state.catalog.papers.filter(paper => !query || `${paper.title} ${paper.name} ${paper.authors.join(" ")}`.toLowerCase().includes(query)),
+    filteredPapers(),
     state.paperSort,
     state.catalog.reviews,
   );
@@ -2532,12 +2668,11 @@ function renderManuscripts() {
     controls.append(
       sidebarSearch("Search manuscripts…"),
       manuscriptSortControl(),
+      renderManuscriptFilters(),
     );
     return controls;
   });
-  const query = state.search.trim().toLowerCase();
-  const manuscripts = state.catalog.manuscripts
-    .filter(value => !query || `${value.name} ${value.latest.title}`.toLowerCase().includes(query))
+  const manuscripts = filteredManuscripts()
     .sort((left, right) => {
       const alphabetical = String(left.latest.title).localeCompare(
         String(right.latest.title),
@@ -2553,21 +2688,24 @@ function renderManuscripts() {
   }
   const manuscriptScroll = node("div", "manuscript-scroll");
   const list = node("div", "side-list");
-  manuscripts.forEach(value => appendSideCard(list, {
-    title: value.latest.title,
-    meta: `${value.drafts.length} draft${value.drafts.length === 1 ? "" : "s"} · ${humanize(value.latest.verdict)}`,
-    active: state.selectedManuscript === value.key,
-    relatedTask: { manuscriptPath: value.path },
-    onClick: () => {
-      state.selectedManuscript = value.key;
-      const rememberedDraft = state.manuscriptDraftSelections.get(value.key);
-      state.selectedDraft = value.drafts.some(draft => draft.key === rememberedDraft)
-        ? rememberedDraft
-        : value.latest.key;
-      state.revealSidebarSecondarySelection = true;
-      syncNavigation();
-    },
-  }));
+  manuscripts.forEach(value => {
+    const staleSources = Number(value.latest.sources?.freshness?.stale) || 0;
+    appendSideCard(list, {
+      title: value.latest.title,
+      meta: `${value.drafts.length} draft${value.drafts.length === 1 ? "" : "s"} · ${humanize(value.latest.verdict)}${staleSources ? ` · ${staleSources} source${staleSources === 1 ? "" : "s"} updated` : ""}`,
+      active: state.selectedManuscript === value.key,
+      relatedTask: { manuscriptPath: value.path },
+      onClick: () => {
+        state.selectedManuscript = value.key;
+        const rememberedDraft = state.manuscriptDraftSelections.get(value.key);
+        state.selectedDraft = value.drafts.some(draft => draft.key === rememberedDraft)
+          ? rememberedDraft
+          : value.latest.key;
+        state.revealSidebarSecondarySelection = true;
+        syncNavigation();
+      },
+    });
+  });
   manuscriptScroll.append(node("div", "sidebar-heading", `${manuscripts.length} manuscripts`), list);
   sidebar.append(manuscriptScroll);
   const manuscript = state.catalog.manuscripts.find(value => value.key === state.selectedManuscript);
@@ -2615,6 +2753,13 @@ function renderManuscripts() {
   const badges = node("div", "badges");
   badges.append(badge(draft.status || "draft", "neutral"));
   badges.append(badge(draft.verdict, draft.verdict === "ready_for_expert_review" ? "succeeded" : "warn"));
+  const staleSourceCount = Number(draft.sources?.freshness?.stale) || 0;
+  if (staleSourceCount) {
+    badges.append(badge(
+      `${staleSourceCount} source update${staleSourceCount === 1 ? "" : "s"}`,
+      "warn",
+    ));
+  }
   copy.append(badges);
   hero.append(copy);
   shell.append(hero);
@@ -2704,6 +2849,8 @@ function renderManuscripts() {
         });
         const tracking = source.pinned
           ? `Pinned to ${source.attemptName || "the recorded attempt"}`
+          : source.stale
+          ? `Draft uses ${source.attemptName || "no attempt"} · latest is ${source.currentAttemptName}`
           : `${source.selectorKind === "paper" ? "Tracks latest through paper selection" : "Tracks latest attempt"}${source.attemptName ? ` · currently ${source.attemptName}` : ""}`;
         const trackingRow = node("div", "source-tracking-row");
         trackingRow.append(

@@ -161,6 +161,7 @@ button { color: inherit; }
 .select-visible input { width: 12px; height: 12px; margin: 0; accent-color: var(--accent); }
 .select-visible.disabled { opacity: .55; cursor: default; }
 .research-filter-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; max-height: 44vh; overflow: auto; padding: 7px; border-top: 1px solid var(--line); }
+.paper-filter-grid .filter-control:last-of-type { grid-column: 1 / -1; }
 .filter-control { display: grid; min-width: 0; gap: 2px; color: var(--muted); font-size: 9px; font-weight: 750; }
 .filter-control select { min-width: 0; width: 100%; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); padding: 4px 5px; font-size: 10px; }
 .filter-toggles { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 4px; padding-top: 2px; }
