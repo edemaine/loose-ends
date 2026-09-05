@@ -1,0 +1,34 @@
+{
+  "type": "object",
+  "properties": {
+    "summary": {"type": "string"},
+    "annotations_review": {
+      "type": "object",
+      "properties": {
+        "accuracy": {"type": "string", "enum": ["accurate", "minor_issues", "major_issues", "not_applicable"]},
+        "findings": {"type": "array", "items": {"type": "string"}}
+      },
+      "required": ["accuracy", "findings"],
+      "additionalProperties": false
+    },
+    "widget_reviews": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "fidelity": {"type": "string", "enum": ["well_supported", "minor_gaps", "major_gaps", "incorrect"]},
+          "interaction_quality": {"type": "string", "enum": ["works", "minor_issues", "major_issues", "unusable"]},
+          "summary": {"type": "string"},
+          "findings": {"type": "array", "items": {"type": "string"}},
+          "blocking_gaps": {"type": "array", "items": {"type": "string"}}
+        },
+        "required": ["id", "fidelity", "interaction_quality", "summary", "findings", "blocking_gaps"],
+        "additionalProperties": false
+      }
+    },
+    "warnings": {"type": "array", "items": {"type": "string"}}
+  },
+  "required": ["summary", "annotations_review", "widget_reviews", "warnings"],
+  "additionalProperties": false
+}

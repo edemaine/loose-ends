@@ -2142,6 +2142,15 @@ function renderPapers() {
   );
   actions.append(button("Edit metadata", () => openMetadataEditor(paper), "button"));
   addAction(actions, paper.analyzed ? "Analyze again" : "Analyze", "analyze", [paperTarget(paper)], !paper.analyzed);
+  if (paper.hasSource !== false) {
+    const openPaperNotes = paper.visualization?.openNoteCount || 0;
+    addAction(
+      actions,
+      openPaperNotes ? `Visualize (${openPaperNotes} note${openPaperNotes === 1 ? "" : "s"})` : paper.visualization ? "Visualize more" : "Visualize",
+      "visualize",
+      [paperTarget(paper)],
+    );
+  }
   const addProblem = button(
     "Add open problem",
     () => openProblemEditor(paper),
@@ -2158,6 +2167,7 @@ function renderPapers() {
     addAction(actions, "Write from latest results", "write", [paperTarget(paper)]);
   }
   shell.append(actions);
+  if (paper.visualization) shell.append(renderDraftReader({ name: paper.title }, { key: paper.path, title: paper.title, visualization: paper.visualization }));
   shell.append(relatedTasksPanel({
     paperPath: paper.path,
     includePaperDescendants: true,
@@ -2779,6 +2789,13 @@ function renderManuscripts() {
   }
   const actions = node("div", "actions");
   addAction(actions, draft.verdict === "unreviewed" ? "Resume review" : "Revise", "revise", [draftTarget(draft)], true);
+  const openNotes = draft.visualization?.openNoteCount || 0;
+  addAction(
+    actions,
+    openNotes ? `Visualize (${openNotes} note${openNotes === 1 ? "" : "s"})` : draft.visualization ? "Visualize more" : "Visualize",
+    "visualize",
+    [draftTarget(draft)],
+  );
   const pdf = draft.files.find(path => path.endsWith("main.pdf"));
   if (pdf) {
     const open = node("a", "button", "Open PDF");
@@ -2796,6 +2813,7 @@ function renderManuscripts() {
     manuscriptPath: manuscript.path,
     draftPath: draft.path,
   }));
+  shell.append(renderDraftReader(manuscript, draft));
   if (draft.abstract) shell.append(summaryPanel("Abstract", draft.abstract));
   if (draft.summary) shell.append(summaryPanel("Paper critic", draft.summary));
   const sources = draft.sources || { papers: [], problems: [] };
@@ -2874,6 +2892,152 @@ function renderManuscripts() {
   shell.append(heading, fileGrid(draft.files));
   main.replaceChildren(shell);
 }
+
+function readerUrl(visualization, relative = "reader.html") {
+  const resource = String(relative || "").split("/").map(encodeURIComponent).join("/");
+  return `/api/visualizations/${encodeURIComponent(visualization.key)}/${resource}`;
+}
+
+function verdictClass(value) {
+  if (["well_supported", "works", "accurate"].includes(value)) return "success";
+  if (["minor_gaps", "minor_issues"].includes(value)) return "warn";
+  if (["major_gaps", "major_issues", "incorrect", "unusable"].includes(value)) return "error";
+  return "neutral";
+}
+
+function renderDraftReader(manuscript, draft) {
+  const panel = node("section", "panel reader-panel");
+  const head = node("div", "reader-panel-head");
+  head.append(node("h2", "", "Read"));
+  const visualization = draft.visualization;
+  if (!visualization) {
+    head.append(node("span", "reader-panel-hint", "Not built yet"));
+    panel.append(head);
+    panel.append(node("p", "", "Choose Visualize to render this draft as a readable paper with collapsible sections, definition popovers, a main-result widget, and proof outlines."));
+    return panel;
+  }
+  const badges = node("div", "badges");
+  badges.append(badge(`${visualization.glossaryCount} definitions`, "neutral glossary-badge"));
+  badges.append(badge(`${visualization.widgetCount} widget${visualization.widgetCount === 1 ? "" : "s"}`, "neutral"));
+  const notesBadge = badge(`${visualization.openNoteCount || 0} open note${visualization.openNoteCount === 1 ? "" : "s"}`, "warn notes-badge");
+  notesBadge.hidden = !visualization.openNoteCount;
+  badges.append(notesBadge);
+  (visualization.widgets || []).forEach(widget => {
+    badges.append(badge(`${widget.title}: ${reviewModel.humanize(widget.fidelity)}`, verdictClass(widget.fidelity)));
+  });
+  head.append(badges);
+  const fullscreen = button("Fullscreen", () => {
+    state.readerFullscreen = !panel.classList.contains("fullscreen");
+    panel.classList.toggle("fullscreen", state.readerFullscreen);
+    fullscreen.textContent = state.readerFullscreen ? "Exit fullscreen" : "Fullscreen";
+  }, "button");
+  if (state.readerFullscreen) {
+    panel.classList.add("fullscreen");
+    fullscreen.textContent = "Exit fullscreen";
+  }
+  head.append(fullscreen);
+  panel.append(head);
+  if (visualization.warnings?.length) {
+    panel.append(node("p", "reader-panel-warning", `Conversion warnings: ${visualization.warnings.join(" · ")}`));
+  }
+  const frame = node("iframe", "reader-frame");
+  frame.title = `${draft.title} · reader`;
+  frame.src = readerUrl(visualization);
+  frame.loading = "lazy";
+  frame.referrerPolicy = "no-referrer";
+  frame.setAttribute("sandbox", "allow-scripts allow-popups allow-popups-to-escape-sandbox");
+  frame.dataset.draftKey = draft.key;
+  panel.append(frame);
+  return panel;
+}
+
+window.addEventListener("message", async event => {
+  const data = event.data;
+  if (!data || typeof data.type !== "string" || !data.type.startsWith("loose-ends:")) return;
+  const frame = [...document.querySelectorAll("iframe.reader-frame")].find(item => item.contentWindow === event.source);
+  if (!frame) return;
+  const draft = state.catalog.manuscripts.flatMap(item => item.drafts).find(item => item.key === frame.dataset.draftKey)
+    || state.catalog.papers.filter(item => item.visualization).map(item => ({ key: item.path, title: item.title, visualization: item.visualization, paper: item })).find(item => item.key === frame.dataset.draftKey);
+  if (!draft) return;
+  if (data.type === "loose-ends:visualize") {
+    const anchors = Array.isArray(data.anchors) ? data.anchors.filter(value => typeof value === "string") : [];
+    openTask("visualize", [draft.paper ? paperTarget(draft.paper) : draftTarget(draft)], {
+      anchors: anchors.filter(value => value !== "default").join(" "),
+    });
+  } else if (data.type === "loose-ends:fix-widget" && draft.visualization) {
+    try {
+      const result = await api(`/api/visualizations/${encodeURIComponent(draft.visualization.key)}/fix-widget`, {
+        method: "POST",
+        body: JSON.stringify({ note: data.note }),
+      });
+      event.source.postMessage({ type: "loose-ends:widget-fixed", token: data.token, ok: true, ...result }, "*");
+      if (Array.isArray(result.widgets)) draft.visualization.widgets = result.widgets;
+    } catch (error) {
+      let notes = null;
+      try {
+        const listing = await api(`/api/visualizations/${encodeURIComponent(draft.visualization.key)}/notes`, { method: "POST", body: JSON.stringify({ action: "list" }) });
+        notes = listing.notes || null;
+      } catch (_) { notes = null; }
+      event.source.postMessage({ type: "loose-ends:widget-fixed", token: data.token, ok: false, error: error.message || String(error), notes }, "*");
+    }
+  } else if (data.type === "loose-ends:explain" && draft.visualization) {
+    try {
+      const result = await api(`/api/visualizations/${encodeURIComponent(draft.visualization.key)}/explain`, {
+        method: "POST",
+        body: JSON.stringify({ note: data.note }),
+      });
+      event.source.postMessage({ type: "loose-ends:explained", token: data.token, ok: true, ...result }, "*");
+      // Update counts in place; the catalog does not rebuild for quick answers.
+      const notes = result.notes || [];
+      draft.visualization.noteCount = notes.length;
+      draft.visualization.openNoteCount = notes.filter(note => !note.addressed_run).length;
+      if (Array.isArray(result.glossary)) draft.visualization.glossaryCount = result.glossary.length;
+      const panel = frame.closest(".reader-panel");
+      if (panel) {
+        const notesBadge = panel.querySelector(".badge.notes-badge");
+        if (notesBadge) {
+          notesBadge.textContent = `${draft.visualization.openNoteCount} open note${draft.visualization.openNoteCount === 1 ? "" : "s"}`;
+          notesBadge.hidden = draft.visualization.openNoteCount === 0;
+        }
+        const glossaryBadge = panel.querySelector(".badge.glossary-badge");
+        if (glossaryBadge) glossaryBadge.textContent = `${draft.visualization.glossaryCount} definitions`;
+      }
+    } catch (error) {
+      let notes = null;
+      try {
+        const listing = await api(`/api/visualizations/${encodeURIComponent(draft.visualization.key)}/notes`, { method: "POST", body: JSON.stringify({ action: "list" }) });
+        notes = listing.notes || null;
+      } catch (_) { notes = null; }
+      event.source.postMessage({ type: "loose-ends:explained", token: data.token, ok: false, error: error.message || String(error), notes }, "*");
+    }
+  } else if (data.type === "loose-ends:note" && draft.visualization) {
+    try {
+      const result = await api(`/api/visualizations/${encodeURIComponent(draft.visualization.key)}/notes`, {
+        method: "POST",
+        body: JSON.stringify(data.action === "remove" ? { action: "remove", id: data.id } : { action: "add", note: data.note }),
+      });
+      const notes = result.notes || [];
+      event.source.postMessage({ type: "loose-ends:notes", notes, explanations: result.explanations || null }, "*");
+      // Update the counts in place; the catalog does not rebuild for notes.
+      draft.visualization.noteCount = notes.length;
+      draft.visualization.openNoteCount = notes.filter(note => !note.addressed_run).length;
+      const panel = frame.closest(".reader-panel");
+      const badge = panel && panel.querySelector(".badge.notes-badge");
+      const count = draft.visualization.openNoteCount;
+      if (badge) {
+        badge.textContent = `${count} open note${count === 1 ? "" : "s"}`;
+        badge.hidden = count === 0;
+      }
+      main.querySelectorAll(".actions .button").forEach(element => {
+        if (/^Visualize/.test(element.textContent)) {
+          element.textContent = count ? `Visualize (${count} note${count === 1 ? "" : "s"})` : "Visualize more";
+        }
+      });
+    } catch (error) {
+      showNotice(`Could not save the reader note: ${error.message || error}`);
+    }
+  }
+});
 
 function renderActivity({ preserveDetail = false } = {}) {
   persistentSidebarControls("activity", () => {
@@ -3555,11 +3719,12 @@ function outputRoute(path) {
       "critique.md", "review-result.json", "review-manifest.json",
       "review-events.jsonl", "review-run.log",
     ]);
-    return {
+    const route = {
       tab: "research",
       review,
       detail: critiqueFiles.has(filename) ? "critique" : "attempt",
     };
+    return route;
   }
   const problem = state.catalog.reviews.find(
     item => pathContains(`${item.paperDirectory}/${item.problemId}`, path),
@@ -3700,7 +3865,7 @@ const actionNames = {
   download: "Download from arXiv",
   metadata: "Extract paper metadata",
   analyze: "Analyze papers", triage: "Triage problems", literature: "Search literature",
-  solve: "Solve problems", review: "Review attempts", write: "Write paper", revise: "Revise manuscript",
+  solve: "Solve problems", review: "Review attempts", visualize: "Visualize paper", write: "Write paper", revise: "Revise manuscript",
 };
 
 const taskActionTitles = {
@@ -3711,6 +3876,7 @@ const taskActionTitles = {
   literature: "Literature review",
   solve: "Problem solving",
   review: "Solution review",
+  visualize: "Paper visualization",
   write: "Paper writing",
   revise: "Manuscript revision",
 };
@@ -3815,7 +3981,7 @@ function taskSidebarMeta(job) {
   return pieces.join(" · ");
 }
 
-function field(name, label, { type = "text", value = "", help = "", full = false, options = [] } = {}) {
+function field(name, label, { type = "text", value = "", help = "", full = false, options = [], min, max } = {}) {
   const wrapper = node("label", `field${full ? " full" : ""}`);
   wrapper.append(node("span", "", label));
   let input;
@@ -3830,6 +3996,8 @@ function field(name, label, { type = "text", value = "", help = "", full = false
   } else {
     input = node("input");
     input.type = type;
+    if (min !== undefined) input.min = String(min);
+    if (max !== undefined) input.max = String(max);
   }
   input.name = name;
   input.value = value ?? "";
@@ -3856,6 +4024,7 @@ function promptLabel(action) {
     metadata: "Metadata-extractor direction",
     analyze: "Analyzer direction", triage: "Triage direction", literature: "Search direction",
     solve: "Solver direction", review: "Critic direction", write: "Writer direction", revise: "Revision direction",
+    visualize: "Visualization-designer direction",
   }[action];
 }
 
@@ -3863,10 +4032,11 @@ function dialogStorageKey(action, targets) {
   return `loose-ends-task-draft:${action}:${targets.map(value => value.path).sort().join("|")}`;
 }
 
-function openTask(action, targets) {
+function openTask(action, targets, presetOptions = null) {
   const storageKey = dialogStorageKey(action, targets);
   let saved = {};
   try { saved = JSON.parse(sessionStorage.getItem(storageKey) || "{}"); } catch (_) { saved = {}; }
+  if (presetOptions) saved = { ...saved, ...presetOptions };
   if (
     action === "write" &&
     targets.some(value => value.kind === "attempt") &&
@@ -4068,8 +4238,24 @@ function renderTaskConfiguration(errorMessage = "") {
     type: "textarea", value: options.prompt || "", full: true,
     help: "Added to the standard task instructions without replacing validation safeguards.",
   }));
-  if (["solve", "write", "revise"].includes(task.action)) {
-    grid.append(field("reviewPrompt", task.action === "solve" ? "Solution-critic direction" : "Paper-critic direction", {
+  if (task.action === "visualize") {
+    grid.append(field("anchors", "Anchors", {
+      value: options.anchors || "", full: true,
+      help: "Statement or proof ids to visualize, separated by spaces. Leave blank for the default aids: definition popovers, the main-result widget, and proof outlines.",
+    }));
+    grid.append(field("repairRounds", "Repair rounds", {
+      type: "number", value: options.repairRounds ?? 1, min: 0, max: 3,
+      help: "Designer rounds that fix the critic's blocking gaps before installing (0 installs the first draft).",
+    }));
+    grid.append(checkbox("skipReview", "Skip the independent fidelity review", "Faster and cheaper; widgets show as unreviewed.", options.skipReview));
+  }
+  if (["solve", "visualize", "write", "revise"].includes(task.action)) {
+    const reviewLabel = task.action === "solve"
+      ? "Solution-critic direction"
+      : task.action === "visualize"
+        ? "Fidelity-reviewer direction"
+        : "Paper-critic direction";
+    grid.append(field("reviewPrompt", reviewLabel, {
       type: "textarea", value: options.reviewPrompt || "", full: true,
     }));
   }
@@ -4143,13 +4329,13 @@ function renderTaskConfiguration(errorMessage = "") {
     options: [["", `Default (${taskDefaults.reasoningEffort || "unavailable"})`], ...["low", "medium", "high", "xhigh", "max", "ultra"].map(value => [value, value])],
   }));
   advancedGrid.append(checkbox("fast", "Fast service tier", "Uses additional credits.", options.fast));
-  if (["literature", "solve", "review", "write", "revise"].includes(task.action)) {
+  if (["literature", "solve", "review", "visualize", "write", "revise"].includes(task.action)) {
     advancedGrid.append(field("webSearch", "Web search", {
       type: "select", value: options.webSearch || "",
       options: [["", `Default (${reviewModel.titleize(taskDefaults.webSearch || "unavailable")})`], ["live", "Live"], ["indexed", "Indexed"], ["disabled", "Disabled"]],
     }));
   }
-  if (["solve", "write", "revise"].includes(task.action)) {
+  if (["solve", "visualize", "write", "revise"].includes(task.action)) {
     advancedGrid.append(field("reviewModel", "Critic model", { value: options.reviewModel || "", help: "Blank inherits the primary model." }));
     advancedGrid.append(field("reviewReasoningEffort", "Critic reasoning", {
       type: "select", value: options.reviewReasoningEffort || "",

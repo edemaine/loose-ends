@@ -37,6 +37,8 @@ import ingest_paper
 import open_problem_common as common
 import review_solutions
 import write_paper
+import paper_document
+import visualizations
 from workbench_store import ACTIVE_STATUSES, WorkbenchStore
 from workbench_memory import QUEUE_JOB_ENV, QueueMemoryController
 from workbench_worker import recover_run_artifacts
@@ -60,6 +62,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ASSET_DIRECTORY = Path(__file__).resolve().parent / "workbench_web"
 DEFAULT_STATE_DIRECTORY = PROJECT_ROOT / ".loose-ends"
 DEFAULT_MANUSCRIPTS = PROJECT_ROOT / "manuscripts"
+READER_DIRECTORY = Path(__file__).resolve().parent / "workbench_web" / "reader"
+READER_CDN = "https://cdn.jsdelivr.net"
 IGNORED_PARTS = {".git", ".loose-ends", "__pycache__", ".runs"}
 IGNORED_PREFIXES = (
     ".run-",
@@ -74,6 +78,11 @@ IGNORED_PREFIXES = (
     ".literature-install-",
     ".draft-install-",
     ".paper-review-install-",
+    ".visualization-install-",
+    ".visualization-review-run-",
+    ".visualize-run-",
+    ".explain-run-",
+    ".fix-run-",
     ".paper-install-",
     ".triage-install-",
 )
@@ -104,7 +113,13 @@ CATALOG_FILE_NAMES = {
     "main.pdf",
     "readiness.md",
     "paper-critique.md",
+    visualizations.MANIFEST_NAME,
+    visualizations.WIDGET_MANIFEST_NAME,
+    visualizations.WIDGET_REVIEW_NAME,
+    paper_document.DOCUMENT_JSON,
 }
+# Files the reader changes while open; never rebuild the catalog for them.
+LIVE_READER_FILES = {visualizations.NOTES_NAME, visualizations.ANNOTATIONS_NAME}
 
 
 def _read_json(path: Path) -> dict:
@@ -277,6 +292,8 @@ def _paper_inventory(paths: Iterable[Path]) -> list[dict]:
                 if isinstance(metadata.get("doi", ""), str) else "",
                 "activityTimestamp": timeline["activityTimestamp"],
                 "analyzed": bool(manifest),
+                "hasSource": (paper / "source").is_dir(),
+                "visualization": visualizations.discover(paper),
                 "problemCount": len(manifest.get("open_problems", [])),
                 "analysisStatus": manifest.get("status", ""),
                 "metadataComplete": bool(
@@ -348,13 +365,20 @@ def _catalog_root_signature(root: Path) -> str:
             part.casefold() for part in current.relative_to(root).parts
         }
         include_directory_files = bool(
-            relative_parts.intersection({"artifacts", "figures", "code"})
+            relative_parts.intersection(
+                {"artifacts", "figures", "code", visualizations.DIRECTORY_NAME}
+            )
         )
         for name in sorted(file_names):
             if (
                 name.casefold() not in CATALOG_FILE_NAMES
                 and not include_directory_files
             ):
+                continue
+            if name.casefold() in LIVE_READER_FILES:
+                # Reader notes and quick answers change while the reader is
+                # open; the workbench updates their counts in place instead
+                # of rebuilding the catalog (which would reload the reader).
                 continue
             path = current / name
             try:
@@ -668,6 +692,7 @@ def _manuscript_inventory(
                     "path": str(draft.resolve()),
                     "name": draft.name,
                     "number": int(match.group(1)),
+                    "visualization": visualizations.discover(draft),
                     "title": result.get("title") or manifest.get("title") or manuscript.name,
                     "createdTimestamp": created_timestamp,
                     "abstract": _manuscript_abstract(draft / "main.tex"),
@@ -748,6 +773,7 @@ class CatalogManager:
         self.manuscripts.mkdir(parents=True, exist_ok=True)
         self.hub = hub
         self.lock = threading.RLock()
+        self.notes_lock = threading.Lock()
         self.version = 0
         self.error = ""
         self.catalog: dict = {
@@ -1199,6 +1225,139 @@ class CatalogManager:
         value["fileCount"] = len(value["files"])
         return value
 
+    def visualization_directory(self, key: str) -> Path:
+        """Return the package directory for a catalogued visualization key."""
+        with self.lock:
+            packages = [
+                draft.get("visualization")
+                for manuscript in self.catalog.get("manuscripts", [])
+                for draft in manuscript.get("drafts", [])
+                if isinstance(draft.get("visualization"), dict)
+                and draft["visualization"].get("key") == key
+            ] + [
+                paper.get("visualization")
+                for paper in self.catalog.get("papers", [])
+                if isinstance(paper.get("visualization"), dict)
+                and paper["visualization"].get("key") == key
+            ]
+        if len(packages) != 1:
+            raise KeyError(key)
+        directory = Path(packages[0]["directory"]).resolve()
+        roots = [*self.paths, self.manuscripts]
+        if not any(_relative_to(directory, root.resolve()) for root in roots):
+            raise KeyError(key)
+        return directory
+
+    def visualization_file(self, key: str, relative: str) -> Path:
+        """Resolve a resource from a catalogued visualization package."""
+        directory = self.visualization_directory(key)
+        if relative in visualizations.READER_FILES:
+            return READER_DIRECTORY / relative
+        try:
+            return visualizations.resolve_file(directory, relative)
+        except (FileNotFoundError, ValueError) as exc:
+            raise KeyError(key) from exc
+
+    def quick_explain(self, key: str, body: object, *, runner=None) -> dict:
+        """Answer one reader note now with a small Codex turn."""
+        directory = self.visualization_directory(key)
+        if not isinstance(body, dict) or not isinstance(body.get("note"), dict):
+            raise ValueError("a note is required")
+        with self.notes_lock:
+            note = visualizations.add_note(directory, body["note"])
+        source = directory.parent
+        argv = [
+            sys.executable, "-u", str(PROJECT_ROOT / "src" / "explain_note.py"),
+            str(source), "--note-id", note["id"],
+        ]
+        run = runner or (lambda command: subprocess.run(
+            command, cwd=str(PROJECT_ROOT), capture_output=True, text=True,
+            encoding="utf-8", timeout=300, check=False,
+        ))
+        try:
+            completed = run(argv)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise RuntimeError(f"could not run the quick explanation: {exc}") from exc
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout or "").strip().splitlines()
+            raise RuntimeError(detail[-1] if detail else f"quick explanation exited with {completed.returncode}")
+        try:
+            payload = json.loads((completed.stdout or "").strip().splitlines()[-1])
+        except (ValueError, IndexError) as exc:
+            raise RuntimeError("quick explanation produced no result") from exc
+        annotations = common.load_json(directory / visualizations.ANNOTATIONS_NAME)
+        return {
+            "note": note["id"],
+            "explanation": payload.get("explanation"),
+            "explanations": (annotations or {}).get("explanations", []) if isinstance(annotations, dict) else [],
+            "glossary": (annotations or {}).get("glossary", []) if isinstance(annotations, dict) else [],
+            "notes": visualizations.load_notes(directory),
+        }
+
+    def quick_fix_widget(self, key: str, body: object, *, runner=None) -> dict:
+        """Apply a reader's fix request to a widget with a small Codex turn."""
+        directory = self.visualization_directory(key)
+        if not isinstance(body, dict) or not isinstance(body.get("note"), dict):
+            raise ValueError("a note is required")
+        with self.notes_lock:
+            note = visualizations.add_note(directory, body["note"])
+        if not note.get("widget"):
+            raise ValueError("the note must name a widget")
+        argv = [
+            sys.executable, "-u", str(PROJECT_ROOT / "src" / "fix_widget.py"),
+            str(directory.parent), "--note-id", note["id"],
+        ]
+        run = runner or (lambda command: subprocess.run(
+            command, cwd=str(PROJECT_ROOT), capture_output=True, text=True,
+            encoding="utf-8", timeout=1000, check=False,
+        ))
+        try:
+            completed = run(argv)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise RuntimeError(f"could not run the quick fix: {exc}") from exc
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout or "").strip().splitlines()
+            raise RuntimeError(detail[-1] if detail else f"quick fix exited with {completed.returncode}")
+        try:
+            payload = json.loads((completed.stdout or "").strip().splitlines()[-1])
+        except (ValueError, IndexError) as exc:
+            raise RuntimeError("quick fix produced no result") from exc
+        record = visualizations.discover(directory.parent) or {}
+        return {
+            "note": note["id"],
+            "widget": payload.get("widget"),
+            "summary": payload.get("summary", ""),
+            "widgets": record.get("widgets", []),
+            "notes": visualizations.load_notes(directory),
+        }
+
+    def update_notes(self, key: str, body: object) -> dict:
+        """Add or remove one reader note and return the current list."""
+        directory = self.visualization_directory(key)
+        with self.notes_lock:
+            return self._update_notes(directory, body)
+
+    def _update_notes(self, directory: Path, body: object) -> dict:
+        if not isinstance(body, dict):
+            raise ValueError("request body must be an object")
+        action = body.get("action")
+        if action == "add":
+            note = body.get("note")
+            if not isinstance(note, dict):
+                raise ValueError("note is required")
+            visualizations.add_note(directory, note)
+        elif action == "remove":
+            note_id = body.get("id")
+            if not isinstance(note_id, str) or not visualizations.NOTE_ID_RE.fullmatch(note_id):
+                raise ValueError("a note id is required")
+            visualizations.remove_note(directory, note_id)
+        elif action != "list":
+            raise ValueError("action must be add, remove, or list")
+        return {
+            "notes": visualizations.load_notes(directory),
+            "explanations": visualizations.load_explanations(directory),
+        }
+
     def close(self) -> None:
         self.stopping.set()
         self.pending.set()
@@ -1222,9 +1381,15 @@ class ChangeHandler(FileSystemEventHandler):
     def relevant_file(path: str) -> bool:
         value = Path(path)
         parts = {part.casefold() for part in value.parts}
+        if value.name.casefold() in LIVE_READER_FILES:
+            return False
         return (
             value.name.casefold() in CATALOG_FILE_NAMES
-            or bool(parts.intersection({"artifacts", "figures", "code"}))
+            or bool(
+                parts.intersection(
+                    {"artifacts", "figures", "code", visualizations.DIRECTORY_NAME}
+                )
+            )
         )
 
     @staticmethod
@@ -2200,6 +2365,13 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
             elif path == "/api/review-detail":
                 key = parse_qs(parsed.query).get("key", [""])[0]
                 self.send_json(self.app.catalog.review_detail(key))
+            elif match := re.fullmatch(
+                r"/api/visualizations/([0-9a-f]{24})/(.+)", path
+            ):
+                resource = self.app.catalog.visualization_file(
+                    match.group(1), unquote(match.group(2))
+                )
+                self._send_visualization_file(resource)
             elif path == "/api/jobs":
                 self.send_json({"jobs": self.app.store.list_jobs()})
             elif match := re.fullmatch(r"/api/jobs/([0-9a-f-]+)", path):
@@ -2275,6 +2447,37 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/plans":
                 self.send_json(self.app.create_plan(body), 201)
+            elif match := re.fullmatch(
+                r"/api/visualizations/([0-9a-f]{24})/fix-widget", parsed.path
+            ):
+                try:
+                    self.send_json(self.app.catalog.quick_fix_widget(match.group(1), body))
+                except KeyError:
+                    self.send_error_json(404, "visualization not found")
+                except ValueError as exc:
+                    self.send_error_json(400, str(exc))
+                except RuntimeError as exc:
+                    self.send_error_json(502, str(exc))
+            elif match := re.fullmatch(
+                r"/api/visualizations/([0-9a-f]{24})/explain", parsed.path
+            ):
+                try:
+                    self.send_json(self.app.catalog.quick_explain(match.group(1), body))
+                except KeyError:
+                    self.send_error_json(404, "visualization not found")
+                except ValueError as exc:
+                    self.send_error_json(400, str(exc))
+                except RuntimeError as exc:
+                    self.send_error_json(502, str(exc))
+            elif match := re.fullmatch(
+                r"/api/visualizations/([0-9a-f]{24})/notes", parsed.path
+            ):
+                try:
+                    self.send_json(self.app.catalog.update_notes(match.group(1), body))
+                except KeyError:
+                    self.send_error_json(404, "visualization not found")
+                except ValueError as exc:
+                    self.send_error_json(400, str(exc))
             elif parsed.path == "/api/paper-imports":
                 self.send_json(self.app.create_paper_import(), 201)
             elif match := re.fullmatch(
@@ -2422,6 +2625,47 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                     break
                 self.wfile.write(chunk)
                 remaining -= len(chunk)
+
+    def _send_visualization_file(self, path: Path) -> None:
+        """Serve one sandboxed app resource with a network-denying policy."""
+        data = path.read_bytes()
+        content_type = (
+            mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        )
+        if path.suffix.casefold() in {
+            ".html", ".css", ".js", ".json", ".md", ".svg", ".txt"
+        }:
+            content_type += "; charset=utf-8"
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        # A sandboxed iframe without allow-same-origin has the opaque `null`
+        # origin. Scope this CORS exception to package resources so local
+        # fetch loads work without exposing the Workbench API. The reader
+        # itself loads KaTeX from the same CDN the workbench already uses.
+        self.send_header("Access-Control-Allow-Origin", "null")
+        # The sandboxed reader has an opaque origin, so `frame-ancestors
+        # 'self'` would never match; allow only the workbench host that
+        # served this request to embed it.
+        host = re.sub(r"[^A-Za-z0-9.:\[\]-]", "", self.headers.get("Host") or "")
+        ancestors = f"http://{host} https://{host}" if host else "'none'"
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'none'; "
+            f"script-src 'self' {READER_CDN}; "
+            f"style-src 'self' 'unsafe-inline' {READER_CDN}; "
+            "img-src 'self' data: blob:; "
+            f"font-src 'self' data: {READER_CDN}; "
+            "media-src 'self' data: blob:; "
+            "connect-src 'self'; object-src 'none'; frame-src 'none'; "
+            "worker-src 'none'; base-uri 'none'; form-action 'none'; "
+            f"frame-ancestors {ancestors}",
+        )
+        self.end_headers()
+        self.wfile.write(data)
 
     def _send_manuscript_zip(self, value: str) -> None:
         if not value:

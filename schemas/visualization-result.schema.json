@@ -1,0 +1,43 @@
+{
+  "type": "object",
+  "properties": {
+    "status": {"type": "string", "enum": ["complete", "partial"]},
+    "summary": {"type": "string"},
+    "annotations_updated": {"type": "boolean"},
+    "widgets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,80}$"},
+          "anchor": {"type": "string"},
+          "kind": {"type": "string", "enum": ["statement", "proof"]},
+          "title": {"type": "string"},
+          "summary": {"type": "string"},
+          "limitations": {"type": "array", "items": {"type": "string"}},
+          "files": {"type": "array", "minItems": 2, "items": {"type": "string"}}
+        },
+        "required": ["id", "anchor", "kind", "title", "summary", "limitations", "files"],
+        "additionalProperties": false
+      }
+    },
+    "verification_checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {"type": "string"},
+          "method": {"type": "string"},
+          "result": {"type": "string", "enum": ["passed", "warning"]},
+          "details": {"type": "string"}
+        },
+        "required": ["name", "method", "result", "details"],
+        "additionalProperties": false
+      }
+    },
+    "notes_addressed": {"type": "array", "items": {"type": "string"}},
+    "warnings": {"type": "array", "items": {"type": "string"}}
+  },
+  "required": ["status", "summary", "annotations_updated", "widgets", "verification_checks", "warnings"],
+  "additionalProperties": false
+}

@@ -253,6 +253,16 @@ button { color: inherit; }
 .button.danger { border-color: #d6a39d; color: var(--red); }
 .button:disabled { opacity: .55; cursor: wait; }
 
+.reader-panel { display: grid; gap: 10px; }
+.reader-panel-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.reader-panel-head h2 { margin: 0; }
+.reader-panel-head .badges { margin: 0; flex: 1; }
+.reader-panel-hint { color: var(--muted); font-size: 12px; }
+.reader-panel-warning { margin: 0; color: var(--amber); font-size: 12px; }
+.reader-frame { width: 100%; min-height: min(860px, calc(100vh - 140px)); border: 1px solid var(--line-strong); border-radius: 11px; background: white; box-shadow: var(--shadow); }
+.reader-panel.fullscreen { position: fixed; inset: 0; z-index: 60; margin: 0; border-radius: 0; padding: 10px 14px; background: var(--surface); }
+.reader-panel.fullscreen .reader-frame { min-height: 0; flex: 1; height: calc(100vh - 70px); }
+
 .badges { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 7px; }
 .badge { display: inline-flex; align-items: center; border-radius: 999px; padding: 3px 6px; background: var(--accent-soft); color: var(--accent); font-size: 9px; font-weight: 850; text-transform: uppercase; letter-spacing: .06em; }
 .badge.warn, .badge.running, .badge.queued { background: var(--amber-soft); color: var(--amber); }

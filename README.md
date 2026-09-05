@@ -29,7 +29,11 @@ Loose Ends enables the following research workflow:
 6. **Review attempts.** Have independent critics assess correctness, coverage,
    importance, and remaining gaps, while preserving the full research history
    for later attempts and human inspection.
-7. **Write and revise papers.** Turn selected results into traced, cited LaTeX
+7. **Read and visualize papers.** Render a manuscript as a readable web
+   page with collapsible sections and proofs, then add definition popovers,
+   an interactive widget for the main result, proof outlines, and on-demand
+   step-by-step proof widgets, each independently audited for fidelity.
+8. **Write and revise papers.** Turn selected results into traced, cited LaTeX
    manuscripts, compile them, critique them independently, and iterate toward
    expert human review.
 
@@ -138,6 +142,14 @@ Your web browser should automatically open the server at
    After the writing task finishes, switch to **Manuscripts** to open or
    download the PDF or source files, inspect the critic verdict, and
    choose **Revise** for another author-review round.
+7. **Read and visualize a draft.** In **Manuscripts**, select a draft and
+   choose **Visualize**. The draft is converted into a readable page shown in
+   the **Read** panel (collapsible sections and proofs, an outline, rendered
+   math and figures), and a designer adds definition popovers, a widget for
+   the main result, and proof outlines; a separate critic audits them.
+   Inside the reader, every statement and proof has its own **Visualize**
+   button for adding an illustration of a lemma or a step-by-step running
+   example beside a proof.
 
 Every managed task has the same two-step launch process: configure its options,
 review the exact commands and dry-run previews, and then start the runs. Once a
@@ -782,6 +794,124 @@ earlier result. Human priority is derived deterministically from those axes
 instead of being a free critic judgment. The critic does not assess novelty;
 it may use live web search only to verify an external theorem invoked by the
 attempt. Literature changes therefore do not invalidate mathematical reviews.
+
+## Read and visualize a paper
+
+`src/visualize_paper.py` turns a manuscript draft (or an arXiv paper
+directory) into a readable web page and adds reading aids to it.
+
+The conversion is deterministic and keeps the paper's own text: `pandoc`
+converts the LaTeX, this tool preserves sections, theorem-like environments,
+proofs, numbered equations, figures (TikZ and included graphics are rendered
+to SVG with `pdflatex` and `pdftocairo`), citations, and cross-references,
+and assigns identifiers to every statement, proof, and paragraph.
+
+The converter supports a documented LaTeX subset rather than arbitrary
+sources: `amsthm`/`ntheorem` style environments declared with `\newtheorem`
+(or the standard names), `proof`, `equation`/`align`/`gather`/`multline`
+(a multi-line environment is numbered as one block, and every label of it
+resolves to that block), `figure` with `\includegraphics` or `tikzpicture`,
+`table`, `thebibliography` or a `.bib` file with the common fields, and
+`\ref`/`\eqref`/`\cref`/`\cite`. `\input`/`\include` files and graphics
+must live inside the source directory; anything else is ignored with a
+warning. TikZ is compiled with shell escape disabled and file access
+restricted to the working directory. Unsupported constructs are dropped and
+reported in `document.json` `warnings` (shown in the reader). Identifiers are
+positional, so every generated file records the `document_digest` it was
+built for and the reader flags packages built for an earlier version.
+PDF-only papers cannot be converted.
+The reader (`src/workbench_web/reader/`) shows the result with collapsible
+sections and proofs, an outline, and KaTeX-rendered math.
+
+An LLM run then adds aids anchored to those identifiers:
+
+* **definition popovers**: hovering a defined term or notation shows its
+  definition and offers a jump to where the paper defines it;
+* **a main-result widget**: an interactive figure or playground beneath the
+  central theorem;
+* **proof outlines**: the 2 to 5 substantive steps of the main proofs,
+  mapped to their paragraphs and shown beside the proof;
+* **statement and proof widgets on demand**: an illustration for a lemma, or
+  a running example that advances step by step as you read a proof, with a
+  selector for the generic example and the special cases the proof
+  distinguishes, and steps that can point at a phrase inside a paragraph;
+* **background vocabulary and inline explanations**: terms the paper uses
+  without defining them get a sourced definition, and skipped side
+  computations get a small "?" bubble at the phrase in question.
+
+While reading, select any passage you do not follow and choose **I don't
+get this**, optionally adding a message. **Answer now** asks Codex for an
+immediate explanation using only the passage, its proof or statement, and
+the glossary (about 15 seconds at low reasoning effort); the answer appears
+as a bubble marked "quick answer, unreviewed", and the next full run
+verifies, promotes, or replaces it. **Add to list** keeps the note for a
+batch run instead. Notes are kept with the package, highlighted in the
+text, and listed under **Notes** in the reader toolbar; **Explain open
+notes** starts a notes-only run (medium effort, no repair rounds) that must
+address each note (as a proof step with a picture, an explanation bubble,
+or a glossary entry) and marks it as addressed. The same quick path is
+available from the command line:
+
+```sh
+python src/explain_note.py manuscripts/.../draft-002 --anchor par-48 \
+  --quote "The exterior turn at the ith corner is" --message "Why a multiple?"
+``` Proof
+  widgets declare their running examples (a generic, non-trivial default
+  plus the special cases the proof distinguishes) which the reader offers
+  in a selector, and their steps may point at a phrase inside a paragraph
+  so that one paragraph can carry several pictures.
+* **reader notes**: select any passage you do not follow and choose
+  "I don't get this", optionally with a message. Notes are saved with the
+  package, highlighted in the text, and handed to the next run, which must
+  explain each noted passage (a new proof step, glossary entry, or note)
+  and report which notes it addressed.
+
+Convert only (no LLM):
+
+```sh
+python src/visualize_paper.py manuscripts/.../draft-002 --document-only
+```
+
+Default aids (definitions, main-result widget, proof outlines) and their
+independent review:
+
+```sh
+python src/visualize_paper.py manuscripts/.../draft-002
+```
+
+Widgets for specific statements or proofs, using ids from `document.json`:
+
+```sh
+python src/visualize_paper.py manuscripts/.../draft-002 \
+  --anchor lem:tiling-completion --anchor proof-2
+```
+
+Everything is installed beneath the draft:
+
+```text
+draft-002/
+└── visualization/
+    ├── visualization.json    manifest: runs, widgets, review verdicts
+    ├── document.html         the converted paper
+    ├── document.json         sections, statements, proofs, paragraphs, ...
+    ├── figures/              rendered figures
+    ├── annotations.json      glossary, main result, proof outlines
+    ├── widgets/<id>/         widget.js, widget.json, review.json
+    └── runs/run-NNN/         logs, structured results, critique.md
+```
+
+Every run is audited by an independent critic. When the critic reports
+blocking gaps (a mathematically misleading state or an interaction defect),
+the designer gets a repair round with the full critique and the result is
+reviewed again; `--repair-rounds` (default 1, and a field in the workbench
+dialog) controls how many such rounds run before installation. Superseded
+reviews are kept under `runs/run-NNN/review-before-repair-N/`.
+
+The workbench serves the package to a sandboxed iframe: widget code never
+receives the workbench origin, network access, storage, or the parent page.
+Each widget carries the critic's fidelity and interaction verdicts, visible
+in the reader next to the widget. Reading aids are explanatory artifacts,
+not proof certificates.
 
 ## Write a paper
 

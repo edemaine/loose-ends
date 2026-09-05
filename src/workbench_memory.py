@@ -568,7 +568,9 @@ class QueueMemoryController:
             per_worker_limit_bytes(settings, self.physical_bytes)
         )
         if not self.available:
-            if desired is None:
+            if desired is None or not enforcement_supported():
+                # Platforms without a memory backend (for example macOS) run
+                # workers without a container; the limit stays advisory.
                 return None
             raise OSError(self.error or "worker memory enforcement is unavailable")
         try:
@@ -614,7 +616,7 @@ class QueueMemoryController:
             "error": self.error,
         }
         if not self.available:
-            if (os.name == "nt" or sys.platform.startswith("linux")) and desired is not None:
+            if enforcement_supported() and desired is not None:
                 snapshot["pending"] = True
             return snapshot
         try:
@@ -663,6 +665,11 @@ class QueueMemoryController:
             snapshot["error"] = self.error
             snapshot["pending"] = desired is not None
         return snapshot
+
+
+def enforcement_supported() -> bool:
+    """Return whether this platform can enforce worker memory limits at all."""
+    return os.name == "nt" or sys.platform.startswith("linux")
 
 
 def join_queue_job_from_environment() -> None:
