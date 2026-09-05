@@ -6,9 +6,7 @@ from pathlib import Path
 from typing import Mapping
 
 from . import common
-
-
-CRITIQUE_FILENAME = "critique.md"
+from visualization_contract import CRITIQUE_FILENAME
 
 
 def validate(*, workspace: Path, expectations: Mapping[str, object]) -> common.ValidationReport:

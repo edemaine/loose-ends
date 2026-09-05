@@ -24,10 +24,10 @@ import tempfile
 from typing import Sequence
 
 
-SCHEMA_VERSION = 1
-DOCUMENT_HTML = "document.html"
-DOCUMENT_JSON = "document.json"
-FIGURES_DIRECTORY = "figures"
+from visualization_contract import (
+    DOCUMENT_SCHEMA_VERSION as SCHEMA_VERSION,
+    DOCUMENT_HTML, DOCUMENT_JSON, FIGURES_DIRECTORY,
+)
 
 
 class DocumentError(RuntimeError):

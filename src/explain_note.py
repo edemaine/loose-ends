@@ -20,7 +20,6 @@ import tempfile
 
 import codex_cli
 import open_problem_common as common
-import visualize_paper
 import visualizations
 
 
@@ -169,15 +168,8 @@ def _phrase_for(result: dict, note: dict, passage: str) -> str:
     return note.get("quote", "")[:80]
 
 
-@visualizations.locked_package
 def apply_answer(package: Path, note: dict, result: dict, passage: str) -> dict:
-    """Store the quick answer in annotations.json and mark the note addressed."""
-    annotations = common.load_json(package / visualizations.ANNOTATIONS_NAME)
-    if not isinstance(annotations, dict):
-        annotations = {"glossary": [], "proof_outlines": {}}
-    explanations = annotations.setdefault("explanations", [])
-    if not isinstance(explanations, list):
-        explanations = annotations["explanations"] = []
+    """Prepare a quick explanation and hand it to the package store."""
     explanation = {
         "id": f"quick-{note['id']}",
         "anchor": note["anchor"],
@@ -191,20 +183,12 @@ def apply_answer(package: Path, note: dict, result: dict, passage: str) -> dict:
         explanation["latex"] = note["latex"]
     if result.get("needs_picture"):
         explanation["text"] += "\n\nA full visualization run may add a picture for this step."
-    superseded = {explanation["id"], note.get("revises") or ""}
-    explanations[:] = [entry for entry in explanations if entry.get("id") not in superseded]
-    explanations.append(explanation)
-    common.write_json(package / visualizations.ANNOTATIONS_NAME, annotations)
-    manifest = visualizations.load_manifest(package)
-    if manifest is not None and not manifest.get("annotations"):
-        manifest["annotations"] = visualizations.ANNOTATIONS_NAME
-        visualizations.write_manifest(package, manifest)
-    visualizations.mark_notes_addressed(package, [note["id"]], QUICK_RUN_NAME, outcome=explanation["title"])
+    visualizations.store_explanation(package, note, explanation, run_name=QUICK_RUN_NAME)
     return explanation
 
 
 def quick_answer(
-    source: visualize_paper.SourceRef,
+    source: visualizations.SourceRef,
     note: dict,
     *,
     codex: str,
@@ -258,7 +242,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        source = visualize_paper.source_from_path(args.source)
+        source = visualizations.source_from_path(args.source)
         if args.note_id:
             note = next((item for item in visualizations.load_notes(source.package) if item["id"] == args.note_id), None)
             if note is None:

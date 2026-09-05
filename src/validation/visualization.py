@@ -10,14 +10,14 @@ import subprocess
 from typing import Mapping
 
 from . import common
+from visualization_contract import (
+    ANNOTATIONS_NAME, ANNOTATION_FIELDS, ANNOTATION_VERSIONS,
+    OUTPUT_DIRECTORY, WIDGET_ENTRY_NAME, WIDGET_FIELDS, WIDGET_ID_RE,
+    WIDGET_MANIFEST_NAME, WIDGETS_DIRECTORY, WIDGET_VERSIONS,
+    widget_id as _widget_id_for,
+)
 
 
-OUTPUT_DIRECTORY = "output"
-ANNOTATIONS_NAME = "annotations.json"
-WIDGETS_DIRECTORY = "widgets"
-WIDGET_MANIFEST_NAME = "widget.json"
-WIDGET_ENTRY_NAME = "widget.js"
-WIDGET_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,80}$")
 MAX_WIDGET_FILES = 40
 MAX_WIDGET_BYTES = 4 * 1024 * 1024
 MAX_GLOSSARY = 200
@@ -43,17 +43,13 @@ def _nonempty_string(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
-def _widget_id_for(anchor: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "-", anchor.lower()).strip("-")
-    return slug or "widget"
-
-
 def validate_metadata(value: dict, reporter: common.Reporter, path: str, *, widget: bool = False) -> None:
     """Accept optional installation metadata, including on subsequent edits."""
     code = "E_WIDGET_MANIFEST" if widget else "E_ANNOTATIONS"
-    for field in (("schema_version", "api_version") if widget else ("schema_version",)):
-        if field in value and (type(value[field]) is not int or value[field] != 1):
-            reporter.error(code, f"{field} must be the supported version 1", path=path)
+    versions = WIDGET_VERSIONS if widget else ANNOTATION_VERSIONS
+    for field, version in versions.items():
+        if field in value and (type(value[field]) is not int or value[field] != version):
+            reporter.error(code, f"{field} must be the supported version {version}", path=path)
     if "document_digest" in value and not isinstance(value["document_digest"], str):
         reporter.error(code, "document_digest must be a string", path=path)
     if widget and "run" in value and not _nonempty_string(value["run"]):
@@ -71,8 +67,7 @@ def validate_annotations(
     if not isinstance(annotations, dict):
         reporter.error("E_ANNOTATIONS", "annotations must be a JSON object", path=path)
         return
-    allowed = {"main_result", "glossary", "proof_outlines", "explanations", "notes", "schema_version", "document_digest"}
-    for key in sorted(set(annotations).difference(allowed)):
+    for key in sorted(set(annotations).difference(ANNOTATION_FIELDS)):
         reporter.error("E_ANNOTATIONS", f"unknown annotations field {key!r}", path=f"{path}#/{key}")
     validate_metadata(annotations, reporter, path)
     main = annotations.get("main_result")
@@ -359,7 +354,7 @@ def validate(*, workspace: Path, expectations: Mapping[str, object]) -> common.V
             for field in ("title", "summary"):
                 if not _nonempty_string(manifest.get(field)):
                     reporter.error("E_WIDGET_MANIFEST", f"widget.json needs nonempty {field}", path=f"{relative_directory}/{WIDGET_MANIFEST_NAME}")
-            for key in sorted(set(manifest).difference({"id", "anchor", "kind", "title", "summary", "limitations", "steps", "examples", "schema_version", "api_version", "document_digest", "run"})):
+            for key in sorted(set(manifest).difference(WIDGET_FIELDS)):
                 reporter.error("E_WIDGET_MANIFEST", f"unknown widget.json field {key!r}", path=f"{relative_directory}/{WIDGET_MANIFEST_NAME}")
             validate_metadata(manifest, reporter, f"{relative_directory}/{WIDGET_MANIFEST_NAME}", widget=True)
             steps = manifest.get("steps")

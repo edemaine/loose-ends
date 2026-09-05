@@ -20,7 +20,6 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 import json
-import os
 from pathlib import Path
 import shutil
 import tempfile
@@ -28,10 +27,10 @@ import tempfile
 import codex_cli
 import open_problem_common as common
 import paper_document
+import visualization_contract
 from validation import visualization as visualization_validation
 from validation import visualization_review as review_validation
 import visualizations
-import write_paper
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -41,6 +40,7 @@ DEFAULT_REVIEW_PROMPT_PATH = PROJECT_ROOT / "prompts" / "review-visualization.md
 DEFAULT_REVIEW_SCHEMA_PATH = PROJECT_ROOT / "schemas" / "visualization-review.schema.json"
 WIDGET_API_PATH = PROJECT_ROOT / "prompts" / "visualization-widget-api.md"
 READER_DIRECTORY = PROJECT_ROOT / "src" / "workbench_web" / "reader"
+VALIDATION_DEPENDENCIES = (Path(visualization_contract.__file__).resolve(),)
 DEFAULT_ANCHOR = visualizations.DEFAULT_ANCHOR
 NOTES_ANCHOR = visualizations.NOTES_ANCHOR
 PSEUDO_ANCHORS = {DEFAULT_ANCHOR, NOTES_ANCHOR}
@@ -51,103 +51,12 @@ NOTES_ONLY_REASONING_EFFORT = "medium"
 
 
 @dataclass(frozen=True)
-class SourceRef:
-    kind: str  # "draft" or "paper"
-    directory: Path  # where the package lives
-    latex_directory: Path
-    title: str | None
-    authors: tuple[str, ...]
-    label: str
-
-    @property
-    def package(self) -> Path:
-        return visualizations.package_directory(self.directory)
-
-
-@dataclass(frozen=True)
 class RunOutcome:
-    source: SourceRef
+    source: visualizations.SourceRef
     run_directory: Path
     widgets: list[str]
     annotations_updated: bool
     review_summary: str
-
-
-def source_from_path(value: Path) -> SourceRef:
-    directory = value.expanduser().resolve()
-    if not directory.is_dir():
-        raise common.CodexError(f"visualization source must be a directory: {value}")
-    if write_paper.DRAFT_RE.fullmatch(directory.name) and (directory / "main.tex").is_file():
-        manifest = common.load_json(directory / "manifest.json")
-        manifest = manifest if isinstance(manifest, dict) else {}
-        result = common.load_json(directory / "paper-result.json")
-        result = result if isinstance(result, dict) else {}
-        title = result.get("title") or manifest.get("title") or None
-        authors = manifest.get("authors") if isinstance(manifest.get("authors"), list) else []
-        return SourceRef(
-            "draft", directory, directory,
-            title if isinstance(title, str) else None,
-            tuple(str(author) for author in authors),
-            f"{directory.parent.name}/{directory.name}",
-        )
-    if (directory / "source").is_dir() and (directory / "metadata.json").is_file():
-        metadata = common.load_json(directory / "metadata.json")
-        metadata = metadata if isinstance(metadata, dict) else {}
-        authors = metadata.get("authors") if isinstance(metadata.get("authors"), list) else []
-        return SourceRef(
-            "paper", directory, directory / "source",
-            metadata.get("title") if isinstance(metadata.get("title"), str) else None,
-            tuple(str(author) for author in authors),
-            directory.name,
-        )
-    raise common.CodexError(
-        "visualization source must be a manuscript draft-NNN directory or a "
-        f"paper directory with source/ and metadata.json: {value}"
-    )
-
-
-def ensure_document(source: SourceRef, *, rebuild: bool = False) -> tuple[dict, dict]:
-    """Return (document, manifest), converting the source when needed."""
-    package = source.package
-    with visualizations.package_lock(package):
-        manifest = visualizations.load_manifest(package)
-        document = visualizations.load_document(package)
-        if manifest is not None and document is not None and not rebuild:
-            return document, manifest
-        if document is not None and not rebuild:
-            manifest = visualizations.new_manifest(document, source=_source_record(source))
-            visualizations.write_manifest(package, manifest)
-            return document, manifest
-        try:
-            document = paper_document.build_document(
-                source.latex_directory, package,
-                title=source.title, authors=source.authors or None,
-                source_kind=source.kind, source_path=str(source.directory),
-            )
-        except paper_document.DocumentError as exc:
-            raise common.CodexError(f"could not convert {source.label}: {exc}") from exc
-        if manifest is None:
-            manifest = visualizations.new_manifest(document, source=_source_record(source))
-        else:
-            previous = manifest.get("document", {}).get("digest")
-            manifest["document"] = {
-                "digest": document["source"]["digest"],
-                "built_at": common.utc_now(),
-                "warnings": document.get("warnings", []),
-            }
-            if previous and previous != document["source"]["digest"]:
-                manifest["stale_annotations"] = True
-        visualizations.write_manifest(package, manifest)
-        return document, manifest
-
-
-def _source_record(source: SourceRef) -> dict:
-    return {
-        "kind": source.kind,
-        "path": str(source.directory),
-        "label": source.label,
-        "title": source.title,
-    }
 
 
 def resolve_anchors(document: dict, anchors: list[str]) -> list[str]:
@@ -166,7 +75,7 @@ def resolve_anchors(document: dict, anchors: list[str]) -> list[str]:
     return list(dict.fromkeys(resolved)) or [DEFAULT_ANCHOR]
 
 
-def _stage_common_inputs(workspace: Path, source: SourceRef, document: dict) -> Path:
+def _stage_common_inputs(workspace: Path, source: visualizations.SourceRef, document: dict) -> Path:
     inputs = workspace / "inputs"
     inputs.mkdir(parents=True, exist_ok=False)
     package = source.package
@@ -195,7 +104,7 @@ def _stage_common_inputs(workspace: Path, source: SourceRef, document: dict) -> 
     return inputs
 
 
-def _stage_existing(inputs: Path, source: SourceRef, manifest: dict) -> None:
+def _stage_existing(inputs: Path, source: visualizations.SourceRef, manifest: dict) -> None:
     package = source.package
     existing = inputs / "existing"
     annotations = package / visualizations.ANNOTATIONS_NAME
@@ -210,7 +119,7 @@ def _stage_existing(inputs: Path, source: SourceRef, manifest: dict) -> None:
     common.write_json(existing / visualizations.MANIFEST_NAME, manifest)
 
 
-def _reader_notes(source: SourceRef, document: dict) -> list[dict]:
+def _reader_notes(source: visualizations.SourceRef, document: dict) -> list[dict]:
     """Open reader notes with the text of the paragraph they point at."""
     text = {paragraph["id"]: paragraph.get("text", "") for paragraph in document.get("paragraphs", [])}
     described = visualizations.anchor_descriptions(document)
@@ -344,7 +253,7 @@ def _expectations(document: dict, anchors: list[str], notes: list[dict] | None =
 
 
 def _review_generated(
-    source: SourceRef,
+    source: visualizations.SourceRef,
     document: dict,
     generated_workspace: Path,
     generated_result: dict,
@@ -374,6 +283,7 @@ def _review_generated(
                 Path(review_validation.__file__).resolve(),
                 review_validation.validate,
                 {"widget_ids": widget_ids, "annotations_present": bool(generated_result.get("annotations_updated"))},
+                dependencies=VALIDATION_DEPENDENCIES,
             ),
             options=options,
             web_search=web_search,
@@ -392,145 +302,6 @@ def _archive_review(workspace: Path, review_workspace: Path, review_result: dict
         if (review_workspace / name).is_file():
             shutil.copyfile(review_workspace / name, archive / name)
     common.cleanup_workspace(review_workspace, installed_log=archive / "run.log")
-
-
-def _install(
-    source: SourceRef,
-    manifest: dict,
-    anchors: list[str],
-    generated_workspace: Path,
-    generated_result: dict,
-    review_workspace: Path | None,
-    review_result: dict | None,
-    *,
-    options: codex_cli.ModelOptions,
-    review_options: codex_cli.ModelOptions,
-    config_digest: str,
-    review_config_digest: str,
-    codex_version: str,
-    document_digest: str,
-) -> Path:
-    package = source.package
-    with visualizations.package_lock(package):
-        manifest = visualizations.load_manifest(package) or manifest
-        number = visualizations.next_run_number(package)
-        run_name = f"run-{number:03d}"
-        runs = package / visualizations.RUNS_DIRECTORY
-        runs.mkdir(exist_ok=True)
-        staging = Path(tempfile.mkdtemp(prefix=".visualization-install-", dir=package))
-        now = common.utc_now()
-        try:
-            run_directory = staging / run_name
-            run_directory.mkdir()
-            output = generated_workspace / visualization_validation.OUTPUT_DIRECTORY
-            shutil.copyfile(generated_workspace / "agent-result.json", run_directory / "agent-result.json")
-            for name in ("events.jsonl", "run.log"):
-                if (generated_workspace / name).is_file():
-                    shutil.copyfile(generated_workspace / name, run_directory / name)
-            for archive in sorted(generated_workspace.glob("review-before-repair-*")):
-                shutil.copytree(archive, run_directory / archive.name)
-            widget_reviews: dict[str, dict] = {}
-            if review_workspace is not None and review_result is not None:
-                common.write_json(run_directory / "review-result.json", review_result)
-                shutil.copyfile(review_workspace / review_validation.CRITIQUE_FILENAME, run_directory / "critique.md")
-                for name, target in (("events.jsonl", "review-events.jsonl"), ("run.log", "review-run.log")):
-                    if (review_workspace / name).is_file():
-                        shutil.copyfile(review_workspace / name, run_directory / target)
-                for review in review_result.get("widget_reviews", []):
-                    if isinstance(review, dict) and isinstance(review.get("id"), str):
-                        widget_reviews[review["id"]] = review
-            # Widgets: stage new directories, remember old ones for replacement.
-            new_widgets: list[dict] = []
-            for widget in generated_result.get("widgets", []):
-                widget_id = widget["id"]
-                target = staging / visualizations.WIDGETS_DIRECTORY / widget_id
-                shutil.copytree(output / visualizations.WIDGETS_DIRECTORY / widget_id, target)
-                if widget_id in widget_reviews:
-                    common.write_json(target / visualizations.WIDGET_REVIEW_NAME, widget_reviews[widget_id])
-                visualizations.stamp_widget_files(target, document_digest, run_name)
-                new_widgets.append({
-                    "id": widget_id,
-                    "anchor": widget["anchor"],
-                    "kind": widget["kind"],
-                    "title": widget["title"],
-                    "summary": widget["summary"],
-                    "limitations": widget.get("limitations", []),
-                    "entry": visualizations.WIDGET_ENTRY_NAME,
-                    "steps": (common.load_json(target / visualizations.WIDGET_MANIFEST_NAME) or {}).get("steps", []),
-                    "examples": (common.load_json(target / visualizations.WIDGET_MANIFEST_NAME) or {}).get("examples", []),
-                    "run": run_name,
-                    "generated_at": now,
-                    "model": options.model,
-                })
-            annotations_source = output / visualizations.ANNOTATIONS_NAME
-            staged_annotations = staging / visualizations.ANNOTATIONS_NAME
-            if annotations_source.is_file():
-                live = common.load_json(package / visualizations.ANNOTATIONS_NAME)
-                generated = common.read_json(annotations_source, description="generated annotations")
-                merged = visualizations.merge_live_annotations(
-                    live if isinstance(live, dict) else None,
-                    generated,
-                    addressed=[n for n in generated_result.get("notes_addressed", []) if isinstance(n, str)],
-                )
-                merged["schema_version"] = visualizations.ANNOTATIONS_SCHEMA_VERSION
-                merged["document_digest"] = document_digest
-                common.write_json(staged_annotations, merged)
-            # Move everything into place.
-            os.replace(run_directory, runs / run_name)
-            replaced = runs / run_name / "replaced"
-            for widget in new_widgets:
-                destination = package / visualizations.WIDGETS_DIRECTORY / widget["id"]
-                destination.parent.mkdir(exist_ok=True)
-                if destination.exists():
-                    replaced.mkdir(exist_ok=True)
-                    os.replace(destination, replaced / widget["id"])
-                os.replace(staging / visualizations.WIDGETS_DIRECTORY / widget["id"], destination)
-            if staged_annotations.is_file():
-                destination = package / visualizations.ANNOTATIONS_NAME
-                if destination.exists():
-                    replaced.mkdir(exist_ok=True)
-                    shutil.copyfile(destination, replaced / visualizations.ANNOTATIONS_NAME)
-                os.replace(staged_annotations, destination)
-                manifest["annotations"] = visualizations.ANNOTATIONS_NAME
-                manifest.pop("stale_annotations", None)
-                if review_result is not None:
-                    manifest["annotations_review"] = review_result.get("annotations_review")
-            kept = [w for w in manifest.get("widgets", []) if isinstance(w, dict) and w.get("id") not in {n["id"] for n in new_widgets}]
-            manifest["widgets"] = kept + new_widgets
-            manifest.setdefault("runs", []).append({
-                "name": run_name,
-                "generated_at": now,
-                "anchors": anchors,
-                "status": generated_result.get("status"),
-                "summary": generated_result.get("summary", ""),
-                "widgets": [widget["id"] for widget in new_widgets],
-                "annotations_updated": bool(generated_result.get("annotations_updated")),
-                "repair_rounds": int(generated_result.get("repair_rounds", 0)),
-                "review_summary": (review_result or {}).get("summary", ""),
-                "warnings": list(generated_result.get("warnings", [])) + list((review_result or {}).get("warnings", [])),
-                "config_digest": config_digest,
-                "review_config_digest": review_config_digest,
-                "codex_version": codex_version,
-                "requested_model": options.model,
-                "requested_reasoning_effort": options.reasoning_effort,
-                "requested_fast_mode": options.fast,
-                "review_model": review_options.model,
-                "review_reasoning_effort": review_options.reasoning_effort,
-                "review_fast_mode": review_options.fast,
-            })
-            addressed = [note_id for note_id in generated_result.get("notes_addressed", []) if isinstance(note_id, str)]
-            if addressed:
-                visualizations.mark_notes_addressed(package, addressed, run_name)
-                manifest["runs"][-1]["notes_addressed"] = addressed
-            manifest["generated_at"] = now
-            visualizations.write_manifest(package, manifest)
-        except (OSError, ValueError, KeyError) as exc:
-            raise common.CodexError(f"could not install visualization run; staging preserved at {staging}: {exc}") from exc
-        shutil.rmtree(staging, ignore_errors=True)
-        installed = runs / run_name
-        common.report_artifacts(path for path in package.rglob("*") if path.is_file() and path.name != ".update.lock" and visualizations.RUNS_DIRECTORY not in path.relative_to(package).parts[:1])
-        common.report_artifacts(path for path in installed.rglob("*") if path.is_file())
-        return installed
 
 
 def transient_failure(workspace: Path) -> str | None:
@@ -618,7 +389,7 @@ def _resume_prompt(rendered: str) -> str:
 
 
 def visualize(
-    source: SourceRef,
+    source: visualizations.SourceRef,
     anchors: list[str],
     *,
     codex: str,
@@ -637,7 +408,7 @@ def visualize(
     rebuild_document: bool = False,
     repair_rounds: int | None = None,
 ) -> RunOutcome:
-    document, manifest = ensure_document(source, rebuild=rebuild_document)
+    document, manifest = visualizations.ensure_document(source, rebuild=rebuild_document)
     anchors = resolve_anchors(document, anchors)
     notes_only = anchors == [NOTES_ANCHOR]
     if notes_only and not options.reasoning_effort:
@@ -663,6 +434,7 @@ def visualize(
             Path(visualization_validation.__file__).resolve(),
             visualization_validation.validate,
             _expectations(document, anchors, notes),
+            dependencies=VALIDATION_DEPENDENCIES,
         )
         retries = 0
         while True:
@@ -710,11 +482,19 @@ def visualize(
             generated_result = codex_cli.validated_result(report)
             review_workspace, review_result = None, None
         generated_result["repair_rounds"] = repairs
-        installed = _install(
-            source, manifest, anchors, workspace, generated_result, review_workspace, review_result,
-            options=options, review_options=review_options,
-            config_digest=config_digest, review_config_digest=review_config_digest,
-            codex_version=codex_version,
+        installed = visualizations.install_run(
+            source.package, manifest, anchors, workspace, generated_result, review_workspace, review_result,
+            provenance={
+                "config_digest": config_digest,
+                "review_config_digest": review_config_digest,
+                "codex_version": codex_version,
+                "requested_model": options.model,
+                "requested_reasoning_effort": options.reasoning_effort,
+                "requested_fast_mode": options.fast,
+                "review_model": review_options.model,
+                "review_reasoning_effort": review_options.reasoning_effort,
+                "review_fast_mode": review_options.fast,
+            },
             document_digest=document.get("source", {}).get("digest", ""),
         )
     except (common.CodexError, OSError, ValueError) as exc:
@@ -772,11 +552,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        sources = [source_from_path(path) for path in args.sources]
+        sources = [visualizations.source_from_path(path) for path in args.sources]
         anchors = list(dict.fromkeys(args.anchor)) or [DEFAULT_ANCHOR]
         if args.document_only:
             for source in sources:
-                document, _manifest = ensure_document(source, rebuild=True)
+                document, _manifest = visualizations.ensure_document(source, rebuild=True)
                 print(
                     f"Converted {source.label}: {len(document['sections'])} sections, "
                     f"{len(document['statements'])} statements, {len(document['proofs'])} proofs, "
@@ -804,11 +584,13 @@ def main(argv: list[str] | None = None) -> int:
         config_digest = codex_cli.semantic_config_digest(
             prompt, schema_text, options, web_search=args.web_search,
             validation_source=Path(visualization_validation.__file__).resolve(),
+            validation_dependencies=VALIDATION_DEPENDENCIES,
         )
         review_config_digest = codex_cli.semantic_config_digest(
             review_prompt, review_schema_text, review_options,
             web_search=args.review_web_search or args.web_search,
             validation_source=Path(review_validation.__file__).resolve(),
+            validation_dependencies=VALIDATION_DEPENDENCIES,
         )
     except (common.CodexError, OSError, UnicodeError, json.JSONDecodeError) as exc:
         return codex_cli.report_error(parser, exc)

@@ -1,4 +1,7 @@
-"""Discovery, layout, and path safety for paper visualization packages.
+"""Source discovery, storage, and synchronized updates for visualization packages.
+
+Command modules prepare model inputs and results; this module owns package
+updates and their locks. On-disk names and versions live in visualization_contract.
 
 A visualization package lives beside its source (for example inside a
 manuscript draft directory) and contains the converted reader document plus
@@ -17,6 +20,7 @@ LLM-generated annotations and widgets:
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import dataclass
 import errno
 from functools import wraps
 import hashlib
@@ -25,35 +29,41 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
+import tempfile
 import threading
 import time
 
 import open_problem_common as common
 import paper_document
-
-
-DIRECTORY_NAME = "visualization"
-MANIFEST_NAME = "visualization.json"
-ANNOTATIONS_NAME = "annotations.json"
-WIDGETS_DIRECTORY = "widgets"
-RUNS_DIRECTORY = "runs"
-WIDGET_MANIFEST_NAME = "widget.json"
-WIDGET_ENTRY_NAME = "widget.js"
-WIDGET_REVIEW_NAME = "review.json"
-NOTES_NAME = "notes.json"
-NOTE_ID_RE = re.compile(r"^note-[0-9]{3,}$")
-MAX_NOTES = 200
-MAX_NOTE_TEXT = 2000
-RUN_RE = re.compile(r"^run-([0-9]{3,})$")
-WIDGET_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,80}$")
-READER_FILES = {"reader.html", "reader.js", "reader.css"}
-MANIFEST_SCHEMA_VERSION = 2
-ANNOTATIONS_SCHEMA_VERSION = 1
-WIDGET_SCHEMA_VERSION = 1
-REVIEW_SCHEMA_VERSION = 1
-WIDGET_API_VERSION = 1
-DEFAULT_ANCHOR = "default"
-NOTES_ANCHOR = "notes"
+from visualization_contract import (
+    DIRECTORY_NAME,
+    MANIFEST_NAME,
+    ANNOTATIONS_NAME,
+    WIDGETS_DIRECTORY,
+    RUNS_DIRECTORY,
+    WIDGET_MANIFEST_NAME,
+    WIDGET_ENTRY_NAME,
+    WIDGET_REVIEW_NAME,
+    NOTES_NAME,
+    NOTE_ID_RE,
+    MAX_NOTES,
+    MAX_NOTE_TEXT,
+    RUN_RE,
+    WIDGET_ID_RE,
+    READER_FILES,
+    MANIFEST_SCHEMA_VERSION,
+    ANNOTATIONS_SCHEMA_VERSION,
+    WIDGET_SCHEMA_VERSION,
+    REVIEW_SCHEMA_VERSION,
+    WIDGET_API_VERSION,
+    DEFAULT_ANCHOR,
+    NOTES_ANCHOR,
+    OUTPUT_DIRECTORY,
+    CRITIQUE_FILENAME,
+    NOTES_SCHEMA_VERSION,
+    widget_id,
+)
 
 
 _PACKAGE_LOCKS: dict[Path, threading.RLock] = {}
@@ -126,6 +136,99 @@ def locked_package(function):
     return locked
 
 
+@dataclass(frozen=True)
+class SourceRef:
+    kind: str  # "draft" or "paper"
+    directory: Path  # where the package lives
+    latex_directory: Path
+    title: str | None
+    authors: tuple[str, ...]
+    label: str
+
+    @property
+    def package(self) -> Path:
+        return package_directory(self.directory)
+
+
+def source_from_path(value: Path) -> SourceRef:
+    directory = value.expanduser().resolve()
+    if not directory.is_dir():
+        raise common.CodexError(f"visualization source must be a directory: {value}")
+    if re.fullmatch(r"draft-([0-9]{3,})", directory.name) and (directory / "main.tex").is_file():
+        manifest = common.load_json(directory / "manifest.json")
+        manifest = manifest if isinstance(manifest, dict) else {}
+        result = common.load_json(directory / "paper-result.json")
+        result = result if isinstance(result, dict) else {}
+        title = result.get("title") or manifest.get("title") or None
+        authors = manifest.get("authors") if isinstance(manifest.get("authors"), list) else []
+        return SourceRef(
+            "draft", directory, directory,
+            title if isinstance(title, str) else None,
+            tuple(str(author) for author in authors),
+            f"{directory.parent.name}/{directory.name}",
+        )
+    if (directory / "source").is_dir() and (directory / "metadata.json").is_file():
+        metadata = common.load_json(directory / "metadata.json")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        authors = metadata.get("authors") if isinstance(metadata.get("authors"), list) else []
+        return SourceRef(
+            "paper", directory, directory / "source",
+            metadata.get("title") if isinstance(metadata.get("title"), str) else None,
+            tuple(str(author) for author in authors),
+            directory.name,
+        )
+    raise common.CodexError(
+        "visualization source must be a manuscript draft-NNN directory or a "
+        f"paper directory with source/ and metadata.json: {value}"
+    )
+
+
+def ensure_document(source: SourceRef, *, rebuild: bool = False) -> tuple[dict, dict]:
+    """Return (document, manifest), converting the source when needed."""
+    package = source.package
+    with package_lock(package):
+        manifest = load_manifest(package)
+        document = load_document(package)
+        if manifest is not None and document is not None and not rebuild:
+            return document, manifest
+        if document is not None and not rebuild:
+            manifest = new_manifest(document, source=_source_record(source))
+            write_manifest(package, manifest)
+            return document, manifest
+        try:
+            document = paper_document.build_document(
+                source.latex_directory, package,
+                title=source.title, authors=source.authors or None,
+                source_kind=source.kind, source_path=str(source.directory),
+            )
+        except paper_document.DocumentError as exc:
+            raise common.CodexError(f"could not convert {source.label}: {exc}") from exc
+        if manifest is None:
+            manifest = new_manifest(document, source=_source_record(source))
+        else:
+            previous = manifest.get("document", {}).get("digest")
+            manifest["document"] = {
+                "digest": document["source"]["digest"],
+                "built_at": common.utc_now(),
+                "warnings": document.get("warnings", []),
+            }
+            if previous and previous != document["source"]["digest"]:
+                manifest["stale_annotations"] = True
+        write_manifest(package, manifest)
+        return document, manifest
+
+
+def _source_record(source: SourceRef) -> dict:
+    return {
+        "kind": source.kind,
+        "path": str(source.directory),
+        "label": source.label,
+        "title": source.title,
+    }
+
+
+
+
 def package_key(directory: Path) -> str:
     """Return a URL-safe opaque identity for one package."""
     return hashlib.sha256(str(directory.resolve()).encode("utf-8")).hexdigest()[:24]
@@ -133,12 +236,6 @@ def package_key(directory: Path) -> str:
 
 def package_directory(source_directory: Path) -> Path:
     return source_directory / DIRECTORY_NAME
-
-
-def widget_id(anchor: str) -> str:
-    """Return the canonical widget directory name for an anchor."""
-    slug = re.sub(r"[^a-z0-9]+", "-", anchor.lower()).strip("-")
-    return slug or "widget"
 
 
 def load_manifest(directory: Path) -> dict | None:
@@ -181,6 +278,174 @@ def widget_records(directory: Path, manifest: dict) -> list[dict]:
         record["review"] = review if isinstance(review, dict) else None
         records.append(record)
     return records
+
+
+def install_run(
+    package: Path,
+    manifest: dict,
+    anchors: list[str],
+    generated_workspace: Path,
+    generated_result: dict,
+    review_workspace: Path | None,
+    review_result: dict | None,
+    *,
+    provenance: dict,
+    document_digest: str,
+) -> Path:
+    """Install validated run artifacts and merge live state under the package lock."""
+    with package_lock(package):
+        manifest = load_manifest(package) or manifest
+        number = next_run_number(package)
+        run_name = f"run-{number:03d}"
+        runs = package / RUNS_DIRECTORY
+        runs.mkdir(exist_ok=True)
+        staging = Path(tempfile.mkdtemp(prefix=".visualization-install-", dir=package))
+        now = common.utc_now()
+        try:
+            run_directory = staging / run_name
+            run_directory.mkdir()
+            output = generated_workspace / OUTPUT_DIRECTORY
+            shutil.copyfile(generated_workspace / "agent-result.json", run_directory / "agent-result.json")
+            for name in ("events.jsonl", "run.log"):
+                if (generated_workspace / name).is_file():
+                    shutil.copyfile(generated_workspace / name, run_directory / name)
+            for archive in sorted(generated_workspace.glob("review-before-repair-*")):
+                shutil.copytree(archive, run_directory / archive.name)
+            widget_reviews: dict[str, dict] = {}
+            if review_workspace is not None and review_result is not None:
+                common.write_json(run_directory / "review-result.json", review_result)
+                shutil.copyfile(review_workspace / CRITIQUE_FILENAME, run_directory / "critique.md")
+                for name, target in (("events.jsonl", "review-events.jsonl"), ("run.log", "review-run.log")):
+                    if (review_workspace / name).is_file():
+                        shutil.copyfile(review_workspace / name, run_directory / target)
+                for review in review_result.get("widget_reviews", []):
+                    if isinstance(review, dict) and isinstance(review.get("id"), str):
+                        widget_reviews[review["id"]] = review
+            # Widgets: stage new directories, remember old ones for replacement.
+            new_widgets: list[dict] = []
+            for widget in generated_result.get("widgets", []):
+                widget_id = widget["id"]
+                target = staging / WIDGETS_DIRECTORY / widget_id
+                shutil.copytree(output / WIDGETS_DIRECTORY / widget_id, target)
+                if widget_id in widget_reviews:
+                    common.write_json(target / WIDGET_REVIEW_NAME, widget_reviews[widget_id])
+                stamp_widget_files(target, document_digest, run_name)
+                new_widgets.append({
+                    "id": widget_id,
+                    "anchor": widget["anchor"],
+                    "kind": widget["kind"],
+                    "title": widget["title"],
+                    "summary": widget["summary"],
+                    "limitations": widget.get("limitations", []),
+                    "entry": WIDGET_ENTRY_NAME,
+                    "steps": (common.load_json(target / WIDGET_MANIFEST_NAME) or {}).get("steps", []),
+                    "examples": (common.load_json(target / WIDGET_MANIFEST_NAME) or {}).get("examples", []),
+                    "run": run_name,
+                    "generated_at": now,
+                    "model": provenance.get("requested_model"),
+                })
+            annotations_source = output / ANNOTATIONS_NAME
+            staged_annotations = staging / ANNOTATIONS_NAME
+            if annotations_source.is_file():
+                live = common.load_json(package / ANNOTATIONS_NAME)
+                generated = common.read_json(annotations_source, description="generated annotations")
+                merged = merge_live_annotations(
+                    live if isinstance(live, dict) else None,
+                    generated,
+                    addressed=[n for n in generated_result.get("notes_addressed", []) if isinstance(n, str)],
+                )
+                merged["schema_version"] = ANNOTATIONS_SCHEMA_VERSION
+                merged["document_digest"] = document_digest
+                common.write_json(staged_annotations, merged)
+            # Move everything into place.
+            os.replace(run_directory, runs / run_name)
+            replaced = runs / run_name / "replaced"
+            for widget in new_widgets:
+                destination = package / WIDGETS_DIRECTORY / widget["id"]
+                destination.parent.mkdir(exist_ok=True)
+                if destination.exists():
+                    replaced.mkdir(exist_ok=True)
+                    os.replace(destination, replaced / widget["id"])
+                os.replace(staging / WIDGETS_DIRECTORY / widget["id"], destination)
+            if staged_annotations.is_file():
+                destination = package / ANNOTATIONS_NAME
+                if destination.exists():
+                    replaced.mkdir(exist_ok=True)
+                    shutil.copyfile(destination, replaced / ANNOTATIONS_NAME)
+                os.replace(staged_annotations, destination)
+                manifest["annotations"] = ANNOTATIONS_NAME
+                manifest.pop("stale_annotations", None)
+                if review_result is not None:
+                    manifest["annotations_review"] = review_result.get("annotations_review")
+            kept = [w for w in manifest.get("widgets", []) if isinstance(w, dict) and w.get("id") not in {n["id"] for n in new_widgets}]
+            manifest["widgets"] = kept + new_widgets
+            manifest.setdefault("runs", []).append({
+                **provenance,
+                "name": run_name,
+                "generated_at": now,
+                "anchors": anchors,
+                "status": generated_result.get("status"),
+                "summary": generated_result.get("summary", ""),
+                "widgets": [widget["id"] for widget in new_widgets],
+                "annotations_updated": bool(generated_result.get("annotations_updated")),
+                "repair_rounds": int(generated_result.get("repair_rounds", 0)),
+                "review_summary": (review_result or {}).get("summary", ""),
+                "warnings": list(generated_result.get("warnings", [])) + list((review_result or {}).get("warnings", [])),
+            })
+            addressed = [note_id for note_id in generated_result.get("notes_addressed", []) if isinstance(note_id, str)]
+            if addressed:
+                mark_notes_addressed(package, addressed, run_name)
+                manifest["runs"][-1]["notes_addressed"] = addressed
+            manifest["generated_at"] = now
+            write_manifest(package, manifest)
+        except (OSError, ValueError, KeyError) as exc:
+            raise common.CodexError(f"could not install visualization run; staging preserved at {staging}: {exc}") from exc
+        shutil.rmtree(staging, ignore_errors=True)
+        installed = runs / run_name
+        common.report_artifacts(path for path in package.rglob("*") if path.is_file() and path.name != ".update.lock" and RUNS_DIRECTORY not in path.relative_to(package).parts[:1])
+        common.report_artifacts(path for path in installed.rglob("*") if path.is_file())
+        return installed
+
+
+@locked_package
+def install_quick_fix(
+    package: Path, widget_id: str, edited_directory: Path, *,
+    note_id: str, summary: str, document_digest: str, run_name: str,
+) -> None:
+    """Archive and install a checked widget, invalidate its review, and acknowledge its note."""
+    widget_directory = package / WIDGETS_DIRECTORY / widget_id
+    archive = package / RUNS_DIRECTORY / "quick-fixes" / f"{widget_id}-{common.utc_now().replace(':', '').replace('+', 'Z')}"
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(widget_directory, archive)
+    previous_review = common.load_json(widget_directory / WIDGET_REVIEW_NAME)
+    for path in edited_directory.rglob("*"):
+        if path.is_file():
+            target = widget_directory / path.relative_to(edited_directory)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(path, target)
+    # Keep the package manifest's record of this widget in step with widget.json.
+    updated_manifest = common.load_json(widget_directory / WIDGET_MANIFEST_NAME) or {}
+    package_manifest = load_manifest(package)
+    if package_manifest is not None:
+        for entry in package_manifest.get("widgets", []):
+            if isinstance(entry, dict) and entry.get("id") == widget_id:
+                for field in ("title", "summary", "steps", "examples", "limitations"):
+                    if field in updated_manifest:
+                        entry[field] = updated_manifest[field]
+                entry["quick_fixes"] = int(entry.get("quick_fixes") or 0) + 1
+        write_manifest(package, package_manifest)
+    common.write_json(widget_directory / WIDGET_REVIEW_NAME, {
+        "schema_version": REVIEW_SCHEMA_VERSION,
+        "document_digest": document_digest,
+        "fidelity": "unreviewed",
+        "interaction_quality": "unreviewed",
+        "summary": f"Quick fix applied without review: {summary}",
+        "findings": [],
+        "blocking_gaps": [],
+        "provenance": "quick",
+        "previous_review": previous_review if isinstance(previous_review, dict) else None,
+    })
+    mark_notes_addressed(package, [note_id], run_name, outcome=summary)
 
 
 def stamp_widget_files(widget_directory: Path, document_digest: str, run_name: str) -> None:
@@ -279,7 +544,7 @@ def load_notes(directory: Path) -> list[dict]:
 
 
 def write_notes(directory: Path, notes: list[dict]) -> None:
-    common.write_json(directory / NOTES_NAME, {"schema_version": 1, "notes": notes})
+    common.write_json(directory / NOTES_NAME, {"schema_version": NOTES_SCHEMA_VERSION, "notes": notes})
 
 
 @locked_package
@@ -355,6 +620,26 @@ def remove_note(directory: Path, note_id: str) -> bool:
             annotations["explanations"] = remaining
             common.write_json(directory / ANNOTATIONS_NAME, annotations)
     return True
+
+
+@locked_package
+def store_explanation(directory: Path, note: dict, explanation: dict, *, run_name: str) -> None:
+    """Save a prepared explanation and acknowledge its note in one package update."""
+    annotations = common.load_json(directory / ANNOTATIONS_NAME)
+    if not isinstance(annotations, dict):
+        annotations = {"glossary": [], "proof_outlines": {}}
+    explanations = annotations.setdefault("explanations", [])
+    if not isinstance(explanations, list):
+        explanations = annotations["explanations"] = []
+    superseded = {explanation["id"], note.get("revises") or ""}
+    explanations[:] = [entry for entry in explanations if entry.get("id") not in superseded]
+    explanations.append(explanation)
+    common.write_json(directory / ANNOTATIONS_NAME, annotations)
+    manifest = load_manifest(directory)
+    if manifest is not None and not manifest.get("annotations"):
+        manifest["annotations"] = ANNOTATIONS_NAME
+        write_manifest(directory, manifest)
+    mark_notes_addressed(directory, [note["id"]], run_name, outcome=explanation["title"])
 
 
 def load_explanations(directory: Path) -> list:

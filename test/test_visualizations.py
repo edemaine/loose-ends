@@ -2,6 +2,7 @@ import json
 import multiprocessing
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 from tempfile import TemporaryDirectory
 import threading
@@ -20,6 +21,7 @@ import open_problem_common as common
 import paper_document
 import visualize_paper
 import visualizations
+import visualization_contract
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -83,22 +85,51 @@ Figure~\ref{fig:one} shows it.
 """
 
 
-def make_widget(workspace):
-    directory = workspace / "output" / "widgets" / "thm-main"
-    directory.mkdir(parents=True)
-    manifest = {"id": "thm-main", "anchor": "thm:main", "kind": "statement", "title": "T", "summary": "S"}
-    common.write_json(directory / "widget.json", manifest)
-    (directory / "widget.js").write_text('LooseEnds.registerWidget("thm-main", function(c, api) {return {};});', encoding="utf-8")
-    return directory, manifest
+def sample_expectations() -> dict:
+    return {
+        "anchors": ["default", "proof-1"],
+        "annotations_required": True,
+        "document_ids": {"thm:main": "theorem", "lem:one": "lemma", "proof-1": "proof", "par-1": "paragraph", "par-2": "paragraph", "par-3": "paragraph", "sec:intro": "section"},
+        "proof_paragraphs": {"proof-1": ["par-2", "par-3"]},
+        "paragraph_text": {"par-2": "Choose a side $s_0$ and reflect the polygon across it.", "par-3": "Then every vertex stays in the lattice."},
+        "note_ids": ["note-001"],
+        "result_schema": json.loads((PROJECT_ROOT / "schemas" / "visualization-result.schema.json").read_text(encoding="utf-8")),
+    }
+
+
+def write_widget(workspace: Path, widget_id: str = "thm-main", anchor: str = "thm:main", kind: str = "statement", steps=None, script=None, examples=None) -> dict:
+    directory = workspace / "output" / "widgets" / widget_id
+    directory.mkdir(parents=True, exist_ok=True)
+    manifest = {"id": widget_id, "anchor": anchor, "kind": kind, "title": "T", "summary": "S"}
+    if steps is not None:
+        manifest["steps"] = steps
+    if examples is not None:
+        manifest["examples"] = examples
+    (directory / "widget.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (directory / "widget.js").write_text(
+        script if script is not None else f'LooseEnds.registerWidget("{widget_id}", function (c, api) {{ return {{ setStep() {{}} }}; }});',
+        encoding="utf-8",
+    )
+    return {
+        "id": widget_id, "anchor": anchor, "kind": kind, "title": "T", "summary": "S", "limitations": [],
+        "files": [f"output/widgets/{widget_id}/widget.json", f"output/widgets/{widget_id}/widget.js"],
+    }
+
+
+def sample_result(widgets: list) -> dict:
+    return {
+        "status": "complete", "summary": "Done.", "annotations_updated": True, "widgets": widgets,
+        "verification_checks": [{"name": "syntax", "method": "node --check", "result": "passed", "details": "ok"}],
+        "warnings": [],
+    }
 
 
 def install(source, workspace, widgets=(), manifest=None):
     result = {"widgets": list(widgets), "annotations_updated": True, "notes_addressed": ["note-001"]}
     common.write_json(workspace / "agent-result.json", result)
-    return visualize_paper._install(
-        source, manifest or {}, [], workspace, result, None, None,
-        options=codex_cli.ModelOptions(), review_options=codex_cli.ModelOptions(),
-        config_digest="", review_config_digest="", codex_version="test", document_digest="digest-1",
+    return visualizations.install_run(
+        source.package, manifest or {}, [], workspace, result, None, None,
+        provenance={"codex_version": "test"}, document_digest="digest-1",
     )
 
 
@@ -374,7 +405,7 @@ class InstallMergeTests(unittest.TestCase):
         for with_widget in (False, True):
             with self.subTest(with_widget=with_widget), TemporaryDirectory() as temporary:
                 root = Path(temporary)
-                source = visualize_paper.SourceRef("draft", root, root, "Test", (), "test")
+                source = visualizations.SourceRef("draft", root, root, "Test", (), "test")
                 source.package.mkdir()
                 workspace = root / "generated"
                 (workspace / "output").mkdir(parents=True)
@@ -385,7 +416,7 @@ class InstallMergeTests(unittest.TestCase):
                 visualizations.write_manifest(source.package, {"widgets": [], "runs": [], "live_field": "preserve"})
                 widgets = []
                 if with_widget:
-                    _, widget = make_widget(workspace)
+                    widget = write_widget(workspace)
                     widgets.append(widget)
                 with patch.object(common, "report_artifacts"):
                     installed = install(source, workspace, widgets, manifest={"outdated": True})
@@ -406,10 +437,10 @@ class InstallMergeTests(unittest.TestCase):
     def test_failed_stamping_does_not_replace_live_widgets_or_install_a_run(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
-            source = visualize_paper.SourceRef("draft", root, root, "Test", (), "test")
+            source = visualizations.SourceRef("draft", root, root, "Test", (), "test")
             source.package.mkdir()
             workspace = root / "generated"
-            _, widget = make_widget(workspace)
+            widget = write_widget(workspace)
             destination = source.package / "widgets" / "thm-main"
             destination.mkdir(parents=True)
             (destination / "widget.js").write_text("old widget", encoding="utf-8")
@@ -422,10 +453,10 @@ class InstallMergeTests(unittest.TestCase):
     def test_invalid_annotations_fail_before_replacing_live_widget(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
-            source = visualize_paper.SourceRef("draft", root, root, "Test", (), "test")
+            source = visualizations.SourceRef("draft", root, root, "Test", (), "test")
             source.package.mkdir()
             workspace = root / "generated"
-            _, widget = make_widget(workspace)
+            widget = write_widget(workspace)
             (workspace / "output" / "annotations.json").write_text("not JSON", encoding="utf-8")
             with self.assertRaises(common.CodexError):
                 install(source, workspace, [widget])
@@ -466,6 +497,40 @@ class InstallMergeTests(unittest.TestCase):
 
 
 class QuickFixTests(unittest.TestCase):
+    def test_package_store_installs_a_quick_fix_and_updates_provenance(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            widget = write_widget(root)
+            package = root / "output"
+            directory = package / "widgets" / widget["id"]
+            previous_script = (directory / "widget.js").read_text(encoding="utf-8")
+            previous_review = {"fidelity": "well_supported", "summary": "Reviewed original"}
+            common.write_json(directory / "review.json", previous_review)
+            visualizations.write_manifest(package, {"widgets": [widget], "runs": []})
+            note = visualizations.add_note(package, {"anchor": "thm:main", "quote": "fix", "widget": widget["id"]})
+            write_widget(root / "edit", script='LooseEnds.registerWidget("thm-main", () => ({fixed: true}));')
+            edited = root / "edit" / "output" / "widgets" / widget["id"]
+            metadata = common.load_json(edited / "widget.json")
+            metadata["title"] = "Fixed title"
+            common.write_json(edited / "widget.json", metadata)
+
+            visualizations.install_quick_fix(
+                package, widget["id"], edited, note_id=note["id"],
+                summary="Fixed display", document_digest="digest-1", run_name="quick-fix",
+            )
+
+            self.assertEqual((directory / "widget.js").read_text(encoding="utf-8"), (edited / "widget.js").read_text(encoding="utf-8"))
+            archives = list((package / "runs" / "quick-fixes").iterdir())
+            self.assertEqual(len(archives), 1)
+            self.assertEqual((archives[0] / "widget.js").read_text(encoding="utf-8"), previous_script)
+            review = common.load_json(directory / "review.json")
+            self.assertEqual(review["previous_review"], previous_review)
+            self.assertEqual(review["fidelity"], "unreviewed")
+            self.assertEqual(review["document_digest"], "digest-1")
+            installed = visualizations.load_manifest(package)["widgets"][0]
+            self.assertEqual((installed["title"], installed["quick_fixes"]), ("Fixed title", 1))
+            self.assertEqual(visualizations.find_note(package, note["id"])["addressed_run"], "quick-fix")
+
     def test_widget_notes_require_an_installed_widget(self):
         with TemporaryDirectory() as temporary:
             package = Path(temporary)
@@ -523,7 +588,7 @@ class PackageConcurrencyTests(unittest.TestCase):
     def test_full_install_cannot_overwrite_an_answer_finishing_during_merge(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
-            source = visualize_paper.SourceRef("draft", root, root, "Test", (), "test")
+            source = visualizations.SourceRef("draft", root, root, "Test", (), "test")
             package = source.package
             package.mkdir()
             workspace = root / "generated"
@@ -743,8 +808,20 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(record["statementCount"], 3)
 
 
-@unittest.skipUnless(HAS_PANDOC, "pandoc is required to convert LaTeX")
 class VisualizeDriverTests(unittest.TestCase):
+    def test_cli_uses_package_discovery_for_dry_run_and_document_only(self):
+        with TemporaryDirectory() as temporary:
+            source = Path(temporary) / "draft-001"
+            source.mkdir()
+            (source / "main.tex").write_text(SAMPLE_TEX, encoding="utf-8")
+            with patch("builtins.print"):
+                self.assertEqual(visualize_paper.main([str(source), "--dry-run"]), 0)
+            document = {"sections": [], "statements": [], "proofs": [], "figures": [], "warnings": []}
+            with patch.object(visualizations, "ensure_document", return_value=(document, {})) as build, patch("builtins.print"):
+                self.assertEqual(visualize_paper.main([str(source), "--document-only"]), 0)
+            self.assertEqual(build.call_args.args[0].directory, source.resolve())
+            self.assertEqual(build.call_args.kwargs, {"rebuild": True})
+
     def test_source_from_path_accepts_drafts_and_papers_only(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -752,16 +829,17 @@ class VisualizeDriverTests(unittest.TestCase):
             draft.mkdir()
             (draft / "main.tex").write_text(SAMPLE_TEX, encoding="utf-8")
             (draft / "manifest.json").write_text(json.dumps({"title": "T", "authors": ["A"]}), encoding="utf-8")
-            source = visualize_paper.source_from_path(draft)
+            source = visualizations.source_from_path(draft)
             self.assertEqual((source.kind, source.title, source.authors), ("draft", "T", ("A",)))
             paper = root / "arXiv-1.2v1"
             (paper / "source").mkdir(parents=True)
             (paper / "metadata.json").write_text(json.dumps({"title": "P", "authors": ["B", "C"]}), encoding="utf-8")
-            source = visualize_paper.source_from_path(paper)
+            source = visualizations.source_from_path(paper)
             self.assertEqual((source.kind, source.latex_directory.name), ("paper", "source"))
             with self.assertRaises(codex_cli.CodexError):
-                visualize_paper.source_from_path(root)
+                visualizations.source_from_path(root)
 
+    @unittest.skipUnless(HAS_PANDOC, "pandoc is required to convert LaTeX")
     def test_ensure_document_builds_once_and_resolves_anchors(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -769,10 +847,10 @@ class VisualizeDriverTests(unittest.TestCase):
             draft.mkdir()
             (draft / "main.tex").write_text(SAMPLE_TEX, encoding="utf-8")
             (draft / "manifest.json").write_text("{}", encoding="utf-8")
-            source = visualize_paper.source_from_path(draft)
-            document, manifest = visualize_paper.ensure_document(source)
+            source = visualizations.source_from_path(draft)
+            document, manifest = visualizations.ensure_document(source)
             built_at = manifest["document"]["built_at"]
-            document_again, manifest_again = visualize_paper.ensure_document(source)
+            document_again, manifest_again = visualizations.ensure_document(source)
             self.assertEqual(manifest_again["document"]["built_at"], built_at)
             self.assertEqual(document_again["statements"], document["statements"])
             self.assertEqual(visualize_paper.resolve_anchors(document, ["default", "thm:main", "proof-1", "thm:main"]), ["default", "thm:main", "proof-1"])
@@ -834,49 +912,63 @@ class VisualizeDriverTests(unittest.TestCase):
         self.assertEqual((inherited.model, inherited.reasoning_effort, inherited.fast), ("critic", "xhigh", True))
 
 
-def sample_expectations() -> dict:
-    return {
-        "anchors": ["default", "proof-1"],
-        "annotations_required": True,
-        "document_ids": {"thm:main": "theorem", "lem:one": "lemma", "proof-1": "proof", "par-1": "paragraph", "par-2": "paragraph", "par-3": "paragraph", "sec:intro": "section"},
-        "proof_paragraphs": {"proof-1": ["par-2", "par-3"]},
-        "paragraph_text": {"par-2": "Choose a side $s_0$ and reflect the polygon across it.", "par-3": "Then every vertex stays in the lattice."},
-        "note_ids": ["note-001"],
-        "result_schema": json.loads((PROJECT_ROOT / "schemas" / "visualization-result.schema.json").read_text(encoding="utf-8")),
-    }
-
-
-def write_widget(workspace: Path, widget_id: str, anchor: str, kind: str, steps=None, script=None, examples=None) -> dict:
-    directory = workspace / "output" / "widgets" / widget_id
-    directory.mkdir(parents=True, exist_ok=True)
-    manifest = {"id": widget_id, "anchor": anchor, "kind": kind, "title": "T", "summary": "S"}
-    if steps is not None:
-        manifest["steps"] = steps
-    if examples is not None:
-        manifest["examples"] = examples
-    (directory / "widget.json").write_text(json.dumps(manifest), encoding="utf-8")
-    (directory / "widget.js").write_text(
-        script if script is not None else f'LooseEnds.registerWidget("{widget_id}", function (c, api) {{ return {{ setStep() {{}} }}; }});',
-        encoding="utf-8",
-    )
-    return {
-        "id": widget_id, "anchor": anchor, "kind": kind, "title": "T", "summary": "S", "limitations": [],
-        "files": [f"output/widgets/{widget_id}/widget.json", f"output/widgets/{widget_id}/widget.js"],
-    }
-
-
-def sample_result(widgets: list) -> dict:
-    return {
-        "status": "complete", "summary": "Done.", "annotations_updated": True, "widgets": widgets,
-        "verification_checks": [{"name": "syntax", "method": "node --check", "result": "passed", "details": "ok"}],
-        "warnings": [],
-    }
-
-
 class VisualizationValidationTests(unittest.TestCase):
+    def test_validated_runs_preserve_dependency_staging_and_permissions(self):
+        with TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            schema = workspace / "result.schema.json"
+            common.write_json(schema, {})
+            validator = codex_cli.OutputValidator(
+                Path(visualization_validation.__file__),
+                lambda **kwargs: validation_common.ValidationReport(result={}), {},
+                dependencies=visualize_paper.VALIDATION_DEPENDENCIES,
+            )
+            with patch.object(codex_cli, "run_structured_codex") as run, patch.object(codex_cli, "grant_sandbox_read_access") as grant:
+                report = codex_cli.run_validated_codex(
+                    codex="unused", workspace=workspace, prompt="test", schema_path=schema, validator=validator,
+                )
+            self.assertTrue(report.valid)
+            run.assert_called_once()
+            dependency = workspace / "visualization_contract.py"
+            self.assertTrue(dependency.is_file())
+            self.assertIn((dependency,), [call.args for call in grant.call_args_list])
+
+    def test_staged_validators_import_the_shared_contract_without_the_repository(self):
+        for validator_module in (visualization_validation, review_validation):
+            with self.subTest(validator=validator_module.__name__), TemporaryDirectory() as temporary:
+                workspace = Path(temporary)
+                validator = codex_cli.OutputValidator(
+                    Path(validator_module.__file__), validator_module.validate, {},
+                    dependencies=visualize_paper.VALIDATION_DEPENDENCIES,
+                )
+                codex_cli.stage_output_validator(workspace, validator)
+                staged = workspace / "visualization_contract.py"
+                self.assertEqual(staged.read_bytes(), Path(visualization_contract.__file__).read_bytes())
+                self.assertEqual({path.name for path in workspace.iterdir()}, {"validation", "visualization_contract.py"})
+                completed = subprocess.run(
+                    [sys.executable, "-E", "-c", "import validation.validate; import visualization_contract; assert 'run' in visualization_contract.WIDGET_FIELDS"],
+                    cwd=workspace, capture_output=True, text=True, timeout=20, check=False,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_contract_changes_invalidate_the_configuration_digest(self):
+        with TemporaryDirectory() as temporary:
+            dependency = Path(temporary) / "visualization_contract.py"
+            shutil.copyfile(visualization_contract.__file__, dependency)
+            arguments = {
+                "validation_source": Path(visualization_validation.__file__),
+                "validation_dependencies": (dependency,),
+            }
+            before = codex_cli.semantic_config_digest("prompt", "{}", codex_cli.ModelOptions(), **arguments)
+            dependency.write_text(dependency.read_text(encoding="utf-8").replace("WIDGET_API_VERSION = 1", "WIDGET_API_VERSION = 2"), encoding="utf-8")
+            after = codex_cli.semantic_config_digest("prompt", "{}", codex_cli.ModelOptions(), **arguments)
+            self.assertNotEqual(before, after)
+
     def test_stamped_widgets_pass_quick_fix_validation(self):
         with TemporaryDirectory() as temporary:
-            directory, manifest = make_widget(Path(temporary))
+            workspace = Path(temporary)
+            manifest = write_widget(workspace)
+            directory = workspace / "output" / "widgets" / manifest["id"]
             self.assertEqual(fix_widget.check_widget(directory, "thm-main", manifest), [])
             visualizations.stamp_widget_files(directory, "digest", "run-001")
             self.assertEqual(fix_widget.check_widget(directory, "thm-main", manifest), [])
