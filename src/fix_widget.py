@@ -18,6 +18,7 @@ import tempfile
 
 import codex_cli
 import open_problem_common as common
+import paper_document
 from validation import common as validation_common
 from validation import visualization as visualization_validation
 import visualize_paper
@@ -83,26 +84,48 @@ def render_prompt(widget: dict, note: dict, document_title: str, previous: dict 
     return "\n".join(lines)
 
 
-def check_widget(directory: Path, widget_id: str, original_manifest: dict) -> list[str]:
-    """Return problems with the edited widget, using the pipeline's checks."""
-    reporter = validation_common.Reporter()
-    entry = directory / visualizations.WIDGET_ENTRY_NAME
-    if not entry.is_file():
-        return ["widget.js is missing"]
-    visualization_validation.validate_widget_script(entry, widget_id, reporter, "widget/widget.js")
+def check_widget(directory: Path, widget_id: str, original_manifest: dict, document: dict | None = None) -> list[str]:
+    """Return problems with the edited widget, using the pipeline's full validator."""
     manifest = common.load_json(directory / visualizations.WIDGET_MANIFEST_NAME)
     if not isinstance(manifest, dict):
-        reporter.error("E_WIDGET_MANIFEST", "widget.json is missing or invalid", path="widget/widget.json")
-    else:
-        for field in ("id", "anchor", "kind"):
-            if manifest.get(field) != original_manifest.get(field):
-                reporter.error("E_WIDGET_MANIFEST", f"widget.json {field} must not change", path="widget/widget.json")
-    for path in directory.rglob("*"):
-        if path.is_symlink():
-            reporter.error("E_WIDGET_FILES", f"symbolic links are not allowed: {path.name}", path="widget")
-        elif path.is_file() and path.suffix.lower() == ".html":
-            reporter.error("E_WIDGET_FILES", "widgets must not contain HTML documents", path="widget")
-    return [issue.render() for issue in reporter.issues]
+        return ["widget.json is missing or invalid"]
+    problems = []
+    for field in ("id", "anchor", "kind"):
+        if manifest.get(field) != original_manifest.get(field):
+            problems.append(f"widget.json {field} must not change")
+    anchor = str(original_manifest.get("anchor") or "")
+    document = document or {}
+    # Stage the widget the way a run's output looks and reuse the run validator.
+    with tempfile.TemporaryDirectory(prefix="le-check-") as temporary:
+        workspace = Path(temporary)
+        staged = workspace / visualization_validation.OUTPUT_DIRECTORY / visualization_validation.WIDGETS_DIRECTORY / widget_id
+        shutil.copytree(directory, staged, ignore=shutil.ignore_patterns(visualizations.WIDGET_REVIEW_NAME))
+        files = sorted(
+            f"{visualization_validation.OUTPUT_DIRECTORY}/{visualization_validation.WIDGETS_DIRECTORY}/{widget_id}/{path.relative_to(staged).as_posix()}"
+            for path in staged.rglob("*") if path.is_file() or path.is_symlink()
+        )
+        common.write_json(workspace / validation_common.AGENT_RESULT_FILENAME, {
+            "status": "complete", "summary": "quick fix", "annotations_updated": False,
+            "widgets": [{
+                "id": widget_id, "anchor": anchor, "kind": str(manifest.get("kind") or "statement"),
+                "title": str(manifest.get("title") or widget_id), "summary": str(manifest.get("summary") or "-"),
+                "limitations": list(manifest.get("limitations") or []), "files": files,
+            }],
+            "verification_checks": [{"name": "quick fix", "method": "node --check", "result": "passed", "details": "-"}],
+            "warnings": [],
+        })
+        expectations = {
+            "anchors": [anchor],
+            "annotations_required": False,
+            "document_ids": paper_document.anchor_ids(document) if document else {anchor: str(manifest.get("kind") or "statement")},
+            "proof_paragraphs": {proof["id"]: list(proof.get("paragraphs", [])) for proof in document.get("proofs", [])},
+            "paragraph_text": {paragraph["id"]: paragraph.get("text", "") for paragraph in document.get("paragraphs", [])},
+            "note_ids": [],
+            "result_schema": json.loads((PROJECT_ROOT / "schemas" / "visualization-result.schema.json").read_text(encoding="utf-8")),
+        }
+        report = visualization_validation.validate(workspace=workspace, expectations=expectations)
+    problems.extend(issue.render() for issue in report.issues)
+    return problems
 
 
 def quick_fix(
@@ -142,7 +165,7 @@ def quick_fix(
         result = common.read_json(result_path, description="quick fix result")
         if not result.get("fixed"):
             raise common.CodexError("quick fix declined: " + str(result.get("summary") or "no reason given"))
-        problems = check_widget(workspace / "widget", widget_id, manifest)
+        problems = check_widget(workspace / "widget", widget_id, manifest, document)
         if problems:
             raise common.CodexError("quick fix rejected: " + "; ".join(problems))
         archive = package / visualizations.RUNS_DIRECTORY / "quick-fixes" / f"{widget_id}-{common.utc_now().replace(':', '').replace('+', 'Z')}"
@@ -154,7 +177,20 @@ def quick_fix(
                 target = widget_directory / path.relative_to(workspace / "widget")
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(path, target)
+        # Keep the package manifest's record of this widget in step with widget.json.
+        updated_manifest = common.load_json(widget_directory / visualizations.WIDGET_MANIFEST_NAME) or {}
+        package_manifest = visualizations.load_manifest(package)
+        if package_manifest is not None:
+            for entry in package_manifest.get("widgets", []):
+                if isinstance(entry, dict) and entry.get("id") == widget_id:
+                    for field in ("title", "summary", "steps", "examples", "limitations"):
+                        if field in updated_manifest:
+                            entry[field] = updated_manifest[field]
+                    entry["quick_fixes"] = int(entry.get("quick_fixes") or 0) + 1
+            visualizations.write_manifest(package, package_manifest)
         common.write_json(widget_directory / visualizations.WIDGET_REVIEW_NAME, {
+            "schema_version": visualizations.REVIEW_SCHEMA_VERSION,
+            "document_digest": document.get("source", {}).get("digest", ""),
             "fidelity": "unreviewed",
             "interaction_quality": "unreviewed",
             "summary": f"Quick fix applied without review: {result.get('summary', '')}",

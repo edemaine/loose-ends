@@ -468,12 +468,22 @@ def _install(
                 replaced.mkdir(exist_ok=True)
                 os.replace(destination, replaced / widget["id"])
             os.replace(staging / visualizations.WIDGETS_DIRECTORY / widget["id"], destination)
+            visualizations.stamp_widget_files(destination, document.get("source", {}).get("digest", ""), run_name)
         if annotations_source.is_file():
             destination = package / visualizations.ANNOTATIONS_NAME
+            live = common.load_json(destination) if destination.exists() else None
             if destination.exists():
                 replaced.mkdir(exist_ok=True)
                 shutil.copyfile(destination, replaced / visualizations.ANNOTATIONS_NAME)
-            shutil.copyfile(annotations_source, destination)
+            generated = common.read_json(annotations_source, description="generated annotations")
+            merged = visualizations.merge_live_annotations(
+                live if isinstance(live, dict) else None,
+                generated,
+                addressed=[n for n in generated_result.get("notes_addressed", []) if isinstance(n, str)],
+            )
+            merged["schema_version"] = visualizations.ANNOTATIONS_SCHEMA_VERSION
+            merged["document_digest"] = document.get("source", {}).get("digest", "")
+            common.write_json(destination, merged)
             manifest["annotations"] = visualizations.ANNOTATIONS_NAME
             manifest.pop("stale_annotations", None)
             if review_result is not None:

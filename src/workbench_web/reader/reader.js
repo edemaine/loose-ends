@@ -41,6 +41,7 @@
   // ------------------------------------------------------------------
 
   window.LooseEnds = {
+    apiVersion: 1,
     registerWidget(id, factory) {
       if (typeof id !== "string" || !factory) return;
       state.factories.set(id, factory);
@@ -1002,9 +1003,11 @@
           controller.attach(instance);
           controller.setStep(0);
         }
-        if (exampleSelect && instance) {
+        if (exampleSelect && instance && !exampleSelect.dataset.wired) {
+          exampleSelect.dataset.wired = "1";
           exampleSelect.addEventListener("change", () => {
-            try { if (instance.setExample) instance.setExample(exampleSelect.value); } catch (error) { console.error(error); }
+            const current = (state.instances.get(widget.id) || {}).instance;
+            try { if (current && current.setExample) current.setExample(exampleSelect.value); } catch (error) { console.error(error); }
             if (controller) controller.refresh();
           });
         }
@@ -1450,8 +1453,22 @@
       return;
     }
     if (state.manifest) {
-      state.widgets = (state.manifest.widgets || []).filter(widget => widget && widget.id && widget.anchor);
+      const listed = (state.manifest.widgets || []).filter(widget => widget && widget.id && widget.anchor);
+      // widget.json is the source of a widget's metadata and review.json its
+      // verdict; the manifest only lists ids, anchors, and provenance.
+      state.widgets = await Promise.all(listed.map(async widget => {
+        const [metadata, review] = await Promise.all([
+          fetchJson(`widgets/${encodeURIComponent(widget.id)}/widget.json`, true),
+          fetchJson(`widgets/${encodeURIComponent(widget.id)}/review.json`, true),
+        ]);
+        return { ...widget, ...(metadata || {}), id: widget.id, anchor: widget.anchor, review: review || widget.review || null };
+      }));
       if (state.manifest.annotations) state.annotations = await fetchJson(state.manifest.annotations, true);
+      const digest = state.doc && state.doc.source && state.doc.source.digest;
+      const stale = [];
+      if (state.annotations && state.annotations.document_digest && digest && state.annotations.document_digest !== digest) stale.push("annotations");
+      state.widgets.forEach(widget => { if (widget.document_digest && digest && widget.document_digest !== digest) stale.push(`widget ${widget.id}`); });
+      if (stale.length) showNotice(`Generated for an earlier version of this document: ${stale.join(", ")}. Anchors may point at different text; regenerate to refresh.`);
     }
     const notes = await fetchJson("notes.json", true);
     state.notes = notes && Array.isArray(notes.notes) ? notes.notes : [];

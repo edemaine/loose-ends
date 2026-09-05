@@ -2833,6 +2833,7 @@ class ReaderNoteEndpointTests(unittest.TestCase):
             package.mkdir(parents=True)
             manager = object.__new__(workbench.CatalogManager)
             manager.lock = threading.Lock()
+            manager.notes_lock = threading.Lock()
             manager.paths = [root / "papers"]
             manager.manuscripts = root / "manuscripts"
             manager.catalog = {"manuscripts": [{"drafts": [{"visualization": {"key": "k" * 24, "directory": str(package)}}]}]}
@@ -2853,6 +2854,7 @@ class ReaderNoteEndpointTests(unittest.TestCase):
             package.mkdir(parents=True)
             manager = object.__new__(workbench.CatalogManager)
             manager.lock = threading.Lock()
+            manager.notes_lock = threading.Lock()
             manager.paths = [root / "papers"]
             manager.manuscripts = root / "manuscripts"
             manager.catalog = {"manuscripts": [{"drafts": [{"visualization": {"key": "k" * 24, "directory": str(package)}}]}]}

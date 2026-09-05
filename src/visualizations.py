@@ -41,6 +41,10 @@ RUN_RE = re.compile(r"^run-([0-9]{3,})$")
 WIDGET_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,80}$")
 READER_FILES = {"reader.html", "reader.js", "reader.css"}
 MANIFEST_SCHEMA_VERSION = 2
+ANNOTATIONS_SCHEMA_VERSION = 1
+WIDGET_SCHEMA_VERSION = 1
+REVIEW_SCHEMA_VERSION = 1
+WIDGET_API_VERSION = 1
 DEFAULT_ANCHOR = "default"
 NOTES_ANCHOR = "notes"
 
@@ -81,6 +85,8 @@ def next_run_number(directory: Path) -> int:
 
 
 def widget_records(directory: Path, manifest: dict) -> list[dict]:
+    """Widget records for display: `widget.json` is the source of metadata,
+    the package manifest only lists ids, anchors, and provenance."""
     records = []
     for entry in manifest.get("widgets", []):
         if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
@@ -88,11 +94,57 @@ def widget_records(directory: Path, manifest: dict) -> list[dict]:
         widget_directory = directory / WIDGETS_DIRECTORY / entry["id"]
         if not (widget_directory / (entry.get("entry") or WIDGET_ENTRY_NAME)).is_file():
             continue
-        review = common.load_json(widget_directory / WIDGET_REVIEW_NAME)
         record = dict(entry)
+        metadata = common.load_json(widget_directory / WIDGET_MANIFEST_NAME)
+        if isinstance(metadata, dict):
+            for field in ("title", "summary", "kind", "anchor", "steps", "examples", "limitations", "api_version", "document_digest"):
+                if field in metadata:
+                    record[field] = metadata[field]
+        review = common.load_json(widget_directory / WIDGET_REVIEW_NAME)
         record["review"] = review if isinstance(review, dict) else None
         records.append(record)
     return records
+
+
+def stamp_widget_files(widget_directory: Path, document_digest: str, run_name: str) -> None:
+    """Record schema versions and the source digest on a widget's files."""
+    manifest = common.load_json(widget_directory / WIDGET_MANIFEST_NAME)
+    if isinstance(manifest, dict):
+        manifest.setdefault("schema_version", WIDGET_SCHEMA_VERSION)
+        manifest.setdefault("api_version", WIDGET_API_VERSION)
+        manifest["document_digest"] = document_digest
+        manifest["run"] = run_name
+        common.write_json(widget_directory / WIDGET_MANIFEST_NAME, manifest)
+    review = common.load_json(widget_directory / WIDGET_REVIEW_NAME)
+    if isinstance(review, dict):
+        review.setdefault("schema_version", REVIEW_SCHEMA_VERSION)
+        review["document_digest"] = document_digest
+        common.write_json(widget_directory / WIDGET_REVIEW_NAME, review)
+
+
+def merge_live_annotations(live: dict | None, generated: dict, *, addressed: list[str]) -> dict:
+    """Carry quick answers created while a run was in flight into its output.
+
+    A quick explanation survives unless the run addressed its note, replaced
+    its id, or the run itself now explains the same note.
+    """
+    merged = dict(generated)
+    if not live:
+        return merged
+    existing = merged.get("explanations")
+    existing = existing if isinstance(existing, list) else []
+    generated_ids = {entry.get("id") for entry in existing if isinstance(entry, dict)}
+    generated_notes = {entry.get("note") for entry in existing if isinstance(entry, dict) and entry.get("note")}
+    carried = []
+    for entry in live.get("explanations", []) if isinstance(live.get("explanations"), list) else []:
+        if not isinstance(entry, dict) or entry.get("provenance") != "quick":
+            continue
+        if entry.get("id") in generated_ids or entry.get("note") in addressed or entry.get("note") in generated_notes:
+            continue
+        carried.append(entry)
+    if carried:
+        merged["explanations"] = existing + carried
+    return merged
 
 
 def discover(source_directory: Path) -> dict | None:

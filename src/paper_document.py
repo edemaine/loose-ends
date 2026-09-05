@@ -17,6 +17,7 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import shutil
 import subprocess
 import tempfile
@@ -60,9 +61,11 @@ STATEMENT_KINDS = {
     "property",
 }
 PROOF_ENVIRONMENT = "proof"
+MARKER_NONCE = "".join(secrets.choice("ABCDEFGHJKLMNPQRSTUVWXYZ") for _ in range(6))
 MARKER_RE = re.compile(
-    r"^LE(ENVBEGIN|ENVEND|TITLE|FIGURE|BIBITEM|DOCTITLE|AUTHOR)(\d{4})$"
+    r"^LE" + MARKER_NONCE + r"(ENVBEGIN|ENVEND|TITLE|FIGURE|BIBITEM|DOCTITLE|AUTHOR)(\d{4})$"
 )
+CAPTION_MARKER_RE = re.compile(r"^LE" + MARKER_NONCE + r"CAPTION(\d{4})$")
 CREF_MARK = "LECREFMARK"
 GRAPHICS_EXTENSIONS = (".pdf", ".png", ".jpg", ".jpeg", ".svg", ".eps", ".gif")
 
@@ -126,7 +129,7 @@ def strip_comments(text: str) -> str:
     return "\n".join(out)
 
 
-def find_main_file(source_dir: Path, main_file: str | None = None) -> Path:
+def find_main_file(source_dir: Path, main_file: str | None = None, warnings: list[str] | None = None) -> Path:
     if main_file:
         candidate = source_dir / main_file
         if not candidate.is_file():
@@ -148,22 +151,52 @@ def find_main_file(source_dir: Path, main_file: str | None = None) -> Path:
     if not with_class:
         raise DocumentError(f"no LaTeX file with \\documentclass under {source_dir}")
     with_class.sort(key=lambda path: (path.name != "main.tex", len(path.parts), path.name))
+    if len(with_class) > 1 and warnings is not None:
+        warnings.append(
+            "several files declare \\documentclass; using " + with_class[0].relative_to(source_dir).as_posix()
+            + " (pass --main to choose another): " + ", ".join(path.relative_to(source_dir).as_posix() for path in with_class[1:6])
+        )
     return with_class[0]
 
 
-def expand_inputs(text: str, base: Path, depth: int = 0) -> str:
+def confined_path(root: Path, base: Path, name: str) -> Path | None:
+    """Resolve `name` relative to `base` only if it stays inside `root`."""
+    name = name.strip()
+    if not name or "\x00" in name:
+        return None
+    candidate = Path(name)
+    if candidate.is_absolute():
+        return None
+    try:
+        resolved = (base / candidate).resolve()
+        resolved.relative_to(root.resolve())
+    except (OSError, ValueError):
+        return None
+    return resolved
+
+
+def expand_inputs(text: str, base: Path, depth: int = 0, root: Path | None = None, warnings: list[str] | None = None) -> str:
+    """Inline `\\input` and `\\include` files that live inside the source tree."""
+    root = (root or base).resolve()
     if depth > 8:
         return text
 
     def replace(match: re.Match) -> str:
         name = match.group(2).strip()
-        for candidate in (base / name, base / f"{name}.tex"):
+        for suffix in ("", ".tex"):
+            candidate = confined_path(root, base, name + suffix)
+            if candidate is None:
+                if warnings is not None:
+                    warnings.append(f"ignored \\{match.group(1)} outside the source tree: {name}")
+                return ""
             if candidate.is_file():
                 try:
                     body = candidate.read_text(encoding="utf-8", errors="replace")
                 except OSError:
                     return ""
-                return "\n" + expand_inputs(strip_comments(body), candidate.parent, depth + 1) + "\n"
+                return "\n" + expand_inputs(strip_comments(body), candidate.parent, depth + 1, root, warnings) + "\n"
+        if warnings is not None:
+            warnings.append(f"missing \\{match.group(1)} file: {name}")
         return ""
 
     return re.sub(r"\\(input|include)\{([^}]*)\}", replace, text)
@@ -280,8 +313,9 @@ def parse_authors(preamble: str) -> list[str]:
 class Preprocessor:
     """Rewrite structural LaTeX into plain-word markers pandoc keeps."""
 
-    def __init__(self, environments: dict[str, TheoremEnvironment]) -> None:
+    def __init__(self, environments: dict[str, TheoremEnvironment], warnings: list[str] | None = None) -> None:
         self.environments = environments
+        self.warnings = warnings if warnings is not None else []
         self.env_specs: list[EnvironmentSpec] = []
         self.figures: list[FigureSpec] = []
         self.bib_files: list[str] = []
@@ -294,9 +328,9 @@ class Preprocessor:
     def _env_marker(self, name: str, label: str | None, title: str | None) -> str:
         index = len(self.env_specs)
         self.env_specs.append(EnvironmentSpec(index, name, label, title))
-        marker = f"\n\nLEENVBEGIN{index:04d}\n\n"
+        marker = f"\n\nLE{MARKER_NONCE}ENVBEGIN{index:04d}\n\n"
         if title:
-            marker += f"LETITLE{index:04d} {title}\n\n"
+            marker += f"LE{MARKER_NONCE}TITLE{index:04d} {title}\n\n"
         return marker
 
     def _rewrite_environments(self, body: str) -> str:
@@ -333,7 +367,7 @@ class Preprocessor:
         text = "".join(result)
 
         def end_marker(match: re.Match) -> str:
-            return "\n\nLEENVEND0000\n\n"
+            return f"\n\nLE{MARKER_NONCE}ENVEND0000\n\n"
 
         text = re.sub(
             r"\\end\{(" + "|".join(re.escape(name) for name in names) + r")\}",
@@ -360,7 +394,7 @@ class Preprocessor:
                 spec = FigureSpec(len(self.figures), label.group(1).strip() if label else None, caption or "", kind="table")
                 self.figures.append(spec)
                 inner = _strip_caption_and_label(content)
-                return f"\n\nLEFIGURE{spec.index:04d}\n\n{inner}\n\n"
+                return f"\n\nLE{MARKER_NONCE}FIGURE{spec.index:04d}\n\n{inner}\n\n"
             caption = _command_argument(content, "caption") or ""
             label = re.search(r"\\label\{([^}]*)\}", _strip_caption_and_label(content) + " " + caption)
             if label is None:
@@ -371,7 +405,7 @@ class Preprocessor:
             for tikz in re.finditer(r"\\begin\{tikzpicture\}.*?\\end\{tikzpicture\}", content, re.DOTALL):
                 spec.tikz.append(tikz.group(0))
             self.figures.append(spec)
-            return f"\n\nLEFIGURE{spec.index:04d}\n\n"
+            return f"\n\nLE{MARKER_NONCE}FIGURE{spec.index:04d}\n\n"
 
         return pattern.sub(replace, body)
 
@@ -386,18 +420,22 @@ class Preprocessor:
             content = re.sub(r"\\label\{[^}]*\}", "", content)
             content = re.sub(r"\\(nonumber|notag)\b", "", content)
             inner = numbered.get(name.rstrip("*"))
-            if name == "alignat":
-                content = re.sub(r"^\{[^}]*\}", "", content.strip())
             if inner:
                 content = f"\\begin{{{inner}}}{content}\\end{{{inner}}}"
             tag = ""
             if is_numbered:
-                tag = "\\LEeq{" + (labels[0].strip() if labels else "") + "}"
+                # Every label of a multi-line environment resolves to this one
+                # numbered block; LaTeX would number the lines separately.
+                if len(labels) > 1:
+                    self.warnings.append(f"{name} environment with {len(labels)} labels numbered as one equation: " + ", ".join(label.strip() for label in labels))
+                tag = "\\LEeq{" + "|".join(label.strip() for label in labels) + "}"
             return f"\n\\[{tag}{content}\\]\n"
 
+        takes_argument = {"alignat", "alignat*"}
         for name in list(unnumbered) + list(numbered):
+            argument = r"(?:\{[^}]*\})?" if name in takes_argument else ""
             pattern = re.compile(
-                r"\\begin\{" + re.escape(name) + r"\}(?:\{[^}]*\})?(.*?)\\end\{" + re.escape(name) + r"\}",
+                r"\\begin\{" + re.escape(name) + r"\}" + argument + r"(.*?)\\end\{" + re.escape(name) + r"\}",
                 re.DOTALL,
             )
             is_numbered = name in numbered
@@ -472,13 +510,13 @@ class Preprocessor:
         doc_title = title or _command_argument(preamble + body, "title")
         if doc_title:
             doc_title = re.sub(r"\\(thanks|footnote)\{[^}]*\}", "", doc_title).replace("\\\\", " ")
-            head += f"LEDOCTITLE0000 {doc_title}\n\n"
+            head += f"LE{MARKER_NONCE}DOCTITLE0000 {doc_title}\n\n"
         self.doc_authors = list(authors) if authors else parse_authors(preamble + body)
         for index, author in enumerate(self.doc_authors):
-            head += f"LEAUTHOR{index:04d} {author}\n\n"
+            head += f"LE{MARKER_NONCE}AUTHOR{index:04d} {author}\n\n"
         tail = ""
         for index, (key, _label, entry) in enumerate(self.bib_items):
-            tail += f"\n\nLEBIBITEM{index:04d} {entry}\n\n"
+            tail += f"\n\nLE{MARKER_NONCE}BIBITEM{index:04d} {entry}\n\n"
         return head + body + tail
 
 
@@ -773,10 +811,20 @@ class Builder:
         if kind == "LineBlock":
             return [Node("paragraph", attrs={"inlines": [inline for line in content for inline in (line + [{"t": "LineBreak"}])], "container": self._container_id()})]
         if kind == "RawBlock":
+            self._note_dropped("raw block", content[1] if isinstance(content, list) and len(content) > 1 else "")
             return []
         if kind == "Null":
             return []
+        self._note_dropped(f"unsupported block {kind}", "")
         return []
+
+    def _note_dropped(self, what: str, snippet: str) -> None:
+        text = re.sub(r"\s+", " ", str(snippet)).strip()
+        if text in {"", "\\maketitle", "\\centering", "\\medskip", "\\smallskip", "\\bigskip", "\\noindent", "\\bibliographystyle{alpha}", "\\newpage", "\\clearpage"}:
+            return
+        message = f"dropped {what}: {text[:80]}"
+        if message not in self.warnings and len(self.warnings) < 200:
+            self.warnings.append(message)
 
     def _convert_table(self, content: list) -> Node:
         # pandoc 2.9 (API 1.20) or newer (API 1.22+) table shapes.
@@ -1065,7 +1113,7 @@ class Renderer:
             elif kind == "Image":
                 out.append(f'<span class="inline-image">{self.inlines(content[1])}</span>')
             elif kind == "Note":
-                self.footnotes.append(self.blocks(content, inline_only=True))
+                self.footnotes.append(self.pandoc_blocks(content))
                 number = len(self.footnotes)
                 out.append(f'<sup class="footnote-ref"><a href="#footnote-{number}" id="footnote-ref-{number}">{number}</a></sup>')
             elif kind == "Span":
@@ -1076,7 +1124,9 @@ class Renderer:
                 else:
                     out.append(self.inlines(spans))
             elif kind == "RawInline":
-                pass
+                self.builder._note_dropped("raw inline", content[1] if isinstance(content, list) and len(content) > 1 else "")
+            else:
+                self.builder._note_dropped(f"unsupported inline {kind}", "")
         return "".join(out)
 
     def _math(self, display: bool, latex: str) -> str:
@@ -1084,15 +1134,20 @@ class Renderer:
         if display:
             number = ""
             label = None
+            extra_labels: list[str] = []
             match = re.match(r"\\LEeq\{([^}]*)\}", latex)
             if match:
                 self.equation_counter += 1
                 number = str(self.equation_counter)
-                label = match.group(1).strip() or None
+                found = [item.strip() for item in match.group(1).split("|") if item.strip()]
+                label = found[0] if found else None
+                extra_labels = found[1:]
                 latex = latex[match.end():].strip()
             attributes = ""
             if label:
                 self.labels[label] = {"kind": "equation", "number": number, "id": label, "display": "Equation"}
+                for extra in extra_labels:
+                    self.labels[extra] = {"kind": "equation", "number": number, "id": label, "display": "Equation"}
                 self.builder.equations.append({"id": label, "number": number, "latex": latex})
                 attributes += f' id="{html.escape(label)}"'
             elif number:
@@ -1141,6 +1196,28 @@ class Renderer:
 
     def blocks(self, nodes: list[Node], inline_only: bool = False) -> str:
         return "".join(self.block(node) for node in nodes)
+
+    def pandoc_blocks(self, blocks: list) -> str:
+        """Render raw pandoc blocks (footnote bodies) without paragraph ids."""
+        parts = []
+        for block in blocks:
+            kind = block.get("t")
+            content = block.get("c")
+            if kind in {"Para", "Plain"}:
+                parts.append(self.inlines(content))
+            elif kind == "BulletList":
+                parts.append("<ul>" + "".join(f"<li>{self.pandoc_blocks(item)}</li>" for item in content) + "</ul>")
+            elif kind == "OrderedList":
+                parts.append("<ol>" + "".join(f"<li>{self.pandoc_blocks(item)}</li>" for item in content[1]) + "</ol>")
+            elif kind == "BlockQuote":
+                parts.append(f"<blockquote>{self.pandoc_blocks(content)}</blockquote>")
+            elif kind == "Div":
+                parts.append(self.pandoc_blocks(content[1]))
+            elif kind == "CodeBlock":
+                parts.append(f"<pre><code>{html.escape(content[1])}</code></pre>")
+            else:
+                self.builder.warnings.append(f"dropped unsupported footnote content: {kind}")
+        return " ".join(parts)
 
     def block(self, node: Node) -> str:
         kind = node.kind
@@ -1318,10 +1395,13 @@ def _iter_inlines(inlines: list):
 
 
 def _find_graphic(source_dir: Path, name: str, graphics_paths: Sequence[str]) -> Path | None:
+    """Locate an included graphic, refusing paths that leave the source tree."""
+    root = source_dir.resolve()
     bases = [source_dir] + [source_dir / path for path in graphics_paths]
     for base in bases:
-        for candidate in [base / name] + [base / f"{name}{ext}" for ext in GRAPHICS_EXTENSIONS]:
-            if candidate.is_file():
+        for suffix in ("", *GRAPHICS_EXTENSIONS):
+            candidate = confined_path(root, base, f"{name}{suffix}")
+            if candidate is not None and candidate.is_file():
                 return candidate
     return None
 
@@ -1375,6 +1455,19 @@ def _figure_preamble(preamble: str) -> str:
     return "\n".join(kept)
 
 
+def _tex_environment() -> dict[str, str]:
+    """TeX settings for compiling untrusted figure sources: no shell escape,
+    reading and writing restricted to the working directory (`p` = paranoid)."""
+    environment = dict(os.environ)
+    environment.update({
+        "openin_any": "p",
+        "openout_any": "p",
+        "shell_escape": "f",
+        "TEXMFOUTPUT": ".",
+    })
+    return environment
+
+
 def _compile_tikz(tikz: str, preamble: str, destination: Path, pdflatex: str, pdftocairo: str | None, warnings: list[str], timeout: float) -> str | None:
     if pdftocairo is None:
         warnings.append("cannot render TikZ figures without pdftocairo")
@@ -1391,8 +1484,9 @@ def _compile_tikz(tikz: str, preamble: str, destination: Path, pdflatex: str, pd
         (workspace / "figure.tex").write_text(source, encoding="utf-8")
         try:
             completed = subprocess.run(
-                [pdflatex, "-interaction=nonstopmode", "-halt-on-error", "figure.tex"],
+                [pdflatex, "-no-shell-escape", "-interaction=nonstopmode", "-halt-on-error", "figure.tex"],
                 cwd=workspace, capture_output=True, text=True, timeout=timeout, check=False,
+                env=_tex_environment(),
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             warnings.append(f"pdflatex failed for a TikZ figure: {exc}")
@@ -1498,12 +1592,13 @@ def build_document(
     parsed document record.
     """
     source_dir = source_dir.resolve()
-    main = find_main_file(source_dir, main_file)
+    warnings: list[str] = []
+    main = find_main_file(source_dir, main_file, warnings)
     try:
         raw = main.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
         raise DocumentError(f"could not read {main}: {exc}") from exc
-    text = expand_inputs(strip_comments(raw), main.parent)
+    text = expand_inputs(strip_comments(raw), main.parent, root=source_dir, warnings=warnings)
     split = re.search(r"\\begin\{document\}", text)
     if split is None:
         raise DocumentError(f"{main.name} has no \\begin{{document}}")
@@ -1513,20 +1608,19 @@ def build_document(
         body = body[:end.start()]
     environments = parse_theorem_environments(preamble)
     macros = parse_macros(preamble)
-    warnings: list[str] = []
-    pre = Preprocessor(environments)
+    pre = Preprocessor(environments, warnings)
     prepared = pre.run(body, preamble, main.parent, title, authors)
     # Figure captions are converted in the same pandoc pass as marker paragraphs.
     caption_markers = ""
     for spec in pre.figures:
         if spec.caption:
-            caption_markers += f"\n\nLECAPTION{spec.index:04d} {spec.caption}\n\n"
+            caption_markers += f"\n\nLE{MARKER_NONCE}CAPTION{spec.index:04d} {spec.caption}\n\n"
     ast = run_pandoc(pandoc, prepared + caption_markers)
     caption_inlines: dict[str, list] = {}
     remaining_blocks = []
     for block in ast["blocks"]:
         if block["t"] in {"Para", "Plain"} and block["c"] and block["c"][0].get("t") == "Str":
-            match = re.match(r"^LECAPTION(\d{4})$", block["c"][0]["c"])
+            match = CAPTION_MARKER_RE.match(block["c"][0]["c"])
             if match:
                 rest = block["c"][1:]
                 while rest and rest[0].get("t") in {"Space", "SoftBreak"}:

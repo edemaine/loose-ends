@@ -804,7 +804,22 @@ The conversion is deterministic and keeps the paper's own text: `pandoc`
 converts the LaTeX, this tool preserves sections, theorem-like environments,
 proofs, numbered equations, figures (TikZ and included graphics are rendered
 to SVG with `pdflatex` and `pdftocairo`), citations, and cross-references,
-and assigns stable identifiers to every statement, proof, and paragraph.
+and assigns identifiers to every statement, proof, and paragraph.
+
+The converter supports a documented LaTeX subset rather than arbitrary
+sources: `amsthm`/`ntheorem` style environments declared with `\newtheorem`
+(or the standard names), `proof`, `equation`/`align`/`gather`/`multline`
+(a multi-line environment is numbered as one block, and every label of it
+resolves to that block), `figure` with `\includegraphics` or `tikzpicture`,
+`table`, `thebibliography` or a `.bib` file with the common fields, and
+`\ref`/`\eqref`/`\cref`/`\cite`. `\input`/`\include` files and graphics
+must live inside the source directory; anything else is ignored with a
+warning. TikZ is compiled with shell escape disabled and file access
+restricted to the working directory. Unsupported constructs are dropped and
+reported in `document.json` `warnings` (shown in the reader). Identifiers are
+positional, so every generated file records the `document_digest` it was
+built for and the reader flags packages built for an earlier version.
+PDF-only papers cannot be converted.
 The reader (`src/workbench_web/reader/`) shows the result with collapsible
 sections and proofs, an outline, and KaTeX-rendered math.
 

@@ -292,6 +292,8 @@ def _paper_inventory(paths: Iterable[Path]) -> list[dict]:
                 if isinstance(metadata.get("doi", ""), str) else "",
                 "activityTimestamp": timeline["activityTimestamp"],
                 "analyzed": bool(manifest),
+                "hasSource": (paper / "source").is_dir(),
+                "visualization": visualizations.discover(paper),
                 "problemCount": len(manifest.get("open_problems", [])),
                 "analysisStatus": manifest.get("status", ""),
                 "metadataComplete": bool(
@@ -771,6 +773,7 @@ class CatalogManager:
         self.manuscripts.mkdir(parents=True, exist_ok=True)
         self.hub = hub
         self.lock = threading.RLock()
+        self.notes_lock = threading.Lock()
         self.version = 0
         self.error = ""
         self.catalog: dict = {
@@ -1231,6 +1234,11 @@ class CatalogManager:
                 for draft in manuscript.get("drafts", [])
                 if isinstance(draft.get("visualization"), dict)
                 and draft["visualization"].get("key") == key
+            ] + [
+                paper.get("visualization")
+                for paper in self.catalog.get("papers", [])
+                if isinstance(paper.get("visualization"), dict)
+                and paper["visualization"].get("key") == key
             ]
         if len(packages) != 1:
             raise KeyError(key)
@@ -1255,7 +1263,8 @@ class CatalogManager:
         directory = self.visualization_directory(key)
         if not isinstance(body, dict) or not isinstance(body.get("note"), dict):
             raise ValueError("a note is required")
-        note = visualizations.add_note(directory, body["note"])
+        with self.notes_lock:
+            note = visualizations.add_note(directory, body["note"])
         source = directory.parent
         argv = [
             sys.executable, "-u", str(PROJECT_ROOT / "src" / "explain_note.py"),
@@ -1290,7 +1299,8 @@ class CatalogManager:
         directory = self.visualization_directory(key)
         if not isinstance(body, dict) or not isinstance(body.get("note"), dict):
             raise ValueError("a note is required")
-        note = visualizations.add_note(directory, body["note"])
+        with self.notes_lock:
+            note = visualizations.add_note(directory, body["note"])
         if not note.get("widget"):
             raise ValueError("the note must name a widget")
         argv = [
@@ -1324,6 +1334,10 @@ class CatalogManager:
     def update_notes(self, key: str, body: object) -> dict:
         """Add or remove one reader note and return the current list."""
         directory = self.visualization_directory(key)
+        with self.notes_lock:
+            return self._update_notes(directory, body)
+
+    def _update_notes(self, directory: Path, body: object) -> dict:
         if not isinstance(body, dict):
             raise ValueError("request body must be an object")
         action = body.get("action")

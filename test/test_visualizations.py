@@ -118,6 +118,47 @@ class PaperDocumentTests(unittest.TestCase):
         self.assertIn("Figure could not be rendered", html)
         self.assertNotIn("a comment", html)
 
+    def test_inputs_and_graphics_stay_inside_the_source_tree(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "secret.tex").write_text("SECRET TOP", encoding="utf-8")
+            source = root / "draft-001"
+            source.mkdir()
+            (source / "ok.tex").write_text("Included text.", encoding="utf-8")
+            (source / "main.tex").write_text(
+                "\\documentclass{article}\\begin{document}\\section{A}\\input{ok}\\input{../secret}"
+                "\\input{/etc/hostname}\\begin{figure}\\includegraphics{../secret}\\caption{c}\\end{figure}\\end{document}",
+                encoding="utf-8",
+            )
+            document = paper_document.build_document(source, source / "visualization", render_figures_enabled=True, pdflatex="pdflatex-missing", pdftocairo="pdftocairo-missing")
+            html = (source / "visualization" / "document.html").read_text(encoding="utf-8")
+        self.assertIn("Included text.", html)
+        self.assertNotIn("SECRET TOP", html)
+        joined = " ".join(document["warnings"])
+        self.assertIn("outside the source tree: ../secret", joined)
+        self.assertIn("outside the source tree: /etc/hostname", joined)
+        self.assertIn("figure graphic not found: ../secret", joined)
+
+    def test_footnotes_and_equation_arguments_survive_conversion(self):
+        with TemporaryDirectory() as temporary:
+            source = Path(temporary) / "draft-001"
+            source.mkdir()
+            (source / "main.tex").write_text(
+                "\\documentclass{article}\\usepackage{amsmath}\\begin{document}\\section{A}\n"
+                "Text with a note\\footnote{The note has \\emph{emphasis} and $x^2$.} here.\n"
+                "\\begin{equation}{x}+y=z\\end{equation}\n"
+                "\\begin{align}a&=b\\label{eq:a}\\\\c&=d\\label{eq:c}\\end{align} See \\eqref{eq:c}.\n"
+                "\\end{document}",
+                encoding="utf-8",
+            )
+            document = paper_document.build_document(source, source / "visualization", render_figures_enabled=False)
+            html = (source / "visualization" / "document.html").read_text(encoding="utf-8")
+        self.assertIn('class="footnote-ref"', html)
+        self.assertIn("<em>emphasis</em>", html)
+        self.assertIn("{x}+y=z", html)
+        self.assertIn('href="#eq:a"', html)  # the second label of the align resolves to the block
+        self.assertTrue(any("numbered as one equation" in warning for warning in document["warnings"]))
+
     def test_anchor_ids_cover_every_addressable_element(self):
         with TemporaryDirectory() as temporary:
             document = build_sample(Path(temporary))
@@ -215,6 +256,40 @@ class QuickAnswerTests(unittest.TestCase):
         self.assertEqual(explain_note._phrase_for({"phrase": "Restrict $\\T_p$ to $P$ and"}, note, "Restrict $\\mathcal T_p$ to $P$ and $P^*$."), "Restrict to and")
 
 
+class InstallMergeTests(unittest.TestCase):
+    def test_quick_answers_survive_a_full_run_unless_addressed(self):
+        live = {"glossary": [], "explanations": [
+            {"id": "quick-note-001", "note": "note-001", "provenance": "quick", "anchor": "par-1", "phrase": "a", "text": "t"},
+            {"id": "quick-note-002", "note": "note-002", "provenance": "quick", "anchor": "par-2", "phrase": "b", "text": "t"},
+            {"id": "quick-note-003", "note": "note-003", "provenance": "quick", "anchor": "par-3", "phrase": "c", "text": "t"},
+            {"id": "old", "anchor": "par-4", "phrase": "d", "text": "t"},
+        ]}
+        generated = {"glossary": [{"id": "g", "term": "g", "anchor": "par-1", "gloss": "x"}], "explanations": [
+            {"id": "turn", "note": "note-002", "anchor": "par-2", "phrase": "b", "text": "reviewed"},
+        ]}
+        merged = visualizations.merge_live_annotations(live, generated, addressed=["note-003"])
+        self.assertEqual([entry["id"] for entry in merged["explanations"]], ["turn", "quick-note-001"])
+        self.assertEqual(merged["glossary"][0]["id"], "g")
+        self.assertEqual(visualizations.merge_live_annotations(None, generated, addressed=[]), generated)
+
+    def test_stamps_and_widget_records_read_widget_json(self):
+        with TemporaryDirectory() as temporary:
+            package = Path(temporary)
+            widget = package / "widgets" / "thm-main"
+            widget.mkdir(parents=True)
+            (widget / "widget.json").write_text(json.dumps({"id": "thm-main", "anchor": "thm:main", "kind": "statement", "title": "Fresh title", "summary": "s"}), encoding="utf-8")
+            (widget / "widget.js").write_text("x", encoding="utf-8")
+            (widget / "review.json").write_text(json.dumps({"fidelity": "well_supported", "interaction_quality": "works"}), encoding="utf-8")
+            visualizations.stamp_widget_files(widget, "digest-1", "run-002")
+            records = visualizations.widget_records(package, {"widgets": [{"id": "thm-main", "anchor": "thm:main", "title": "Stale title"}]})
+            manifest = json.loads((widget / "widget.json").read_text(encoding="utf-8"))
+            review = json.loads((widget / "review.json").read_text(encoding="utf-8"))
+        self.assertEqual(records[0]["title"], "Fresh title")
+        self.assertEqual(records[0]["review"]["fidelity"], "well_supported")
+        self.assertEqual((manifest["schema_version"], manifest["api_version"], manifest["document_digest"], manifest["run"]), (1, 1, "digest-1", "run-002"))
+        self.assertEqual((review["schema_version"], review["document_digest"]), (1, "digest-1"))
+
+
 class QuickFixTests(unittest.TestCase):
     def test_widget_notes_require_an_installed_widget(self):
         with TemporaryDirectory() as temporary:
@@ -237,6 +312,15 @@ class QuickFixTests(unittest.TestCase):
             problems = fix_widget.check_widget(directory, "thm-main", original)
         self.assertTrue(any("anchor must not change" in item for item in problems))
         self.assertTrue(any("remote URL" in item for item in problems))
+        # The full run validator now applies: invalid steps are rejected too.
+        with TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            original = {"id": "proof-1", "anchor": "proof-1", "kind": "proof"}
+            (directory / "widget.json").write_text(json.dumps({**original, "title": "T", "summary": "S", "examples": [{"id": "generic", "label": "G"}], "steps": [{"title": "A", "paragraphs": ["par-99"]}]}), encoding="utf-8")
+            (directory / "widget.js").write_text('LooseEnds.registerWidget("proof-1", () => ({}));', encoding="utf-8")
+            document = {"statements": [], "proofs": [{"id": "proof-1", "paragraphs": ["par-2", "par-3"]}], "paragraphs": [{"id": "par-2", "text": "a"}, {"id": "par-3", "text": "b"}], "sections": [], "figures": [], "equations": []}
+            problems = fix_widget.check_widget(directory, "proof-1", original, document)
+        self.assertTrue(any("does not belong to this proof" in item for item in problems), problems)
         prompt = fix_widget.render_prompt(original | {"title": "Tester"}, {"message": "The grid moves on click."}, "Flat Doubles")
         self.assertIn("The grid moves on click.", prompt)
         self.assertIn("smallest change", prompt)
@@ -299,7 +383,10 @@ class PackageTests(unittest.TestCase):
             (package / "widgets" / "w").mkdir(parents=True)
             (package / "widgets" / "w" / "widget.js").write_text("x", encoding="utf-8")
             (Path(temporary) / "secret.txt").write_text("s", encoding="utf-8")
-            (package / "link.txt").symlink_to(Path(temporary) / "secret.txt")
+            try:
+                (package / "link.txt").symlink_to(Path(temporary) / "secret.txt")
+            except OSError as exc:  # Windows without symlink privileges
+                self.skipTest(f"symbolic links unavailable: {exc}")
             self.assertEqual(
                 visualizations.resolve_file(package, "widgets/w/widget.js"),
                 (package / "widgets" / "w" / "widget.js").resolve(),

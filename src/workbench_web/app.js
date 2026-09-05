@@ -2142,6 +2142,15 @@ function renderPapers() {
   );
   actions.append(button("Edit metadata", () => openMetadataEditor(paper), "button"));
   addAction(actions, paper.analyzed ? "Analyze again" : "Analyze", "analyze", [paperTarget(paper)], !paper.analyzed);
+  if (paper.hasSource !== false) {
+    const openPaperNotes = paper.visualization?.openNoteCount || 0;
+    addAction(
+      actions,
+      openPaperNotes ? `Visualize (${openPaperNotes} note${openPaperNotes === 1 ? "" : "s"})` : paper.visualization ? "Visualize more" : "Visualize",
+      "visualize",
+      [paperTarget(paper)],
+    );
+  }
   const addProblem = button(
     "Add open problem",
     () => openProblemEditor(paper),
@@ -2158,6 +2167,7 @@ function renderPapers() {
     addAction(actions, "Write from latest results", "write", [paperTarget(paper)]);
   }
   shell.append(actions);
+  if (paper.visualization) shell.append(renderDraftReader({ name: paper.title }, { key: paper.path, title: paper.title, visualization: paper.visualization }));
   shell.append(relatedTasksPanel({
     paperPath: paper.path,
     includePaperDescendants: true,
@@ -2946,11 +2956,12 @@ window.addEventListener("message", async event => {
   if (!data || typeof data.type !== "string" || !data.type.startsWith("loose-ends:")) return;
   const frame = [...document.querySelectorAll("iframe.reader-frame")].find(item => item.contentWindow === event.source);
   if (!frame) return;
-  const draft = state.catalog.manuscripts.flatMap(item => item.drafts).find(item => item.key === frame.dataset.draftKey);
+  const draft = state.catalog.manuscripts.flatMap(item => item.drafts).find(item => item.key === frame.dataset.draftKey)
+    || state.catalog.papers.filter(item => item.visualization).map(item => ({ key: item.path, title: item.title, visualization: item.visualization, paper: item })).find(item => item.key === frame.dataset.draftKey);
   if (!draft) return;
   if (data.type === "loose-ends:visualize") {
     const anchors = Array.isArray(data.anchors) ? data.anchors.filter(value => typeof value === "string") : [];
-    openTask("visualize", [draftTarget(draft)], {
+    openTask("visualize", [draft.paper ? paperTarget(draft.paper) : draftTarget(draft)], {
       anchors: anchors.filter(value => value !== "default").join(" "),
     });
   } else if (data.type === "loose-ends:fix-widget" && draft.visualization) {
