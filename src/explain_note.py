@@ -169,6 +169,7 @@ def _phrase_for(result: dict, note: dict, passage: str) -> str:
     return note.get("quote", "")[:80]
 
 
+@visualizations.locked_package
 def apply_answer(package: Path, note: dict, result: dict, passage: str) -> dict:
     """Store the quick answer in annotations.json and mark the note addressed."""
     annotations = common.load_json(package / visualizations.ANNOTATIONS_NAME)
@@ -211,10 +212,11 @@ def quick_answer(
     schema_path: Path = DEFAULT_SCHEMA_PATH,
 ) -> dict:
     package = source.package
-    document = visualizations.load_document(package)
-    if document is None:
-        raise common.CodexError("the reader document has not been built; run visualize_paper.py first")
-    annotations = common.load_json(package / visualizations.ANNOTATIONS_NAME)
+    with visualizations.package_lock(package):
+        document = visualizations.load_document(package)
+        if document is None:
+            raise common.CodexError("the reader document has not been built; run visualize_paper.py first")
+        annotations = common.load_json(package / visualizations.ANNOTATIONS_NAME)
     context = build_context(document, annotations if isinstance(annotations, dict) else None, note)
     workspace = Path(tempfile.mkdtemp(prefix=".explain-run-", dir=source.directory)).resolve()
     try:

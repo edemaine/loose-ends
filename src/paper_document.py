@@ -444,7 +444,8 @@ class Preprocessor:
 
     # -- bibliography -------------------------------------------------------------
 
-    def _extract_bibliography(self, body: str, source_dir: Path) -> str:
+    def _extract_bibliography(self, body: str, source_dir: Path, root: Path | None = None) -> str:
+        root = root or source_dir
         for match in re.finditer(r"\\bibliography\{([^}]*)\}", body):
             self.bib_files.extend(name.strip() for name in match.group(1).split(","))
         body = re.sub(r"\\bibliography\{[^}]*\}", "", body)
@@ -455,7 +456,11 @@ class Preprocessor:
             body = body[:thebib.start()] + body[thebib.end():]
         else:
             for name in self.bib_files:
-                for candidate in (source_dir / name, source_dir / f"{name}.bib"):
+                for filename in (name, f"{name}.bib"):
+                    candidate = confined_path(root, source_dir, filename)
+                    if candidate is None:
+                        self.warnings.append(f"bibliography outside source tree ignored: {name}")
+                        break
                     if candidate.is_file():
                         self._parse_bibtex(candidate.read_text(encoding="utf-8", errors="replace"))
                         break
@@ -463,7 +468,11 @@ class Preprocessor:
                 bbl = source_dir / "main.bbl"
                 bbls = [bbl] if bbl.is_file() else sorted(source_dir.glob("*.bbl"))
                 for path in bbls:
-                    text = path.read_text(encoding="utf-8", errors="replace")
+                    candidate = confined_path(root, source_dir, path.name)
+                    if candidate is None:
+                        self.warnings.append(f"bibliography outside source tree ignored: {path.name}")
+                        continue
+                    text = candidate.read_text(encoding="utf-8", errors="replace")
                     inner = re.search(r"\\begin\{thebibliography\}\{[^}]*\}(.*?)\\end\{thebibliography\}", text, re.DOTALL)
                     if inner:
                         self._parse_bibitems(strip_comments(inner.group(1)))
@@ -498,11 +507,11 @@ class Preprocessor:
 
     # -- driver ------------------------------------------------------------------
 
-    def run(self, body: str, preamble: str, source_dir: Path, title: str | None, authors: Sequence[str] | None) -> str:
+    def run(self, body: str, preamble: str, source_dir: Path, title: str | None, authors: Sequence[str] | None, *, root: Path | None = None) -> str:
         body = re.sub(r"\\(maketitle|tableofcontents|listoffigures|listoftables|linenumbers|nolinenumbers|newpage|clearpage|cleardoublepage|frontmatter|mainmatter|backmatter|appendix|qed|qedhere|noindent|centering|raggedright|raggedleft|small|footnotesize|scriptsize|normalsize|large|Large|LARGE|medskip|smallskip|bigskip)\b\*?", " ", body)
         body = re.sub(r"\\(vspace|hspace|vskip|hskip)\*?\s*\{[^}]*\}", " ", body)
         body = re.sub(r"\\(cref|Cref|autoref|nameref|vref)\{([^}]*)\}", lambda m: f"{CREF_MARK}\\ref{{{m.group(2)}}}", body)
-        body = self._extract_bibliography(body, source_dir)
+        body = self._extract_bibliography(body, source_dir, root)
         body = self._extract_figures(body)
         body = self._rewrite_equations(body)
         body = self._rewrite_environments(body)
@@ -738,9 +747,9 @@ class Builder:
                         match = re.match(r"\s*\\LEeq\{([^}]*)\}", inline["c"][1])
                         if match:
                             self.equation_counter += 1
-                            label = match.group(1).strip()
-                            if label:
-                                self.labels[label] = {"kind": "equation", "number": str(self.equation_counter), "id": label, "display": "Equation"}
+                            labels = [label.strip() for label in match.group(1).split("|") if label.strip()]
+                            for label in labels:
+                                self.labels[label] = {"kind": "equation", "number": str(self.equation_counter), "id": labels[0], "display": "Equation"}
                     if inline.get("t") == "Span" and inline["c"][0][0]:
                         identifier = inline["c"][0][0]
                         self.labels.setdefault(identifier, {
@@ -1609,7 +1618,7 @@ def build_document(
     environments = parse_theorem_environments(preamble)
     macros = parse_macros(preamble)
     pre = Preprocessor(environments, warnings)
-    prepared = pre.run(body, preamble, main.parent, title, authors)
+    prepared = pre.run(body, preamble, main.parent, title, authors, root=source_dir)
     # Figure captions are converted in the same pandoc pass as marker paragraphs.
     caption_markers = ""
     for spec in pre.figures:

@@ -48,6 +48,18 @@ def _widget_id_for(anchor: str) -> str:
     return slug or "widget"
 
 
+def validate_metadata(value: dict, reporter: common.Reporter, path: str, *, widget: bool = False) -> None:
+    """Accept optional installation metadata, including on subsequent edits."""
+    code = "E_WIDGET_MANIFEST" if widget else "E_ANNOTATIONS"
+    for field in (("schema_version", "api_version") if widget else ("schema_version",)):
+        if field in value and (type(value[field]) is not int or value[field] != 1):
+            reporter.error(code, f"{field} must be the supported version 1", path=path)
+    if "document_digest" in value and not isinstance(value["document_digest"], str):
+        reporter.error(code, "document_digest must be a string", path=path)
+    if widget and "run" in value and not _nonempty_string(value["run"]):
+        reporter.error(code, "run must be a nonempty string", path=path)
+
+
 def validate_annotations(
     annotations: object,
     ids: Mapping[str, str],
@@ -59,9 +71,10 @@ def validate_annotations(
     if not isinstance(annotations, dict):
         reporter.error("E_ANNOTATIONS", "annotations must be a JSON object", path=path)
         return
-    allowed = {"main_result", "glossary", "proof_outlines", "explanations", "notes"}
+    allowed = {"main_result", "glossary", "proof_outlines", "explanations", "notes", "schema_version", "document_digest"}
     for key in sorted(set(annotations).difference(allowed)):
         reporter.error("E_ANNOTATIONS", f"unknown annotations field {key!r}", path=f"{path}#/{key}")
+    validate_metadata(annotations, reporter, path)
     main = annotations.get("main_result")
     if main is not None and (not isinstance(main, str) or ids.get(main) in {None, "paragraph", "section", "proof"}):
         reporter.error("E_MAIN_RESULT", f"main_result must name a statement id, not {main!r}", path=f"{path}#/main_result")
@@ -346,8 +359,9 @@ def validate(*, workspace: Path, expectations: Mapping[str, object]) -> common.V
             for field in ("title", "summary"):
                 if not _nonempty_string(manifest.get(field)):
                     reporter.error("E_WIDGET_MANIFEST", f"widget.json needs nonempty {field}", path=f"{relative_directory}/{WIDGET_MANIFEST_NAME}")
-            for key in sorted(set(manifest).difference({"id", "anchor", "kind", "title", "summary", "limitations", "steps", "examples"})):
+            for key in sorted(set(manifest).difference({"id", "anchor", "kind", "title", "summary", "limitations", "steps", "examples", "schema_version", "api_version", "document_digest", "run"})):
                 reporter.error("E_WIDGET_MANIFEST", f"unknown widget.json field {key!r}", path=f"{relative_directory}/{WIDGET_MANIFEST_NAME}")
+            validate_metadata(manifest, reporter, f"{relative_directory}/{WIDGET_MANIFEST_NAME}", widget=True)
             steps = manifest.get("steps")
             if kind == "proof":
                 validate_steps(steps, proofs.get(anchor, []), reporter, f"{relative_directory}/{WIDGET_MANIFEST_NAME}#/steps", require_paragraphs=True, paragraph_text=paragraph_text)

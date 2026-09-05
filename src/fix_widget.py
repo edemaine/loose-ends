@@ -139,14 +139,15 @@ def quick_fix(
     package = source.package
     widget_id = note.get("widget") or ""
     widget_directory = package / visualizations.WIDGETS_DIRECTORY / widget_id
-    manifest = common.load_json(widget_directory / visualizations.WIDGET_MANIFEST_NAME)
-    if not widget_id or not isinstance(manifest, dict):
-        raise common.CodexError(f"unknown widget {widget_id!r}")
-    document = visualizations.load_document(package) or {}
-    previous = visualizations.find_note(package, note["follows"]) if note.get("follows") else None
     workspace = Path(tempfile.mkdtemp(prefix=".fix-run-", dir=source.directory)).resolve()
     try:
-        shutil.copytree(widget_directory, workspace / "widget", ignore=shutil.ignore_patterns(visualizations.WIDGET_REVIEW_NAME))
+        with visualizations.package_lock(package):
+            manifest = common.load_json(widget_directory / visualizations.WIDGET_MANIFEST_NAME)
+            if not widget_id or not isinstance(manifest, dict):
+                raise common.CodexError(f"unknown widget {widget_id!r}")
+            document = visualizations.load_document(package) or {}
+            previous = visualizations.find_note(package, note["follows"]) if note.get("follows") else None
+            shutil.copytree(widget_directory, workspace / "widget", ignore=shutil.ignore_patterns(visualizations.WIDGET_REVIEW_NAME))
         reader = workspace / "reader"
         reader.mkdir()
         shutil.copyfile(PROJECT_ROOT / "prompts" / "visualization-widget-api.md", reader / "WIDGET-API.md")
@@ -168,37 +169,38 @@ def quick_fix(
         problems = check_widget(workspace / "widget", widget_id, manifest, document)
         if problems:
             raise common.CodexError("quick fix rejected: " + "; ".join(problems))
-        archive = package / visualizations.RUNS_DIRECTORY / "quick-fixes" / f"{widget_id}-{common.utc_now().replace(':', '').replace('+', 'Z')}"
-        archive.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(widget_directory, archive)
-        previous_review = common.load_json(widget_directory / visualizations.WIDGET_REVIEW_NAME)
-        for path in workspace.joinpath("widget").rglob("*"):
-            if path.is_file():
-                target = widget_directory / path.relative_to(workspace / "widget")
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(path, target)
-        # Keep the package manifest's record of this widget in step with widget.json.
-        updated_manifest = common.load_json(widget_directory / visualizations.WIDGET_MANIFEST_NAME) or {}
-        package_manifest = visualizations.load_manifest(package)
-        if package_manifest is not None:
-            for entry in package_manifest.get("widgets", []):
-                if isinstance(entry, dict) and entry.get("id") == widget_id:
-                    for field in ("title", "summary", "steps", "examples", "limitations"):
-                        if field in updated_manifest:
-                            entry[field] = updated_manifest[field]
-                    entry["quick_fixes"] = int(entry.get("quick_fixes") or 0) + 1
-            visualizations.write_manifest(package, package_manifest)
-        common.write_json(widget_directory / visualizations.WIDGET_REVIEW_NAME, {
-            "schema_version": visualizations.REVIEW_SCHEMA_VERSION,
-            "document_digest": document.get("source", {}).get("digest", ""),
-            "fidelity": "unreviewed",
-            "interaction_quality": "unreviewed",
-            "summary": f"Quick fix applied without review: {result.get('summary', '')}",
-            "findings": [],
-            "blocking_gaps": [],
-            "provenance": "quick",
-            "previous_review": previous_review if isinstance(previous_review, dict) else None,
-        })
+        with visualizations.package_lock(package):
+            archive = package / visualizations.RUNS_DIRECTORY / "quick-fixes" / f"{widget_id}-{common.utc_now().replace(':', '').replace('+', 'Z')}"
+            archive.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(widget_directory, archive)
+            previous_review = common.load_json(widget_directory / visualizations.WIDGET_REVIEW_NAME)
+            for path in workspace.joinpath("widget").rglob("*"):
+                if path.is_file():
+                    target = widget_directory / path.relative_to(workspace / "widget")
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(path, target)
+            # Keep the package manifest's record of this widget in step with widget.json.
+            updated_manifest = common.load_json(widget_directory / visualizations.WIDGET_MANIFEST_NAME) or {}
+            package_manifest = visualizations.load_manifest(package)
+            if package_manifest is not None:
+                for entry in package_manifest.get("widgets", []):
+                    if isinstance(entry, dict) and entry.get("id") == widget_id:
+                        for field in ("title", "summary", "steps", "examples", "limitations"):
+                            if field in updated_manifest:
+                                entry[field] = updated_manifest[field]
+                        entry["quick_fixes"] = int(entry.get("quick_fixes") or 0) + 1
+                visualizations.write_manifest(package, package_manifest)
+            common.write_json(widget_directory / visualizations.WIDGET_REVIEW_NAME, {
+                "schema_version": visualizations.REVIEW_SCHEMA_VERSION,
+                "document_digest": document.get("source", {}).get("digest", ""),
+                "fidelity": "unreviewed",
+                "interaction_quality": "unreviewed",
+                "summary": f"Quick fix applied without review: {result.get('summary', '')}",
+                "findings": [],
+                "blocking_gaps": [],
+                "provenance": "quick",
+                "previous_review": previous_review if isinstance(previous_review, dict) else None,
+            })
     except (common.CodexError, OSError, ValueError) as exc:
         raise common.CodexError(common.preserved_workspace_message(exc, workspace)) from exc
     shutil.rmtree(workspace, ignore_errors=True)

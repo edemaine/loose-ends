@@ -1,15 +1,22 @@
 import json
+import multiprocessing
 from pathlib import Path
 import shutil
 import sys
 from tempfile import TemporaryDirectory
+import threading
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from validation import common as validation_common
 from validation import visualization as visualization_validation
 from validation import visualization_review as review_validation
 import codex_cli
+import explain_note
+import fix_widget
+import open_problem_common as common
 import paper_document
 import visualize_paper
 import visualizations
@@ -74,6 +81,45 @@ Figure~\ref{fig:one} shows it.
 \end{thebibliography}
 \end{document}
 """
+
+
+def make_widget(workspace):
+    directory = workspace / "output" / "widgets" / "thm-main"
+    directory.mkdir(parents=True)
+    manifest = {"id": "thm-main", "anchor": "thm:main", "kind": "statement", "title": "T", "summary": "S"}
+    common.write_json(directory / "widget.json", manifest)
+    (directory / "widget.js").write_text('LooseEnds.registerWidget("thm-main", function(c, api) {return {};});', encoding="utf-8")
+    return directory, manifest
+
+
+def install(source, workspace, widgets=(), manifest=None):
+    result = {"widgets": list(widgets), "annotations_updated": True, "notes_addressed": ["note-001"]}
+    common.write_json(workspace / "agent-result.json", result)
+    return visualize_paper._install(
+        source, manifest or {}, [], workspace, result, None, None,
+        options=codex_cli.ModelOptions(), review_options=codex_cli.ModelOptions(),
+        config_digest="", review_config_digest="", codex_version="test", document_digest="digest-1",
+    )
+
+
+def paused_note_completion(package, loaded, release):
+    original = visualizations.load_notes
+
+    def read_then_pause(directory):
+        snapshot = original(directory)
+        loaded.set()
+        if not release.wait(15):
+            raise RuntimeError("test did not release note completion")
+        return snapshot
+
+    with patch.object(visualizations, "load_notes", read_then_pause):
+        visualizations.mark_notes_addressed(Path(package), ["note-001"], "quick")
+
+
+def add_note_worker(package, started, done):
+    started.set()
+    visualizations.add_note(Path(package), {"anchor": "par-2", "quote": "second"})
+    done.set()
 
 
 def build_sample(root: Path) -> dict:
@@ -147,6 +193,7 @@ class PaperDocumentTests(unittest.TestCase):
                 "\\documentclass{article}\\usepackage{amsmath}\\begin{document}\\section{A}\n"
                 "Text with a note\\footnote{The note has \\emph{emphasis} and $x^2$.} here.\n"
                 "\\begin{equation}{x}+y=z\\end{equation}\n"
+                "Before: \\eqref{eq:a} and \\eqref{eq:c}.\n"
                 "\\begin{align}a&=b\\label{eq:a}\\\\c&=d\\label{eq:c}\\end{align} See \\eqref{eq:c}.\n"
                 "\\end{document}",
                 encoding="utf-8",
@@ -157,6 +204,7 @@ class PaperDocumentTests(unittest.TestCase):
         self.assertIn("<em>emphasis</em>", html)
         self.assertIn("{x}+y=z", html)
         self.assertIn('href="#eq:a"', html)  # the second label of the align resolves to the block
+        self.assertNotIn('ref-missing', html)
         self.assertTrue(any("numbered as one equation" in warning for warning in document["warnings"]))
 
     def test_anchor_ids_cover_every_addressable_element(self):
@@ -169,6 +217,81 @@ class PaperDocumentTests(unittest.TestCase):
         self.assertEqual(ids["fig:one"], "figure")
         self.assertEqual(ids["eq:area"], "equation")
         self.assertTrue(any(kind == "paragraph" for kind in ids.values()))
+
+
+class BibliographyConfinementTests(unittest.TestCase):
+    def test_rejects_traversal_and_absolute_paths(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.mkdir()
+            secret = root / "private.bib"
+            secret.write_text("@article{secret, title={SYNTHETIC PRIVATE TITLE}}", encoding="utf-8")
+            for name in ("../private", "../private.bib", secret.as_posix()):
+                with self.subTest(name=name):
+                    pre = paper_document.Preprocessor({})
+                    pre._extract_bibliography(r"\bibliography{" + name + "}", source)
+                    self.assertEqual(pre.bib_items, [])
+                    self.assertTrue(any("outside source tree" in warning for warning in pre.warnings))
+
+    def test_allows_bibliography_in_source_root_from_nested_main(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            nested = root / "chapters"
+            nested.mkdir()
+            (root / "refs.bib").write_text("@article{ok, title={Public title}}", encoding="utf-8")
+            pre = paper_document.Preprocessor({})
+            pre.run(r"\bibliography{../refs}", "", nested, None, None, root=root)
+            self.assertEqual(pre.bib_items[0][0], "ok")
+            self.assertEqual(pre.warnings, [])
+
+    def test_local_bbl_fallback(self):
+        with TemporaryDirectory() as temporary:
+            source = Path(temporary)
+            (source / "other.bbl").write_text(r"\begin{thebibliography}{9}\bibitem{ok}Public title\end{thebibliography}", encoding="utf-8")
+            pre = paper_document.Preprocessor({})
+            pre._extract_bibliography("", source)
+            self.assertEqual(pre.bib_items[0][0], "ok")
+
+    def test_rejects_symlinked_bib_and_bbl(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.mkdir()
+            outside = root / "outside"
+            for filename in ("refs.bib", "main.bbl", "other.bbl"):
+                with self.subTest(filename=filename):
+                    outside.write_text(
+                        "@article{secret, title={Private title}}" if filename.endswith(".bib") else
+                        r"\begin{thebibliography}{9}\bibitem{secret}Private title\end{thebibliography}",
+                        encoding="utf-8",
+                    )
+                    link = source / filename
+                    try:
+                        link.symlink_to(outside)
+                    except OSError as exc:
+                        self.skipTest(f"symlinks unavailable: {exc}")
+                    pre = paper_document.Preprocessor({})
+                    pre._extract_bibliography(r"\bibliography{refs}", source)
+                    self.assertEqual(pre.bib_items, [])
+                    self.assertTrue(any("outside source tree" in warning for warning in pre.warnings))
+                    link.unlink()
+
+
+class EquationReferenceTests(unittest.TestCase):
+    def test_all_equation_aliases_resolve_before_and_after_the_block(self):
+        def reference(label):
+            return {"t": "Link", "c": [["", [], [["reference", label], ["reference-type", "eqref"]]], [], ["#" + label, ""]]}
+
+        refs = {"t": "Para", "c": [reference("eq:a"), {"t": "Space"}, reference("eq:b")]}
+        ast = {"blocks": [refs, {"t": "Para", "c": [{"t": "Math", "c": [{"t": "DisplayMath"}, r"\LEeq{eq:a|eq:b}a=b"]}]}, refs]}
+        pre = paper_document.Preprocessor({})
+        builder = paper_document.Builder(pre, {}, {}, {}, [])
+        root = builder.build(ast)
+        self.assertEqual(builder.labels["eq:b"]["id"], "eq:a")
+        html = paper_document.Renderer(builder, pre).blocks(root.children)
+        self.assertNotIn("ref-missing", html)
+        self.assertEqual(html.count('href="#eq:a"'), 4)
 
 
 class QuickAnswerTests(unittest.TestCase):
@@ -186,8 +309,6 @@ class QuickAnswerTests(unittest.TestCase):
         }
 
     def test_context_and_prompt_stay_small_and_specific(self):
-        import explain_note
-
         document = self.sample_document()
         annotations = {"glossary": [{"term": "lattice", "gloss": "The set $\\mathbb Z^2$."}]}
         note = {"id": "note-001", "anchor": "par-6", "quote": "exterior turn at the corner", "message": "why a multiple?"}
@@ -202,8 +323,6 @@ class QuickAnswerTests(unittest.TestCase):
         self.assertLess(len(prompt), 4000)
 
     def test_apply_answer_stores_a_quick_explanation_and_marks_the_note(self):
-        import explain_note
-
         with TemporaryDirectory() as temporary:
             package = Path(temporary)
             visualizations.write_manifest(package, {"annotations": None, "widgets": [], "runs": []})
@@ -221,8 +340,6 @@ class QuickAnswerTests(unittest.TestCase):
         self.assertEqual(notes[0]["addressed_run"], "quick-answer")
 
     def test_sanitize_math_text_repairs_control_characters_and_delimiters(self):
-        import explain_note
-
         broken = "Here $\x00$\\mathbb Z u$ means combinations $au+bv$ with \\(a,b\\in\\mathbb Z\\)."
         self.assertEqual(
             explain_note.sanitize_math_text(broken),
@@ -231,8 +348,6 @@ class QuickAnswerTests(unittest.TestCase):
         self.assertEqual(explain_note.sanitize_math_text("plain $x$ text"), "plain $x$ text")
 
     def test_revision_replaces_the_previous_quick_answer(self):
-        import explain_note
-
         with TemporaryDirectory() as temporary:
             package = Path(temporary)
             visualizations.write_manifest(package, {"annotations": "annotations.json", "widgets": [], "runs": []})
@@ -249,14 +364,74 @@ class QuickAnswerTests(unittest.TestCase):
         self.assertEqual(ids, ["quick-note-002"])
 
     def test_phrase_falls_back_to_the_quote_when_the_model_misquotes(self):
-        import explain_note
-
         note = {"id": "n", "anchor": "par-6", "quote": "exterior turn at the corner is", "message": ""}
         self.assertEqual(explain_note._phrase_for({"phrase": "not present"}, note, "The exterior turn at the corner is a multiple."), "exterior turn at the corner is")
         self.assertEqual(explain_note._phrase_for({"phrase": "Restrict $\\T_p$ to $P$ and"}, note, "Restrict $\\mathcal T_p$ to $P$ and $P^*$."), "Restrict to and")
 
 
 class InstallMergeTests(unittest.TestCase):
+    def test_installs_annotations_with_or_without_widgets_and_preserves_live_state(self):
+        for with_widget in (False, True):
+            with self.subTest(with_widget=with_widget), TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                source = visualize_paper.SourceRef("draft", root, root, "Test", (), "test")
+                source.package.mkdir()
+                workspace = root / "generated"
+                (workspace / "output").mkdir(parents=True)
+                common.write_json(workspace / "output" / "annotations.json", {"glossary": []})
+                note = visualizations.add_note(source.package, {"anchor": "par-1", "quote": "first"})
+                second = visualizations.add_note(source.package, {"anchor": "par-2", "quote": "second"})
+                explain_note.apply_answer(source.package, second, {"title": "Answer", "text": "Explanation"}, "second")
+                visualizations.write_manifest(source.package, {"widgets": [], "runs": [], "live_field": "preserve"})
+                widgets = []
+                if with_widget:
+                    _, widget = make_widget(workspace)
+                    widgets.append(widget)
+                with patch.object(common, "report_artifacts"):
+                    installed = install(source, workspace, widgets, manifest={"outdated": True})
+                self.assertTrue((installed / "agent-result.json").is_file())
+                annotations = common.load_json(source.package / "annotations.json")
+                self.assertEqual(annotations["document_digest"], "digest-1")
+                self.assertEqual(annotations["schema_version"], 1)
+                self.assertEqual(annotations["explanations"][0]["note"], second["id"])
+                self.assertEqual(visualizations.find_note(source.package, note["id"])["addressed_run"], "run-001")
+                self.assertEqual(visualizations.load_manifest(source.package)["live_field"], "preserve")
+                if with_widget:
+                    directory = source.package / "widgets" / "thm-main"
+                    stamped = common.load_json(directory / "widget.json")
+                    self.assertEqual(stamped["document_digest"], "digest-1")
+                    self.assertEqual(stamped["run"], "run-001")
+                    self.assertEqual(fix_widget.check_widget(directory, "thm-main", widget), [])
+
+    def test_failed_stamping_does_not_replace_live_widgets_or_install_a_run(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = visualize_paper.SourceRef("draft", root, root, "Test", (), "test")
+            source.package.mkdir()
+            workspace = root / "generated"
+            _, widget = make_widget(workspace)
+            destination = source.package / "widgets" / "thm-main"
+            destination.mkdir(parents=True)
+            (destination / "widget.js").write_text("old widget", encoding="utf-8")
+            with patch.object(visualizations, "stamp_widget_files", side_effect=OSError("stamp failed")):
+                with self.assertRaisesRegex(common.CodexError, "stamp failed"):
+                    install(source, workspace, [widget])
+            self.assertEqual((destination / "widget.js").read_text(encoding="utf-8"), "old widget")
+            self.assertFalse((source.package / "runs" / "run-001").exists())
+
+    def test_invalid_annotations_fail_before_replacing_live_widget(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = visualize_paper.SourceRef("draft", root, root, "Test", (), "test")
+            source.package.mkdir()
+            workspace = root / "generated"
+            _, widget = make_widget(workspace)
+            (workspace / "output" / "annotations.json").write_text("not JSON", encoding="utf-8")
+            with self.assertRaises(common.CodexError):
+                install(source, workspace, [widget])
+            self.assertFalse((source.package / "widgets" / "thm-main").exists())
+            self.assertFalse((source.package / "runs" / "run-001").exists())
+
     def test_quick_answers_survive_a_full_run_unless_addressed(self):
         live = {"glossary": [], "explanations": [
             {"id": "quick-note-001", "note": "note-001", "provenance": "quick", "anchor": "par-1", "phrase": "a", "text": "t"},
@@ -302,8 +477,6 @@ class QuickFixTests(unittest.TestCase):
             self.assertEqual(note["widget"], "thm-main")
 
     def test_check_widget_rejects_unsafe_or_renamed_widgets(self):
-        import fix_widget
-
         with TemporaryDirectory() as temporary:
             directory = Path(temporary)
             original = {"id": "thm-main", "anchor": "thm:main", "kind": "statement"}
@@ -344,6 +517,149 @@ class QuickFixTests(unittest.TestCase):
         with TemporaryDirectory() as temporary:
             with self.assertRaises(ValueError):
                 visualizations.add_note(Path(temporary), {"anchor": "p", "quote": "q", "follows": "nope"})
+
+
+class PackageConcurrencyTests(unittest.TestCase):
+    def test_full_install_cannot_overwrite_an_answer_finishing_during_merge(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = visualize_paper.SourceRef("draft", root, root, "Test", (), "test")
+            package = source.package
+            package.mkdir()
+            workspace = root / "generated"
+            (workspace / "output").mkdir(parents=True)
+            common.write_json(workspace / "output" / "annotations.json", {"glossary": []})
+            visualizations.add_note(package, {"anchor": "par-1", "quote": "first"})
+            note = visualizations.add_note(package, {"anchor": "par-2", "quote": "second"})
+            loaded, release, started, done = [threading.Event() for _ in range(4)]
+            failures = []
+            original_merge = visualizations.merge_live_annotations
+
+            def pause_merge(*args, **kwargs):
+                merged = original_merge(*args, **kwargs)
+                loaded.set()
+                if not release.wait(10):
+                    raise RuntimeError("test did not release installation")
+                return merged
+
+            def full_run():
+                try:
+                    install(source, workspace)
+                except Exception as exc:
+                    failures.append(exc)
+
+            def answer():
+                try:
+                    started.set()
+                    explain_note.apply_answer(package=package, note=note, result={"title": "Answer", "text": "Explanation"}, passage="second")
+                    done.set()
+                except Exception as exc:
+                    failures.append(exc)
+
+            with patch.object(visualizations, "merge_live_annotations", pause_merge), patch.object(common, "report_artifacts"):
+                first = threading.Thread(target=full_run)
+                second = threading.Thread(target=answer)
+                first.start()
+                try:
+                    self.assertTrue(loaded.wait(5))
+                    second.start()
+                    self.assertTrue(started.wait(5))
+                    self.assertFalse(done.wait(0.25), "quick answer bypassed the installation lock")
+                finally:
+                    release.set()
+                    first.join(10)
+                    if second.ident is not None:
+                        second.join(10)
+            self.assertFalse(first.is_alive())
+            self.assertFalse(second.is_alive())
+            self.assertEqual(failures, [])
+            self.assertEqual(visualizations.load_explanations(package)[0]["note"], note["id"])
+            self.assertEqual(visualizations.find_note(package, note["id"])["addressed_run"], "quick-answer")
+            self.assertEqual(common.load_json(package / "annotations.json")["document_digest"], "digest-1")
+
+    def test_note_completion_cannot_overwrite_a_concurrent_add_in_another_process(self):
+        context = multiprocessing.get_context("spawn")
+        with TemporaryDirectory() as temporary:
+            package = Path(temporary)
+            visualizations.add_note(package, {"anchor": "par-1", "quote": "first"})
+            loaded, release, started, done = [context.Event() for _ in range(4)]
+            completing = context.Process(target=paused_note_completion, args=(temporary, loaded, release))
+            adding = context.Process(target=add_note_worker, args=(temporary, started, done))
+            completing.start()
+            try:
+                self.assertTrue(loaded.wait(10))
+                adding.start()
+                self.assertTrue(started.wait(10))
+                self.assertFalse(done.wait(0.25), "addition bypassed the worker's package lock")
+            finally:
+                release.set()
+                for process in (completing, adding):
+                    if process.pid is not None:
+                        process.join(10)
+                        if process.is_alive():
+                            process.terminate()
+                            process.join(5)
+            self.assertEqual(completing.exitcode, 0)
+            self.assertEqual(adding.exitcode, 0)
+            notes = visualizations.load_notes(package)
+            self.assertEqual([note["quote"] for note in notes], ["first", "second"])
+            self.assertEqual(notes[0]["addressed_run"], "quick")
+
+    def test_concurrent_quick_answers_preserve_both_explanations(self):
+        with TemporaryDirectory() as temporary:
+            package = Path(temporary)
+            notes = [visualizations.add_note(package, {"anchor": "par-1", "quote": quote}) for quote in ("first", "second")]
+            loaded, release, started, done = [threading.Event() for _ in range(4)]
+            failures = []
+            original = common.load_json
+
+            def read_then_pause(path):
+                snapshot = original(path)
+                if path.name == "annotations.json" and threading.current_thread().name == "first-answer":
+                    loaded.set()
+                    if not release.wait(10):
+                        raise RuntimeError("test did not release answer")
+                return snapshot
+
+            def answer(note):
+                try:
+                    if note == notes[1]:
+                        started.set()
+                    explain_note.apply_answer(package, note, {"title": "Answer", "text": "Explanation"}, note["quote"])
+                    if note == notes[1]:
+                        done.set()
+                except Exception as exc:
+                    failures.append(exc)
+
+            with patch.object(common, "load_json", read_then_pause):
+                first = threading.Thread(target=answer, args=(notes[0],), name="first-answer")
+                second = threading.Thread(target=answer, args=(notes[1],))
+                first.start()
+                try:
+                    self.assertTrue(loaded.wait(5))
+                    second.start()
+                    self.assertTrue(started.wait(5))
+                    self.assertFalse(done.wait(0.25))
+                finally:
+                    release.set()
+                    first.join(10)
+                    if second.ident is not None:
+                        second.join(10)
+            self.assertFalse(first.is_alive())
+            self.assertFalse(second.is_alive())
+            self.assertEqual(failures, [])
+            self.assertEqual({entry["note"] for entry in visualizations.load_explanations(package)}, {note["id"] for note in notes})
+            self.assertTrue(all(note["addressed_run"] == "quick-answer" for note in visualizations.load_notes(package)))
+
+    def test_package_lock_is_reentrant_and_released_after_an_exception(self):
+        with TemporaryDirectory() as temporary:
+            package = Path(temporary)
+            with self.assertRaisesRegex(ValueError, "test error"):
+                with visualizations.package_lock(package):
+                    visualizations.add_note(package, {"anchor": "par-1", "quote": "first"})
+                    raise ValueError("test error")
+            visualizations.add_note(package, {"anchor": "par-2", "quote": "second"})
+            self.assertEqual(len(visualizations.load_notes(package)), 2)
 
 
 class ReaderNoteTests(unittest.TestCase):
@@ -558,6 +874,30 @@ def sample_result(widgets: list) -> dict:
 
 
 class VisualizationValidationTests(unittest.TestCase):
+    def test_stamped_widgets_pass_quick_fix_validation(self):
+        with TemporaryDirectory() as temporary:
+            directory, manifest = make_widget(Path(temporary))
+            self.assertEqual(fix_widget.check_widget(directory, "thm-main", manifest), [])
+            visualizations.stamp_widget_files(directory, "digest", "run-001")
+            self.assertEqual(fix_widget.check_widget(directory, "thm-main", manifest), [])
+            stamped = common.load_json(directory / "widget.json")
+            for field, value in (("schema_version", True), ("api_version", 2), ("document_digest", 7), ("run", ""), ("typo", 1)):
+                with self.subTest(field=field):
+                    common.write_json(directory / "widget.json", {**stamped, field: value})
+                    problems = fix_widget.check_widget(directory, "thm-main", manifest)
+                    self.assertTrue(any(field in problem for problem in problems), problems)
+
+    def test_annotation_metadata_is_optional_but_checked(self):
+        for value in ({}, {"schema_version": 1, "document_digest": "digest"}):
+            reporter = validation_common.Reporter()
+            visualization_validation.validate_annotations(value, {}, {}, reporter)
+            self.assertEqual(reporter.issues, [])
+        for field, value in (("schema_version", True), ("schema_version", 2), ("document_digest", []), ("typo", "x")):
+            with self.subTest(field=field, value=value):
+                reporter = validation_common.Reporter()
+                visualization_validation.validate_annotations({field: value}, {}, {}, reporter)
+                self.assertTrue(any(field in issue.render() for issue in reporter.issues))
+
     def test_accepts_annotations_and_widgets_matching_the_request(self):
         with TemporaryDirectory() as temporary:
             workspace = Path(temporary)

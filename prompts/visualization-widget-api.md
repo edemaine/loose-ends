@@ -48,6 +48,10 @@ be in `widget.js` or in files beside it, referenced through `api.assetUrl`.
 
 ## `widget.json`
 
+Installed widgets also carry optional `schema_version: 1`, `api_version: 1`,
+`document_digest` (string), and `run` (string) metadata. Preserve these when
+editing an existing widget; the installer supplies them for new widgets.
+
 ```json
 {
   "id": "lem-tiling-completion",

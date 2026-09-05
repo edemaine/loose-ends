@@ -16,10 +16,17 @@ LLM-generated annotations and widgets:
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+import errno
+from functools import wraps
 import hashlib
+import inspect
 import json
+import os
 from pathlib import Path
 import re
+import threading
+import time
 
 import open_problem_common as common
 import paper_document
@@ -47,6 +54,76 @@ REVIEW_SCHEMA_VERSION = 1
 WIDGET_API_VERSION = 1
 DEFAULT_ANCHOR = "default"
 NOTES_ANCHOR = "notes"
+
+
+_PACKAGE_LOCKS: dict[Path, threading.RLock] = {}
+_PACKAGE_LOCKS_GUARD = threading.Lock()
+_HELD_PACKAGE_LOCKS = threading.local()
+
+
+@contextmanager
+def package_lock(directory: Path):
+    """Serialize package updates across threads and processes, reentrantly.
+
+    Keep the lock file in place: unlinking it could give concurrent writers
+    different lock files. Hold this only for local updates, never Codex runs.
+    """
+    directory = directory.resolve()
+    with _PACKAGE_LOCKS_GUARD:
+        thread_lock = _PACKAGE_LOCKS.setdefault(directory, threading.RLock())
+    with thread_lock:
+        held = getattr(_HELD_PACKAGE_LOCKS, "directories", None)
+        if held is None:
+            held = _HELD_PACKAGE_LOCKS.directories = set()
+        if directory in held:
+            yield
+            return
+        directory.mkdir(parents=True, exist_ok=True)
+        with (directory / ".update.lock").open("a+b") as lock:
+            if os.name == "nt":
+                import msvcrt
+
+                lock.seek(0, os.SEEK_END)
+                if lock.tell() == 0:
+                    lock.write(b"0")
+                    lock.flush()
+                while True:
+                    try:
+                        lock.seek(0)
+                        msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+                        break
+                    except OSError as exc:
+                        if exc.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                            raise
+                        time.sleep(0.05)
+                def unlock():
+                    lock.seek(0)
+                    msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+                def unlock():
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            held.add(directory)
+            try:
+                yield
+            finally:
+                held.remove(directory)
+                unlock()
+
+
+def locked_package(function):
+    """Protect a read-modify-write operation whose first argument is a package."""
+    signature = inspect.signature(function)
+    parameter = next(iter(signature.parameters))
+
+    @wraps(function)
+    def locked(*args, **kwargs):
+        directory = signature.bind(*args, **kwargs).arguments[parameter]
+        with package_lock(directory):
+            return function(*args, **kwargs)
+    return locked
 
 
 def package_key(directory: Path) -> str:
@@ -205,6 +282,7 @@ def write_notes(directory: Path, notes: list[dict]) -> None:
     common.write_json(directory / NOTES_NAME, {"schema_version": 1, "notes": notes})
 
 
+@locked_package
 def add_note(directory: Path, note: dict) -> dict:
     """Validate and append one reader note; returns the stored note."""
     anchor = note.get("anchor")
@@ -262,6 +340,7 @@ def add_note(directory: Path, note: dict) -> dict:
     return stored
 
 
+@locked_package
 def remove_note(directory: Path, note_id: str) -> bool:
     """Remove a note and any quick explanation that answered it."""
     notes = load_notes(directory)
@@ -286,6 +365,7 @@ def load_explanations(directory: Path) -> list:
     return explanations if isinstance(explanations, list) else []
 
 
+@locked_package
 def mark_notes_addressed(directory: Path, note_ids: list[str], run_name: str, outcome: str = "") -> None:
     notes = load_notes(directory)
     wanted = set(note_ids)

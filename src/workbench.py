@@ -773,7 +773,6 @@ class CatalogManager:
         self.manuscripts.mkdir(parents=True, exist_ok=True)
         self.hub = hub
         self.lock = threading.RLock()
-        self.notes_lock = threading.Lock()
         self.version = 0
         self.error = ""
         self.catalog: dict = {
@@ -1263,7 +1262,7 @@ class CatalogManager:
         directory = self.visualization_directory(key)
         if not isinstance(body, dict) or not isinstance(body.get("note"), dict):
             raise ValueError("a note is required")
-        with self.notes_lock:
+        with visualizations.package_lock(directory):
             note = visualizations.add_note(directory, body["note"])
         source = directory.parent
         argv = [
@@ -1299,7 +1298,7 @@ class CatalogManager:
         directory = self.visualization_directory(key)
         if not isinstance(body, dict) or not isinstance(body.get("note"), dict):
             raise ValueError("a note is required")
-        with self.notes_lock:
+        with visualizations.package_lock(directory):
             note = visualizations.add_note(directory, body["note"])
         if not note.get("widget"):
             raise ValueError("the note must name a widget")
@@ -1334,7 +1333,7 @@ class CatalogManager:
     def update_notes(self, key: str, body: object) -> dict:
         """Add or remove one reader note and return the current list."""
         directory = self.visualization_directory(key)
-        with self.notes_lock:
+        with visualizations.package_lock(directory):
             return self._update_notes(directory, body)
 
     def _update_notes(self, directory: Path, body: object) -> dict:
