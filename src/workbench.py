@@ -200,10 +200,6 @@ def _manuscript_abstract(path: Path) -> str:
         value.replace("``", "“")
         .replace("''", "”")
         .replace("~", " ")
-        .replace(r"\%", "%")
-        .replace(r"\&", "&")
-        .replace(r"\_", "_")
-        .replace(r"\#", "#")
     )
 
 
