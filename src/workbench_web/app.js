@@ -3838,6 +3838,19 @@ function field(name, label, { type = "text", value = "", help = "", full = false
   return wrapper;
 }
 
+function modelField(name, label, value, defaultLabel) {
+  const options = [
+    ["", defaultLabel],
+    ["gpt-6-astra", "GPT-6 Astra"],
+    ["gpt-5.6-sol", "GPT-5.6 Sol"],
+    ["gpt-5.6-terra", "GPT-5.6 Terra"],
+    ["gpt-5.6-luna", "GPT-5.6 Luna"],
+  ];
+  // Preserve model IDs from saved task drafts, including older models.
+  if (value && !options.some(([id]) => id === value)) options.push([value, value]);
+  return field(name, label, { type: "select", value: value || "", options });
+}
+
 function checkbox(name, label, help = "", checked = false) {
   const wrapper = node("label", "field checkbox");
   const input = node("input");
@@ -4134,10 +4147,9 @@ function renderTaskConfiguration(errorMessage = "") {
   modelSettings.append(node("h3", "", "Model and web-search settings"));
   const advancedGrid = node("div", "form-grid");
   const taskDefaults = state.settings.taskDefaults?.[task.action] || {};
-  advancedGrid.append(field("model", "Model", {
-    value: options.model || "",
-    help: `Default: ${taskDefaults.model || "unavailable"}.`,
-  }));
+  advancedGrid.append(modelField(
+    "model", "Model", options.model, `Default (${taskDefaults.model || "unavailable"})`,
+  ));
   advancedGrid.append(field("reasoningEffort", "Reasoning effort", {
     type: "select", value: options.reasoningEffort || "",
     options: [["", `Default (${taskDefaults.reasoningEffort || "unavailable"})`], ...["low", "medium", "high", "xhigh", "max", "ultra"].map(value => [value, value])],
@@ -4150,7 +4162,7 @@ function renderTaskConfiguration(errorMessage = "") {
     }));
   }
   if (["solve", "write", "revise"].includes(task.action)) {
-    advancedGrid.append(field("reviewModel", "Critic model", { value: options.reviewModel || "", help: "Blank inherits the primary model." }));
+    advancedGrid.append(modelField("reviewModel", "Critic model", options.reviewModel, "Inherit primary model"));
     advancedGrid.append(field("reviewReasoningEffort", "Critic reasoning", {
       type: "select", value: options.reviewReasoningEffort || "",
       options: [["", "Inherit"], ...["low", "medium", "high", "xhigh", "max", "ultra"].map(value => [value, value])],

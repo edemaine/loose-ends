@@ -23,7 +23,7 @@ from validation import common as validation_common
 
 REASONING_EFFORTS = ("low", "medium", "high", "xhigh", "max", "ultra")
 WEB_SEARCH_MODES = ("disabled", "indexed", "live")
-DEFAULT_MODEL = "gpt-5.6-sol"
+DEFAULT_MODEL = "gpt-6-astra"
 DEFAULT_REASONING_EFFORT = "xhigh"
 DEFAULT_VALIDATION_PROMPT_PATH = (
     Path(__file__).resolve().parent.parent / "prompts" / "validate-output.md"

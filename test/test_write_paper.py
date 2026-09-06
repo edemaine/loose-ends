@@ -606,7 +606,7 @@ class WritePaperTests(unittest.TestCase):
 
     def test_cli_defaults_to_one_live_frontier_round(self):
         parsed = write_paper.build_parser().parse_args(["attempt-001"])
-        self.assertEqual(parsed.model, "gpt-5.6-sol")
+        self.assertEqual(parsed.model, "gpt-6-astra")
         self.assertEqual(parsed.reasoning_effort, "xhigh")
         self.assertEqual(parsed.web_search, "live")
         self.assertEqual(parsed.max_rounds, 1)

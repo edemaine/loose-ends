@@ -396,7 +396,7 @@ python src/analyze_papers.py papers/edemaine --jobs 4
 
 The default is one agent at a time. Start with modest concurrency because every
 job consumes Codex capacity independently. All Codex-backed scripts default to
-`--model gpt-5.6-sol --reasoning-effort xhigh`; use either option to override
+`--model gpt-6-astra --reasoning-effort xhigh`; use either option to override
 that choice, or `--force` to regenerate a current analysis.
 Parallel jobs are started one second apart to avoid Windows CLI startup races;
 after startup, their paper analyses run concurrently. Pre-thread Windows
