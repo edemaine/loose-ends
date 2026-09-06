@@ -942,6 +942,20 @@ class WorkbenchPlanningTests(unittest.TestCase):
 
         self.assertNotEqual(before, after)
 
+    def test_manuscript_abstract_preserves_math_and_code_source(self):
+        abstract = (
+            r"Counting is \(\#\mathrm P\)-complete. A~B and \emph{prose}." "\n\n"
+            r"\[\textbf{A}~\hat{x}\]" "\n\n"
+            "~~~tex\n  \\emph{literal}~text\n~~~"
+        )
+        with TemporaryDirectory() as temporary:
+            source = Path(temporary) / "main.tex"
+            source.write_text(
+                "\\begin{abstract}\n" + abstract + "\n\\end{abstract}\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(workbench._manuscript_abstract(source), abstract)
+
     def test_manuscript_inventory_reports_draft_progress(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -989,8 +1003,8 @@ class WorkbenchPlanningTests(unittest.TestCase):
             self.assertEqual(len(records), 1)
             self.assertEqual(
                 records[0]["latest"]["abstract"],
-                "A *concise* abstract with **strong** $O(n^2)$ work by "
-                "Gourvès, Erdős, François, and a naïve coauthor.",
+                "A \\emph{concise} abstract with \\textbf{strong} $O(n^2)$ work by "
+                "Gourv\\`es, Erd\\H{o}s, Fran\\c{c}ois, and a na\\\"ive coauthor.",
             )
             self.assertGreater(
                 records[0]["latest"]["createdTimestamp"],

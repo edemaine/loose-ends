@@ -78,7 +78,7 @@ IGNORED_PREFIXES = (
     ".triage-install-",
 )
 DRAFT_RE = re.compile(r"^draft-([0-9]{3,})$")
-CATALOG_CACHE_SCHEMA_VERSION = 3
+CATALOG_CACHE_SCHEMA_VERSION = 4
 ROOT_CACHE_DIRECTORY = ".loose-ends"
 PAPER_CACHE_FILENAME = "workbench-papers.json"
 MANUSCRIPT_CACHE_FILENAME = "workbench-manuscripts.json"
@@ -113,7 +113,7 @@ def _read_json(path: Path) -> dict:
 
 
 def _manuscript_abstract(path: Path) -> str:
-    """Extract a display-friendly abstract from a draft's LaTeX source."""
+    """Extract abstract source for the browser's LaTeX-aware Markdown renderer."""
     try:
         tex = path.read_text(encoding="utf-8")
     except (OSError, UnicodeError):
@@ -126,81 +126,11 @@ def _manuscript_abstract(path: Path) -> str:
     if match is None:
         return ""
     lines = [
-        re.sub(r"(?<!\\)%.*$", "", line).strip()
+        re.sub(r"(?<!\\)%.*$", "", line)
         for line in match.group(1).splitlines()
     ]
-    paragraphs = [
-        re.sub(r"\s+", " ", paragraph).strip()
-        for paragraph in re.split(r"\n\s*\n", "\n".join(lines))
-    ]
-    value = "\n\n".join(paragraph for paragraph in paragraphs if paragraph)
-    latex_letters = {
-        "ae": "æ", "AE": "Æ", "oe": "œ", "OE": "Œ",
-        "o": "ø", "O": "Ø", "aa": "å", "AA": "Å",
-        "ss": "ß", "l": "ł", "L": "Ł", "i": "i", "j": "j",
-    }
-    value = re.sub(
-        r"\\(ae|AE|oe|OE|aa|AA|ss|o|O|l|L|i|j)(?![A-Za-z])",
-        lambda match: latex_letters[match.group(1)],
-        value,
-    )
-    accent_marks = {
-        "'": "\N{COMBINING ACUTE ACCENT}",
-        "`": "\N{COMBINING GRAVE ACCENT}",
-        '"': "\N{COMBINING DIAERESIS}",
-        "^": "\N{COMBINING CIRCUMFLEX ACCENT}",
-        "~": "\N{COMBINING TILDE}",
-        "=": "\N{COMBINING MACRON}",
-        ".": "\N{COMBINING DOT ABOVE}",
-        "c": "\N{COMBINING CEDILLA}",
-        "k": "\N{COMBINING OGONEK}",
-        "u": "\N{COMBINING BREVE}",
-        "v": "\N{COMBINING CARON}",
-        "H": "\N{COMBINING DOUBLE ACUTE ACCENT}",
-        "r": "\N{COMBINING RING ABOVE}",
-        "d": "\N{COMBINING DOT BELOW}",
-    }
-
-    def unicode_accent(match: re.Match) -> str:
-        return unicodedata.normalize(
-            "NFC", f"{match.group(2) or match.group(3)}{accent_marks[match.group(1)]}"
-        )
-
-    value = re.sub(
-        r"\\(['\"`^~=.]|[ckuvHrd])\s*(?:\{([A-Za-z])\}|([A-Za-z]))",
-        unicode_accent,
-        value,
-    )
-    # Preserve math for the Markdown/KaTeX renderer, while cleaning the most
-    # common prose-only LaTeX conventions.
-    formatting = {
-        "emph": ("*", "*"),
-        "textit": ("*", "*"),
-        "textbf": ("**", "**"),
-        "texttt": ("`", "`"),
-        "textrm": ("", ""),
-        "textsf": ("", ""),
-        "mbox": ("", ""),
-    }
-
-    def markdown_format(match: re.Match) -> str:
-        opening, closing = formatting[match.group(1)]
-        return f"{opening}{match.group(2)}{closing}"
-
-    for _ in range(8):
-        cleaned = re.sub(
-            r"\\(emph|textit|textbf|textrm|textsf|texttt|mbox)\s*\{([^{}]*)\}",
-            markdown_format,
-            value,
-        )
-        if cleaned == value:
-            break
-        value = cleaned
-    return (
-        value.replace("``", "“")
-        .replace("''", "”")
-        .replace("~", " ")
-    )
+    # Preserve source syntax for the abstract-specific Markdown plugin.
+    return "\n".join(lines).strip()
 
 
 def _paper_metadata(

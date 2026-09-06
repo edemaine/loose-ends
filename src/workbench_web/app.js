@@ -1787,12 +1787,12 @@ function loadReviewDetail(summary) {
     });
 }
 
-function markdown(value, missing = "No content available.") {
+function markdown(value, missing = "No content available.", env = {}) {
   const body = node("div", "markdown");
   if (!value) {
     body.append(node("p", "", missing));
   } else if (markdownRenderer) {
-    body.innerHTML = markdownRenderer.render(value);
+    body.innerHTML = markdownRenderer.render(value, env);
   } else {
     const pre = node("pre", "", value);
     body.append(pre);
@@ -2022,10 +2022,10 @@ function appendStringList(parent, title, values) {
   parent.append(section);
 }
 
-function summaryPanel(title, value, missing = "No summary available.") {
+function summaryPanel(title, value, missing = "No summary available.", env = {}) {
   const panel = node("section", "panel");
   panel.append(node("h2", "", title));
-  panel.append(markdown(value, missing));
+  panel.append(markdown(value, missing, env));
   return panel;
 }
 
@@ -2796,7 +2796,7 @@ function renderManuscripts() {
     manuscriptPath: manuscript.path,
     draftPath: draft.path,
   }));
-  if (draft.abstract) shell.append(summaryPanel("Abstract", draft.abstract));
+  if (draft.abstract) shell.append(summaryPanel("Abstract", draft.abstract, undefined, { latexProse: true }));
   if (draft.summary) shell.append(summaryPanel("Paper critic", draft.summary));
   const sources = draft.sources || { papers: [], problems: [] };
   if (sources.papers.length || sources.problems.length) {

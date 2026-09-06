@@ -1120,11 +1120,22 @@ though user configuration is ignored.
 
 ## Development
 
-Code lives in `src/` and tests live in `test/`. Run:
+Code lives in `src/` and tests live in `test/`. With Node.js 22+ and pnpm
+installed, install the renderer test dependencies once (and after lockfile changes):
+
+```sh
+pnpm --dir test install --frozen-lockfile
+```
+
+Run the full suite:
 
 ```sh
 python -m unittest discover -s test -v
 ```
+
+This also runs the Node renderer tests through a Python wrapper. If pytest is
+installed, `python -m pytest test` runs the same tests. To run just the renderer
+tests, use `pnpm --dir test test`.
 
 The download script batches arXiv metadata API lookups, then downloads content
 from the PDF and source links. Author lookup uses the API's `au:` query field
