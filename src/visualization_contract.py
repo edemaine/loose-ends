@@ -32,6 +32,7 @@ RUN_RE = re.compile(r"^run-([0-9]{3,})$")
 WIDGET_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,80}$")
 MAX_NOTES = 200
 MAX_NOTE_TEXT = 2000
+MAX_WIDGET_STATE_BYTES = 32 * 1024
 DEFAULT_ANCHOR = "default"
 NOTES_ANCHOR = "notes"
 

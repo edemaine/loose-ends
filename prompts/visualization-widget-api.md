@@ -15,6 +15,8 @@ LooseEnds.registerWidget("<id>", function (container, api) {
   return {
     setStep(index, step) { /* proof widgets: show step `index` */ },
     setExample(id) { /* switch the running example declared in widget.json */ },
+    getState() { return { version: 1 /* editable mathematical inputs */ }; },
+    setState(snapshot) { /* validate, then restore inputs; false if incompatible */ },
     destroy() { /* optional cleanup */ },
   };
 });
@@ -25,6 +27,26 @@ time. Do not use ES module syntax, `import`, `eval`, `new Function`, workers,
 network access (`fetch` to remote hosts, `XMLHttpRequest`, `WebSocket`),
 browser storage, or external scripts and stylesheets. Everything you need must
 be in `widget.js` or in files beside it, referenced through `api.assetUrl`.
+
+## Reproducible inputs
+
+Implement `getState()` and `setState(snapshot)` for widgets with editable
+geometry or parameters. These hooks are optional for older widgets; without
+them feedback captures only the selected example and step, not edited inputs.
+`getState()` must return a JSON object no larger than 32 KiB (UTF-8), with a
+version field and all inputs needed to reproduce the picture. Include fixed
+random seeds when relevant; exclude DOM nodes, functions, nonfinite numbers,
+and transient presentation state. Keep snapshots compatible across fixes.
+
+`setState(snapshot)` validates the entire snapshot before changing anything.
+Return `false` for an unsupported version or invalid input, leaving inputs
+unchanged; otherwise restore it synchronously. The reader restores in order:
+`setExample(id)`, `setState(snapshot)`, `setStep(index, step)`. A step change
+must preserve edited inputs. The reader captures feedback when its form opens
+and captures again just before a quick-fix reload to preserve ongoing edits.
+If an example disappears or a snapshot cannot be restored, the reader warns
+and uses the default/preset inputs. Test state round-tripping and compatibility
+alongside ordinary interactions.
 
 ## The `api` object
 

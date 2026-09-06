@@ -49,6 +49,22 @@ def _step_context(widget: dict, note: dict) -> list[str]:
     return lines
 
 
+def _widget_state_context(note: dict) -> list[str]:
+    lines = []
+    if note.get("example"):
+        lines.append(f"Selected running example: `{note['example']}`.")
+    if note.get("widget_state") is not None:
+        lines.extend([
+            "Captured edited inputs (JSON):",
+            json.dumps(note["widget_state"], ensure_ascii=False, allow_nan=False),
+            "Reproduce with setExample(id), then setState(snapshot), then setStep(index). "
+            "Preserve support for this state format where possible; test this exact input.",
+        ])
+    if note.get("widget_state_error"):
+        lines.append(f"Input capture was incomplete: {note['widget_state_error']}")
+    return ["", *lines] if lines else []
+
+
 def render_prompt(widget: dict, note: dict, document_title: str, previous: dict | None = None) -> str:
     lines = [
         "# Fix one reader-reported problem in a paper-reader widget",
@@ -64,6 +80,7 @@ def render_prompt(widget: dict, note: dict, document_title: str, previous: dict 
         "",
         f"> {note.get('message') or note.get('quote') or 'Something is wrong with this widget.'}",
         *_step_context(widget, note),
+        *_widget_state_context(note),
         *(["", f"This follows an earlier request, \"{previous.get('message', '')}\", which was applied as: {previous.get('outcome') or 'a change without a recorded summary'}. The reader is still not satisfied; do not repeat that change, address what is still wrong."] if previous else []),
         "",
         "Make the smallest change to the files under `widget/` that fixes what "

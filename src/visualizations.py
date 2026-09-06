@@ -49,6 +49,7 @@ from visualization_contract import (
     NOTE_ID_RE,
     MAX_NOTES,
     MAX_NOTE_TEXT,
+    MAX_WIDGET_STATE_BYTES,
     RUN_RE,
     WIDGET_ID_RE,
     READER_FILES,
@@ -572,6 +573,25 @@ def add_note(directory: Path, note: dict) -> dict:
         raise ValueError("widget must be a widget id")
     if widget and not (directory / WIDGETS_DIRECTORY / widget / WIDGET_MANIFEST_NAME).is_file():
         raise ValueError(f"unknown widget {widget}")
+    example = note.get("example", "")
+    if not isinstance(example, str) or (example and not WIDGET_ID_RE.fullmatch(example)):
+        raise ValueError("example must be an example id")
+    widget_state_error = note.get("widget_state_error", "")
+    if not isinstance(widget_state_error, str) or len(widget_state_error) > 300:
+        raise ValueError("widget_state_error must be short text")
+    widget_state = note.get("widget_state")
+    if not widget and (example or widget_state is not None or widget_state_error):
+        raise ValueError("example and widget state require a widget")
+    if widget_state is not None:
+        if not isinstance(widget_state, dict):
+            raise ValueError("widget_state must be a JSON object")
+        try:
+            encoded = json.dumps(widget_state, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+            if len(encoded.encode("utf-8")) > MAX_WIDGET_STATE_BYTES:
+                raise ValueError("widget_state exceeds 32 KiB")
+            widget_state = json.loads(encoded)
+        except (TypeError, ValueError, RecursionError) as error:
+            raise ValueError(f"invalid widget_state: {error}") from error
     step = note.get("step")
     if step is not None and (isinstance(step, bool) or not isinstance(step, int) or step < 0 or step > 200):
         raise ValueError("step must be a step index")
@@ -593,6 +613,9 @@ def add_note(directory: Path, note: dict) -> dict:
         "latex": latex.strip(),
         "revises": revises.strip(),
         "widget": widget,
+        "example": example,
+        "widget_state": widget_state,
+        "widget_state_error": widget_state_error,
         "step": step,
         "step_title": step_title.strip(),
         "follows": follows,

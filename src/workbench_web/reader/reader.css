@@ -87,6 +87,9 @@ a { color: var(--accent); }
 .toolbar-status { color: var(--muted); }
 .reader:not(.outline-hidden) #outline-open { display: none; }
 .notice { margin: 12px 20px 0; padding: 10px 14px; border: 1px solid var(--amber); background: var(--amber-soft); border-radius: 8px; font-family: var(--sans); font-size: 13px; }
+.notice p { margin: 0; }
+.notice p + p { margin-top: 6px; }
+.widget-stale { margin: 8px 12px; color: var(--amber); font-size: 13px; }
 
 /* ---- paper ---- */
 .content { padding: 24px 28px 120px; }

@@ -1,4 +1,5 @@
 import json
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import multiprocessing
 from pathlib import Path
 import shutil
@@ -728,6 +729,52 @@ class PackageConcurrencyTests(unittest.TestCase):
 
 
 class ReaderNoteTests(unittest.TestCase):
+    def test_widget_snapshots_reach_both_generation_paths(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = visualizations.SourceRef("draft", root, root, "Test", (), "test")
+            (source.package / "widgets" / "proof-1").mkdir(parents=True)
+            common.write_json(source.package / "widgets" / "proof-1" / "widget.json", {"id": "proof-1"})
+            snapshot = {"version": 1, "vertices": [[1, 2], [3, 4]], "parameter": 0.5}
+            note = visualizations.add_note(source.package, {
+                "anchor": "proof-1", "quote": "Widget", "message": "Wrong geometry",
+                "widget": "proof-1", "example": "special", "widget_state": snapshot,
+                "step": 1, "step_title": "Reflect",
+            })
+            snapshot["vertices"][0][0] = 99
+            self.assertEqual(note["widget_state"]["vertices"][0][0], 1)
+            stored = visualizations.load_notes(source.package)[0]
+            forwarded = visualize_paper._reader_notes(source, {})[0]
+            for field in ("example", "widget_state", "widget_state_error", "step", "step_title"):
+                self.assertEqual(forwarded[field], stored[field])
+            prompt = fix_widget.render_prompt({"id": "proof-1"}, stored, "Test")
+            self.assertIn("Selected running example: `special`", prompt)
+            self.assertIn('"vertices": [[1, 2], [3, 4]]', prompt)
+            self.assertIn("setExample(id), then setState(snapshot), then setStep(index)", prompt)
+            incomplete = visualizations.add_note(source.package, {
+                "anchor": "proof-1", "quote": "Widget", "widget": "proof-1",
+                "widget_state_error": "Capture failed",
+            })
+            self.assertIn("Input capture was incomplete: Capture failed", fix_widget.render_prompt({"id": "proof-1"}, incomplete, "Test"))
+
+    def test_invalid_widget_snapshots_are_rejected(self):
+        with TemporaryDirectory() as temporary:
+            package = Path(temporary)
+            (package / "widgets" / "proof-1").mkdir(parents=True)
+            common.write_json(package / "widgets" / "proof-1" / "widget.json", {"id": "proof-1"})
+            base = {"anchor": "proof-1", "quote": "Widget", "widget": "proof-1"}
+            cyclic = {}
+            cyclic["self"] = cyclic
+            for value in ([], "text", {"value": float("nan")}, {"value": float("inf")},
+                          {"value": object()}, cyclic, {"text": "é" * 16384}):
+                with self.subTest(value_type=type(value).__name__), self.assertRaises(ValueError):
+                    visualizations.add_note(package, base | {"widget_state": value})
+            for extra in ({"example": "../bad"}, {"widget_state_error": "x" * 301},
+                          {"widget": "", "widget_state": {}}, {"widget": "", "example": "generic"}):
+                with self.subTest(extra=extra), self.assertRaises(ValueError):
+                    visualizations.add_note(package, base | extra)
+            self.assertEqual(visualizations.load_notes(package), [])
+
     def test_notes_are_added_removed_and_marked_addressed(self):
         with TemporaryDirectory() as temporary:
             package = Path(temporary)
@@ -750,6 +797,70 @@ class ReaderNoteTests(unittest.TestCase):
                 visualizations.add_note(package, {"anchor": "../x", "quote": "q"})
             with self.assertRaises(ValueError):
                 visualizations.add_note(package, {"anchor": "par-1", "quote": "  "})
+
+
+class ReaderBrowserTests(unittest.TestCase):
+    def test_widget_reload_feedback_and_persistent_warnings(self):
+        candidates = [
+            shutil.which("chromium"), shutil.which("google-chrome"), shutil.which("msedge"),
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        ]
+        browser = next((path for path in candidates if path and Path(path).is_file()), None)
+        if browser is None:
+            self.skipTest("Headless Chrome/Chromium/Edge is not installed")
+        reader = PROJECT_ROOT / "src" / "workbench_web" / "reader"
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                path = self.path.split("?")[0]
+                if path == "/":
+                    body = '<!doctype html><body><script src="/fixture.js"></script></body>'
+                    content_type = "text/html"
+                elif path == "/reader.html":
+                    body = reader.joinpath("reader.html").read_text(encoding="utf-8")
+                    body = "\n".join(line for line in body.splitlines() if "cdn.jsdelivr.net" not in line)
+                    body = body.replace('<script src="reader.js"', '<script src="/fixture.js"></script><script src="reader.js"')
+                    content_type = "text/html"
+                elif path in ("/reader.js", "/reader.css", "/fixture.js"):
+                    file = PROJECT_ROOT / "test" / "reader_browser.js" if path == "/fixture.js" else reader / path[1:]
+                    body = file.read_text(encoding="utf-8")
+                    content_type = "text/css" if path.endswith(".css") else "text/javascript"
+                elif path == "/widgets/proof-widget/widget.js":
+                    body = "window.installFixtureWidget();"
+                    content_type = "text/javascript"
+                else:
+                    self.send_error(404)
+                    return
+                encoded = body.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", content_type + "; charset=utf-8")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.end_headers()
+                self.wfile.write(encoded)
+
+            def log_message(self, *_args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with TemporaryDirectory(prefix="le-reader-browser-") as profile:
+                result = subprocess.run([
+                    browser, "--headless=new", "--disable-gpu", "--no-first-run",
+                    "--no-default-browser-check", "--disable-background-networking",
+                    "--disable-extensions", "--disable-component-update",
+                    f"--user-data-dir={profile}", "--dump-dom", "--virtual-time-budget=15000",
+                    f"http://127.0.0.1:{server.server_port}/",
+                ], capture_output=True, text=True, encoding="utf-8", timeout=40,
+                    **codex_cli.windowless_popen_options(new_process_group=False))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('data-status="passed"', result.stdout, result.stdout + result.stderr)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
 
 
 class PackageTests(unittest.TestCase):

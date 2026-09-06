@@ -22,6 +22,7 @@
     stepControllers: new Map(),
     notes: [],
     noteHighlight: null,
+    notices: new Map(),
   };
   const HAS_HIGHLIGHT_API = typeof CSS !== "undefined" && "highlights" in CSS && typeof Highlight !== "undefined";
   // One shared highlight for the active proof step; panels clear and refill it.
@@ -82,9 +83,23 @@
     }
   }
 
-  function showNotice(message) {
-    notice.textContent = message;
-    notice.hidden = false;
+  function showNotice(message, key = "status") {
+    if (message) state.notices.set(key, message);
+    else state.notices.delete(key);
+    notice.replaceChildren(...[...state.notices.values()].map(text => node("p", "", text)));
+    notice.hidden = state.notices.size === 0;
+  }
+
+  function staleArtifact(artifact) {
+    const digest = state.doc && state.doc.source && state.doc.source.digest;
+    return Boolean(artifact && artifact.document_digest && digest && artifact.document_digest !== digest);
+  }
+
+  function updateStaleNotice() {
+    const stale = [];
+    if (staleArtifact(state.annotations)) stale.push("annotations");
+    state.widgets.forEach(widget => { if (staleArtifact(widget)) stale.push(`widget ${widget.id}`); });
+    showNotice(stale.length ? `Generated for an earlier version of this document: ${stale.join(", ")}. Anchors may point at different text; regenerate to refresh.` : "", "stale");
   }
 
   function humanize(value) {
@@ -679,6 +694,10 @@
     meta.append(button("Details", () => card.classList.toggle("details-open")));
     head.append(meta);
     card.append(head);
+    if (staleArtifact(widget)) {
+      meta.prepend(badge("earlier document", "warn"));
+      card.append(node("p", "widget-stale", "This widget was generated for an earlier document. Its anchors and explanation may be out of date."));
+    }
     let exampleSelect = null;
     if (Array.isArray(widget.examples) && widget.examples.length) {
       const bar = node("div", "widget-examples");
@@ -767,10 +786,10 @@
     }
   }
 
-  function loadWidgetScript(widget) {
+  function loadWidgetScript(widget, reload = false) {
     return new Promise(resolve => {
       const script = document.createElement("script");
-      script.src = `widgets/${encodeURIComponent(widget.id)}/${widget.entry || "widget.js"}`;
+      script.src = `widgets/${encodeURIComponent(widget.id)}/${widget.entry || "widget.js"}${reload ? `?v=${Date.now()}` : ""}`;
       script.async = false;
       script.addEventListener("load", () => resolve(true));
       script.addEventListener("error", () => resolve(false));
@@ -783,6 +802,8 @@
     const list = node("ol", "steps");
     let active = -1;
     let instance = null;
+    let disposed = false;
+    let scrollHandler = null;
     // Each step targets either a phrase range inside one of its paragraphs or its first paragraph.
     const targets = steps.map(step => {
       const elements = (step.paragraphs || []).map(id => document.getElementById(id)).filter(Boolean);
@@ -822,6 +843,7 @@
     // Keep the sticky panel on screen while the last steps reach the reading
     // line: pad the text column so the proof does not end above the panel.
     const ensureRunway = () => {
+      if (disposed) return;
       const body = proof.querySelector(":scope > .proof-body");
       const text = body && body.querySelector(":scope > .proof-text");
       const panel = body && body.querySelector(":scope > .proof-panel");
@@ -837,7 +859,7 @@
     window.addEventListener("resize", ensureRunway);
     const controller = {
       setStep(index, { scroll = false, fromWidget = false } = {}) {
-        if (index < 0 || index >= steps.length) return;
+        if (disposed || index < 0 || index >= steps.length) return;
         active = index;
         items.forEach((item, position) => item.classList.toggle("active", position === index));
         if (controller.onChange) controller.onChange(index);
@@ -869,6 +891,17 @@
       attach(value) { instance = value; requestAnimationFrame(ensureRunway); },
       get active() { return active; },
       get instance() { return instance; },
+      get steps() { return steps; },
+      destroy() {
+        disposed = true;
+        window.removeEventListener("resize", ensureRunway);
+        if (scrollHandler) window.removeEventListener("scroll", scrollHandler);
+        paragraphs.forEach(paragraph => paragraph.classList.remove("step-active"));
+        if (stepHighlight) stepHighlight.clear();
+        const text = proof.querySelector(":scope > .proof-body > .proof-text");
+        if (text) text.style.paddingBottom = "";
+        instance = null;
+      },
       refresh() { if (active >= 0) controller.setStep(active); requestAnimationFrame(ensureRunway); },
       ensureRunway,
     };
@@ -921,12 +954,10 @@
     // the reading line. A step revealed by a click lands at SCROLL_OFFSET,
     // above the line, so the highlight agrees with the click.
     if (steps.length) {
-      const lookup = new Map();
-      steps.forEach((step, index) => (step.paragraphs || []).forEach(id => lookup.set(id, index)));
       let scheduled = false;
       const sync = () => {
         scheduled = false;
-        if (Date.now() < lockUntil) return;
+        if (disposed || Date.now() < lockUntil) return;
         if (!proof.isConnected || proof.classList.contains("collapsed")) return;
         const proofRect = proof.getBoundingClientRect();
         if (proofRect.bottom < 0 || proofRect.top > window.innerHeight) return;
@@ -937,11 +968,12 @@
         }
         if (index !== active) controller.setStep(index);
       };
-      window.addEventListener("scroll", () => {
+      scrollHandler = () => {
         if (scheduled) return;
         scheduled = true;
         requestAnimationFrame(sync);
-      }, { passive: true });
+      };
+      window.addEventListener("scroll", scrollHandler, { passive: true });
     }
     return controller;
   }
@@ -964,61 +996,139 @@
     return Array.isArray(outline) ? outline : (outline && outline.steps) || [];
   }
 
+  // A view owns all DOM and listeners for one mounted widget.
+  function widgetView(widget, previousCard = null) {
+    const target = document.getElementById(widget.anchor);
+    const view = { ...widgetCard(widget), controller: null, instance: null, mount: () => {} };
+    if (target.classList.contains("proof")) {
+      const steps = widget.steps && widget.steps.length ? widget.steps : outlineSteps(target.id);
+      const host = node("div");
+      view.controller = stepController(target, steps, host);
+      view.card.append(host);
+      state.stepControllers.set(widget.id, view.controller);
+      if (!previousCard) proofPanel(target).append(view.card);
+      if (!previousCard && !state.proofsVisible) target.classList.remove("collapsed");
+    } else if (!previousCard) {
+      const row = node("div", "statement-row");
+      target.replaceWith(row);
+      row.append(target, view.card);
+    }
+    if (previousCard) {
+      view.card.classList.toggle("details-open", previousCard.classList.contains("details-open"));
+      previousCard.replaceWith(view.card);
+    }
+    state.instances.set(widget.id, view);
+    return view;
+  }
+
+  function captureWidgetState(widget) {
+    const view = state.instances.get(widget.id);
+    const snapshot = {};
+    if (!view) return snapshot;
+    if (view.exampleSelect) snapshot.example = view.exampleSelect.value;
+    const controller = view.controller;
+    if (controller && controller.active >= 0) {
+      snapshot.step = controller.active;
+      snapshot.step_title = controller.steps[controller.active].title || "";
+    }
+    try {
+      if (!view.instance || typeof view.instance.getState !== "function") {
+        throw new Error("This widget does not export edited inputs; only its example and step are captured.");
+      }
+      const value = view.instance.getState();
+      if (!value || Object.getPrototypeOf(value) !== Object.prototype) throw new Error("getState() must return a JSON object.");
+      const encoded = JSON.stringify(value, (_key, item) => {
+        if (item === undefined || typeof item === "function" || typeof item === "symbol" ||
+            typeof item === "bigint" || (typeof item === "number" && !Number.isFinite(item))) {
+          throw new Error("Widget state contains non-JSON values.");
+        }
+        return item;
+      });
+      // Matches visualization_contract.MAX_WIDGET_STATE_BYTES.
+      if (new TextEncoder().encode(encoded).length > 32 * 1024) throw new Error("Widget state exceeds 32 KiB.");
+      snapshot.widget_state = JSON.parse(encoded);
+    } catch (error) {
+      snapshot.widget_state_error = String(error?.message || error).slice(0, 300);
+    }
+    return snapshot;
+  }
+
+  function startWidget(widget, view, snapshot = null, previousStep = null) {
+    const { body, exampleSelect, controller } = view;
+    const instance = view.instance = mountWidget(widget, body, controller);
+    if (!instance) return;
+    const warnings = [];
+    let compatibleExample = true;
+    if (snapshot && snapshot.example) {
+      compatibleExample = Boolean(exampleSelect && [...exampleSelect.options].some(option => option.value === snapshot.example));
+      if (compatibleExample) exampleSelect.value = snapshot.example;
+      else warnings.push("The previous example is no longer available; using the new default.");
+    }
+    const chooseExample = () => {
+      try {
+        if (exampleSelect && instance.setExample) instance.setExample(exampleSelect.value);
+        showNotice("", `example-${widget.id}`);
+      } catch (error) {
+        showNotice(`Could not select an example: ${error?.message || error}`, `example-${widget.id}`);
+      }
+    };
+    // The selector's own listener also refreshes its explanatory note.
+    if (exampleSelect) {
+      exampleSelect.dispatchEvent(new Event("change"));
+      chooseExample();
+      exampleSelect.addEventListener("change", () => { chooseExample(); if (controller) controller.refresh(); });
+    }
+    if (snapshot && snapshot.widget_state && compatibleExample) {
+      try {
+        if (typeof instance.setState !== "function" || instance.setState(snapshot.widget_state) === false) {
+          throw new Error("The updated widget cannot restore the previous input format.");
+        }
+      } catch (error) {
+        chooseExample();
+        warnings.push(`Edited inputs were not restored: ${error?.message || error}`);
+      }
+    } else if (snapshot && snapshot.widget_state_error) {
+      warnings.push(`Edited inputs were not preserved: ${snapshot.widget_state_error}`);
+    }
+    if (controller) {
+      controller.attach(instance);
+      let index = 0;
+      if (previousStep) {
+        const matching = controller.steps.map((step, i) => ({ step, i })).filter(({ step }) =>
+          JSON.stringify(step.paragraphs || []) === JSON.stringify(previousStep.paragraphs || []) &&
+          (step.phrase || "") === (previousStep.phrase || ""));
+        if (matching.length === 1) index = matching[0].i;
+        else {
+          const titled = controller.steps.map((step, i) => ({ step, i })).filter(({ step }) => step.title === previousStep.title);
+          if (titled.length === 1) index = titled[0].i;
+          else warnings.push("The previous step could not be matched; showing the first step.");
+        }
+      }
+      controller.setStep(index);
+    }
+    showNotice(warnings.join(" "), `widget-${widget.id}`);
+  }
+
   async function mountWidgets() {
     const handledProofs = new Set();
     for (const widget of state.widgets) {
       const target = document.getElementById(widget.anchor);
       if (!target) {
-        showNotice(`Widget "${widget.title || widget.id}" targets a missing anchor ${widget.anchor}.`);
+        showNotice(`Widget "${widget.title || widget.id}" targets a missing anchor ${widget.anchor}.`, `missing-${widget.id}`);
         continue;
       }
-      const { card, body, exampleSelect } = widgetCard(widget);
-      let controller = null;
-      if (target.classList.contains("proof")) {
-        handledProofs.add(target.id);
-        const panel = proofPanel(target);
-        const steps = (widget.steps && widget.steps.length) ? widget.steps : outlineSteps(target.id);
-        const stepsHost = node("div");
-        controller = stepController(target, steps, stepsHost);
-        card.append(stepsHost);
-        panel.append(card);
-        if (!state.proofsVisible) target.classList.remove("collapsed");
-      } else {
-        // Statement widgets sit beside the statement on wide screens and
-        // below it otherwise (see reader.css .statement-row).
-        const row = node("div", "statement-row");
-        target.replaceWith(row);
-        row.append(target, card);
-      }
+      if (target.classList.contains("proof")) handledProofs.add(target.id);
+      const view = widgetView(widget);
       const loaded = await loadWidgetScript(widget);
       if (!loaded) {
-        body.replaceChildren(node("div", "widget-error", "Widget script could not be loaded."));
+        view.body.replaceChildren(node("div", "widget-error", "Widget script could not be loaded."));
         continue;
       }
-      if (controller) state.stepControllers.set(widget.id, controller);
-      const mount = () => {
-        const instance = mountWidget(widget, body, controller);
-        state.instances.set(widget.id, { mount: () => {}, instance });
-        if (controller && instance) {
-          controller.attach(instance);
-          controller.setStep(0);
-        }
-        if (exampleSelect && instance && !exampleSelect.dataset.wired) {
-          exampleSelect.dataset.wired = "1";
-          exampleSelect.addEventListener("change", () => {
-            const current = (state.instances.get(widget.id) || {}).instance;
-            try { if (current && current.setExample) current.setExample(exampleSelect.value); } catch (error) { console.error(error); }
-            if (controller) controller.refresh();
-          });
-        }
-      };
-      if (state.factories.has(widget.id)) mount();
-      else {
-        state.instances.set(widget.id, { mount });
-        setTimeout(() => {
-          if (!state.factories.has(widget.id)) body.replaceChildren(node("div", "widget-error", `Widget did not register itself as "${widget.id}".`));
-        }, 3000);
-      }
+      view.mount = () => { view.mount = () => {}; startWidget(widget, view); };
+      if (state.factories.has(widget.id)) view.mount();
+      else setTimeout(() => {
+        if (!state.factories.has(widget.id)) view.body.replaceChildren(node("div", "widget-error", `Widget did not register itself as "${widget.id}".`));
+      }, 3000);
     }
     // Proof outlines from annotations, for proofs without a widget.
     const outlines = (state.annotations && state.annotations.proof_outlines) || {};
@@ -1178,6 +1288,7 @@
 
   /** Report a problem with a widget: fix it now or queue it for the next run. */
   function openImproveForm(widget, card, { step = null, stepTitle = "", follows = "" } = {}) {
+    const snapshot = captureWidgetState(widget);
     const rect = (step !== null && card.querySelector(".step-current") ? card.querySelector(".step-current") : card.querySelector(".widget-head")).getBoundingClientRect();
     noteForm.replaceChildren();
     const titleNode = node("div", "note-form-title");
@@ -1190,10 +1301,12 @@
     noteForm.append(textarea);
     const actions = node("div", "note-form-actions");
     const noteFor = () => ({
+      ...snapshot,
       anchor: widget.anchor, widget: widget.id, quote: step !== null ? `${widget.title || widget.id}, step ${step + 1}` : (widget.title || widget.id),
-      step: step === null ? undefined : step, step_title: stepTitle ? String(stepTitle) : "", follows: follows || "",
+      step: step === null ? snapshot.step : step, step_title: stepTitle ? String(stepTitle) : snapshot.step_title || "", follows: follows || "",
       message: textarea.value.trim(),
     });
+    if (snapshot.widget_state_error) noteForm.append(node("p", "", snapshot.widget_state_error));
     actions.append(
       button("Fix now", () => {
         const note = noteFor();
@@ -1227,32 +1340,32 @@
     window.parent.postMessage({ type: "loose-ends:fix-widget", token, note }, "*");
   }
 
-  async function reloadWidget(widget, card, summary) {
-    const body = card.querySelector(".widget-body");
+  async function reloadWidget(widget, _card, summary) {
     const registered = state.instances.get(widget.id);
-    try { if (registered && registered.instance && registered.instance.destroy) registered.instance.destroy(); } catch (_) { /* ignore */ }
-    body.replaceChildren(node("div", "loading", "Reloading widget…"));
-    const fresh = await fetchJson(`widgets/${encodeURIComponent(widget.id)}/widget.json?v=${Date.now()}`, true);
-    if (fresh) Object.assign(widget, { title: fresh.title, summary: fresh.summary, steps: fresh.steps || widget.steps, examples: fresh.examples || widget.examples, limitations: fresh.limitations });
-    widget.review = { fidelity: "unreviewed", interaction_quality: "unreviewed", summary: `Quick fix applied without review: ${summary || ""}` };
+    if (!registered) throw new Error("The widget is no longer mounted.");
+    const fresh = await fetchJson(`widgets/${encodeURIComponent(widget.id)}/widget.json?v=${Date.now()}`);
+    if (!fresh || ["id", "anchor", "kind"].some(key => fresh[key] !== widget[key])) {
+      throw new Error("The updated widget has incompatible metadata.");
+    }
+    const review = await fetchJson(`widgets/${encodeURIComponent(widget.id)}/review.json?v=${Date.now()}`, true);
+    const oldFactory = state.factories.get(widget.id);
     state.factories.delete(widget.id);
-    await new Promise(resolve => {
-      const script = document.createElement("script");
-      script.src = `widgets/${encodeURIComponent(widget.id)}/${widget.entry || "widget.js"}?v=${Date.now()}`;
-      script.addEventListener("load", () => resolve(true));
-      script.addEventListener("error", () => resolve(false));
-      document.head.append(script);
-    });
-    body.replaceChildren();
-    const controller = state.stepControllers.get(widget.id) || null;
-    const instance = mountWidget(widget, body, controller);
-    if (controller && instance) { controller.attach(instance); controller.refresh(); }
-    state.instances.set(widget.id, { mount: () => {}, instance });
-    const head = card.querySelector(".widget-head");
-    head.querySelectorAll(".badge").forEach(element => element.remove());
-    const title = head.querySelector("strong");
-    title.textContent = widget.title || "Visualization";
-    title.after(badge("fixed, unreviewed", "warn"));
+    const loaded = await loadWidgetScript(fresh, true);
+    if (!loaded || !state.factories.has(widget.id)) {
+      if (oldFactory) state.factories.set(widget.id, oldFactory);
+      throw new Error("The updated widget script could not be loaded or did not register.");
+    }
+    // Capture immediately before replacement, including edits made while the fix ran.
+    const snapshot = captureWidgetState(widget);
+    const previousStep = registered.controller && registered.controller.steps[registered.controller.active];
+    if (registered.controller) registered.controller.destroy();
+    try { if (registered.instance && registered.instance.destroy) registered.instance.destroy(); }
+    catch (error) { console.error(error); }
+    Object.assign(widget, { steps: [], examples: [], limitations: [], summary: "", ...fresh,
+      review: review || { fidelity: "unreviewed", summary: `Quick fix applied without review: ${summary || ""}` } });
+    const view = widgetView(widget, registered.card);
+    startWidget(widget, view, snapshot, previousStep);
+    updateStaleNotice();
   }
 
   function showFixResult(token, data) {
@@ -1266,7 +1379,12 @@
       showNotice(`Quick fix failed: ${data.error || "unknown error"}. The request was kept in the notes list.`);
       return;
     }
-    reloadWidget(pending.widget, pending.card, data.summary);
+    // Serialize reloads when several requests finish for the same widget.
+    state.reloads = state.reloads || new Map();
+    const previous = state.reloads.get(pending.widget.id) || Promise.resolve();
+    const reload = previous.then(() => reloadWidget(pending.widget, pending.card, data.summary))
+      .catch(error => showNotice(`Quick fix was saved, but could not be displayed: ${error.message || error}. Reload the reader to retry.`, `widget-${pending.widget.id}`));
+    state.reloads.set(pending.widget.id, reload);
   }
 
   /** Ask the workbench for an immediate explanation of the selected passage. */
@@ -1464,11 +1582,7 @@
         return { ...widget, ...(metadata || {}), id: widget.id, anchor: widget.anchor, review: review || widget.review || null };
       }));
       if (state.manifest.annotations) state.annotations = await fetchJson(state.manifest.annotations, true);
-      const digest = state.doc && state.doc.source && state.doc.source.digest;
-      const stale = [];
-      if (state.annotations && state.annotations.document_digest && digest && state.annotations.document_digest !== digest) stale.push("annotations");
-      state.widgets.forEach(widget => { if (widget.document_digest && digest && widget.document_digest !== digest) stale.push(`widget ${widget.id}`); });
-      if (stale.length) showNotice(`Generated for an earlier version of this document: ${stale.join(", ")}. Anchors may point at different text; regenerate to refresh.`);
+      updateStaleNotice();
     }
     const notes = await fetchJson("notes.json", true);
     state.notes = notes && Array.isArray(notes.notes) ? notes.notes : [];
@@ -1485,7 +1599,7 @@
     await mountWidgets();
     wireNotes();
     const warnings = (state.doc.warnings || []).length;
-    if (warnings) showNotice(`${warnings} conversion warning${warnings === 1 ? "" : "s"}: ${state.doc.warnings.join(" · ")}`);
+    if (warnings) showNotice(`${warnings} conversion warning${warnings === 1 ? "" : "s"}: ${state.doc.warnings.join(" · ")}`, "conversion");
     if (location.hash) reveal(decodeURIComponent(location.hash.slice(1)));
   }
 

@@ -86,6 +86,10 @@ step through, a definition recalled at the point of use.
   the example, show what is certain and mark the rest "not depicted"; an
   invented picture is worse than none.
 - **Reader notes come first.** If `inputs/request.json` lists
+  widget notes with `example`, `widget_state`, and `step`, reproduce that
+  input using `setExample`, `setState`, then `setStep`. Respect any
+  `widget_state_error`: edited inputs may not have been captured. Preserve
+  compatible snapshot formats when updating widgets. If the request lists
   `reader_notes`, passages a reader marked as unclear, treat them as the
   highest-priority requests. Choose the lightest form that genuinely
   answers the note: an inline explanation for a skipped computation or
