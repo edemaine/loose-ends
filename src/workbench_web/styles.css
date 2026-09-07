@@ -418,6 +418,8 @@ button { color: inherit; }
 .field textarea { min-height: 90px; resize: vertical; font-family: inherit; }
 .field.checkbox { display: flex; grid-column: 1 / -1; align-items: flex-start; gap: 9px; }
 .field.checkbox input { width: auto; margin-top: 4px; accent-color: var(--accent); }
+.write-modes { border: 1px solid var(--line); border-radius: 8px; margin: 0 0 16px; padding: 12px; display: grid; gap: 10px; }
+.write-modes legend { font-weight: 600; padding: 0 5px; }
 .arxiv-results { grid-column: 1 / -1; display: grid; gap: 8px; min-width: 0; }
 .arxiv-results-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; color: var(--heading); font-size: 12px; font-weight: 800; }
 .arxiv-results-heading small { color: var(--muted); font-weight: 600; }

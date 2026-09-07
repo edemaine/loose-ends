@@ -92,6 +92,18 @@ def fake_plan(
 
 
 class WorkbenchPlanningTests(unittest.TestCase):
+    def test_write_dialog_job_flow(self):
+        result = subprocess.run(
+            ["node", "--test", "test_workbench_tasks.cjs"],
+            cwd=PROJECT_ROOT / "test",
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_catalog_change_does_not_invalidate_a_confirmed_plan(self):
         app = object.__new__(workbench.WorkbenchApplication)
         app.plan_lock = threading.Lock()
@@ -366,7 +378,7 @@ class WorkbenchPlanningTests(unittest.TestCase):
         self.assertIn("function historicalAttemptTarget(value)", app)
         self.assertIn("function taskTargetsForRequest(task)", app)
         self.assertIn('"Pin to attempt"', app)
-        self.assertIn("targets: taskTargetsForRequest(task)", app)
+        self.assertIn("targets: taskTargetsForRequest({ ...task, targets })", app)
         self.assertIn('action === "review" && attempts.length === 1', app)
         self.assertIn("researchFiltersOpen: false", app)
         self.assertIn("paperFiltersOpen: false", app)
