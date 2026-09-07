@@ -717,6 +717,82 @@
     return parameters;
   }
 
+  function latexProsePlugin(renderer) {
+    const letters = {
+      ae: "æ", AE: "Æ", oe: "œ", OE: "Œ", o: "ø", O: "Ø", aa: "å", AA: "Å",
+      ss: "ß", l: "ł", L: "Ł", i: "i", j: "j",
+    };
+    const accents = {
+      "'": "\u0301", "`": "\u0300", '"': "\u0308", "^": "\u0302", "~": "\u0303",
+      "=": "\u0304", ".": "\u0307", c: "\u0327", k: "\u0328", u: "\u0306",
+      v: "\u030c", H: "\u030b", r: "\u030a", d: "\u0323",
+    };
+    const formatting = { emph: "em", textit: "em", textbf: "strong" };
+
+    // Parse commands before Markdown consumes their backslashes. Math and code
+    // rules consume their entire contents, so this rule never enters them.
+    renderer.inline.ruler.before("escape", "latex_prose_command", (state, silent) => {
+      if (!state.env.latexProse || state.src[state.pos] !== "\\") return false;
+      const source = state.src.slice(state.pos, state.posMax);
+      const accent = /^\\(['"`^~=.]|[ckuvHrd](?![A-Za-z]))\s*(?:\{([A-Za-z])\}|([A-Za-z]))/.exec(source);
+      const letter = /^\\(ae|AE|oe|OE|aa|AA|ss|o|O|l|L|i|j)(?![A-Za-z])(?:\{\})?/.exec(source);
+      if (accent || letter) {
+        const match = accent || letter;
+        if (!silent) {
+          const token = state.push("text_special", "", 0);
+          token.content = accent
+            ? ((accent[2] || accent[3]) + accents[accent[1]]).normalize("NFC")
+            : letters[letter[1]];
+        }
+        state.pos += match[0].length;
+        return true;
+      }
+      const command = /^\\(emph|textit|textbf|texttt|textrm|textsf|mbox)\s*\{/.exec(source);
+      if (!command || (state.env.latexProseDepth || 0) >= state.md.options.maxNesting) return false;
+      let depth = 1;
+      let end = command[0].length;
+      for (; end < source.length; end++) {
+        if (source[end] === "\\") { end++; continue; }
+        if (source[end] === "{") depth++;
+        if (source[end] === "}" && --depth === 0) break;
+      }
+      if (depth !== 0) return false;
+      if (!silent) {
+        const content = source.slice(command[0].length, end);
+        const tag = formatting[command[1]];
+        if (command[1] === "texttt") {
+          state.push("code_inline", "code", 0).content = content;
+        } else {
+          if (tag) state.push(`${tag}_open`, tag, 1);
+          const children = [];
+          state.md.inline.parse(content, state.md, {
+            ...state.env, latexProseDepth: (state.env.latexProseDepth || 0) + 1,
+          }, children);
+          for (const child of children) {
+            const token = state.push(child.type, child.tag, child.nesting);
+            Object.assign(token, child, { level: token.level });
+          }
+          if (tag) state.push(`${tag}_close`, tag, -1);
+        }
+      }
+      state.pos += end + 1;
+      return true;
+    });
+
+    // Unmatched backticks remain text; matched code spans keep their contents.
+    renderer.core.ruler.before("text_join", "latex_prose_text", state => {
+      if (!state.env.latexProse) return;
+      for (const block of state.tokens) {
+        for (const token of block.children || []) {
+          if (token.type === "text") {
+            token.content = token.content.replace(/~/g, "\u00a0")
+              .replace(/``/g, "“").replace(/''/g, "”");
+          }
+        }
+      }
+    });
+  }
+
   function createMarkdownRenderer(scope = global) {
     if (typeof scope.markdownit !== "function") return null;
     let renderer = scope.markdownit({ html: false, linkify: true, typographer: false });
@@ -725,6 +801,7 @@
         delimiters: "all", throwOnError: false, logger: () => "ignore",
       });
     }
+    renderer.use(latexProsePlugin);
     const defaultLinkOpen = renderer.renderer.rules.link_open ||
       ((tokens, index, options, env, self) => self.renderToken(tokens, index, options));
     renderer.renderer.rules.link_open = (tokens, index, options, env, self) => {

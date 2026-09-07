@@ -1,0 +1,12 @@
+{
+  "private": true,
+  "packageManager": "pnpm@10.34.3",
+  "scripts": {
+    "test": "node --test test_markdown.cjs"
+  },
+  "devDependencies": {
+    "@mdit/plugin-katex": "1.0.1",
+    "katex": "0.17.0",
+    "markdown-it": "14.3.0"
+  }
+}

@@ -2496,7 +2496,7 @@ class OpenProblemPipelineTests(unittest.TestCase):
         for parser, argv in zip(parsers, arguments):
             with self.subTest(program=parser.prog):
                 parsed = parser.parse_args(argv)
-                self.assertEqual(parsed.model, "gpt-5.6-sol")
+                self.assertEqual(parsed.model, "gpt-6-astra")
                 self.assertEqual(parsed.reasoning_effort, "xhigh")
                 self.assertIsNone(parsed.prompt)
                 self.assertIsInstance(parsed.prompt_template, Path)
