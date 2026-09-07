@@ -353,7 +353,9 @@ class CodexCliTests(unittest.TestCase):
         self.assertFalse(settings["sandbox"]["allowUnsandboxedCommands"])
         self.assertEqual(settings["sandbox"]["network"]["allowedDomains"], [])
         self.assertNotIn("fastMode", settings)
-        self.assertNotIn("--allowedTools", command)
+        allowed = command.index("--allowedTools")
+        self.assertEqual(command[allowed + 1], "Bash")
+        self.assertTrue(command[allowed + 2].startswith("--"))
         self.assertNotIn("--json-schema", command)
         self.assertNotIn("--dangerously-skip-permissions", command)
 
@@ -379,7 +381,10 @@ class CodexCliTests(unittest.TestCase):
             "Bash,Read,Write,Edit,Glob,Grep,WebSearch,WebFetch",
         )
         allowed = command.index("--allowedTools")
-        self.assertEqual(command[allowed + 1:allowed + 3], ["WebSearch", "WebFetch"])
+        self.assertEqual(
+            command[allowed + 1:allowed + 4],
+            ["Bash", "WebSearch", "WebFetch"],
+        )
         self.assertTrue(json.loads(command[command.index("--settings") + 1])["fastMode"])
         self.assertEqual(
             json.loads(command[command.index("--json-schema") + 1]),

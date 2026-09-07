@@ -467,9 +467,10 @@ Codex; `--claude` names the executable, as `--codex` does for Codex. The
 workbench's model menu lists both families. Each Claude turn ignores your
 user, project, and local Claude Code settings (no hooks, `CLAUDE.md` files,
 plugins, skills, or MCP servers), runs shell commands in Claude Code's sandbox
-with writes confined to the workspace and no network, auto-approves file edits
-only inside the workspace, and offers the `WebSearch` and `WebFetch` tools only
-when the task's web search is enabled. Because that sandbox runs on macOS,
+with writes confined to the workspace and no network (the sandbox is the only
+check on shell commands, so no command waits for an approval nobody can give),
+auto-approves file edits only inside the workspace, and offers the `WebSearch`
+and `WebFetch` tools only when the task's web search is enabled. Because that sandbox runs on macOS,
 Linux, and WSL2 only, Claude turns fail early on native Windows rather than
 running unsandboxed. Reasoning effort maps onto Claude Code's `--effort`
 levels, with `ultra` treated as `max`, and `--fast` turns on Claude Code's fast

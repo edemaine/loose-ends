@@ -1232,6 +1232,13 @@ def build_claude_command(
     and Edit tools are auto-approved only inside the workspace; and web tools
     are offered only when the task enables web search.  The prompt is read
     from standard input, and the model runs in the workspace directory.
+
+    The Bash tool is allowed by rule so that the OS sandbox is the only
+    boundary on shell commands, as it is for Codex.  Under the edit-only
+    permission mode, Claude Code would otherwise still send commands that its
+    static analyzer cannot classify (``$VAR`` expansions, ``find -exec``,
+    ``time``, multi-command pipelines) through the interactive approval flow,
+    where an unattended run can only deny them.
     """
     if web_search not in WEB_SEARCH_MODES:
         raise CodexError(
@@ -1268,8 +1275,10 @@ def build_claude_command(
         "--model",
         options.model,
     ]
+    allowed = ["Bash"]
     if web_search != "disabled":
-        command.extend(("--allowedTools", *CLAUDE_WEB_TOOLS))
+        allowed.extend(CLAUDE_WEB_TOOLS)
+    command.extend(("--allowedTools", *allowed))
     if options.reasoning_effort is not None:
         effort = CLAUDE_EFFORTS.get(options.reasoning_effort)
         if effort is None:
