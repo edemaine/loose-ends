@@ -881,7 +881,7 @@ function renderSelectionBar() {
     selectionBar.append(button("Review", () => openTask("review", values)));
   }
   if ([...kinds].every(kind => ["paper", "problem", "attempt"].includes(kind))) {
-    selectionBar.append(button("Write paper", () => openTask("write", values)));
+    selectionBar.append(button("Write", () => openTask("write", values)));
   }
   selectionBar.append(button("Clear", () => {
     state.selection.clear();
@@ -4050,6 +4050,9 @@ function openTask(action, targets, presetOptions = null) {
   let saved = {};
   try { saved = JSON.parse(sessionStorage.getItem(storageKey) || "{}"); } catch (_) { saved = {}; }
   if (presetOptions) saved = { ...saved, ...presetOptions };
+  if (action === "write" && targets.length > 1 && !saved.writeMode) {
+    saved.writeMode = "separate";
+  }
   if (
     action === "write" &&
     targets.some(value => value.kind === "attempt") &&
@@ -4168,8 +4171,30 @@ async function fetchArxivAuthorPapers() {
 function renderTaskConfiguration(errorMessage = "") {
   const task = state.dialog;
   dialogEyebrow.textContent = "Step 1 of 2 · Configure";
-  dialogTitle.textContent = actionNames[task.action];
+  dialogTitle.textContent = task.action === "write" && task.targets.length > 1
+    ? "Write papers" : actionNames[task.action];
   dialogBody.replaceChildren();
+  if (task.action === "write" && task.targets.length > 1) {
+    const modes = node("fieldset", "write-modes");
+    modes.append(node("legend", "", "Write as"));
+    for (const [value, label] of [
+      ["separate", `${task.targets.length} separate papers`],
+      ["combined", `Combined paper about ${targetCountLabel(task.targets)}`],
+    ]) {
+      const choice = checkbox("writeMode", label);
+      const input = choice.querySelector("input");
+      input.type = "radio";
+      input.value = value;
+      input.checked = (task.options.writeMode || "separate") === value;
+      input.addEventListener("change", () => {
+        saveDialogOptions();
+        renderTaskConfiguration();
+        dialogBody.querySelector('input[name="writeMode"]:checked')?.focus();
+      });
+      modes.append(choice);
+    }
+    dialogBody.append(modes);
+  }
   const targets = node("div", "target-list");
   renderTaskTargetChips(task, targets);
   if (task.targets.length) dialogBody.append(targets);
@@ -4315,7 +4340,9 @@ function renderTaskConfiguration(errorMessage = "") {
     }
     grid.append(field("authors", "Authors", { type: "textarea", value: Array.isArray(options.authors) ? options.authors.join("\n") : options.authors || "", help: "One author per line." }));
     grid.append(field("title", "Title direction", { value: options.title || "" }));
-    grid.append(field("name", "Manuscript directory name", { value: options.name || "", help: "Leave blank for the derived name." }));
+    if (!separateWriteTasks(task)) {
+      grid.append(field("name", "Manuscript directory name", { value: options.name || "", help: "Leave blank for the derived name." }));
+    }
   }
   if (task.action === "revise") {
     grid.append(field("authors", "Override authors", { type: "textarea", value: Array.isArray(options.authors) ? options.authors.join("\n") : options.authors || "", help: "Leave blank to inherit." }));
@@ -4364,14 +4391,16 @@ function renderTaskConfiguration(errorMessage = "") {
   grid.querySelectorAll("input, textarea, select").forEach(input => input.addEventListener("input", saveDialogOptions));
   dialogFooter.replaceChildren(
     button("Cancel", () => dialog.close()),
-    button("Review task", reviewTask, "button primary"),
+    button(separateWriteTasks(task) ? `Review ${task.targets.length} jobs` : "Review task", reviewTask, "button primary"),
   );
 }
 
 function collectDialogOptions() {
   const options = {};
   dialogBody.querySelectorAll("[name]").forEach(input => {
-    if (input.type === "checkbox") options[input.name] = input.checked;
+    if (input.type === "radio") {
+      if (input.checked) options[input.name] = input.value;
+    } else if (input.type === "checkbox") options[input.name] = input.checked;
     else if (input.name === "authors") options.authors = input.value.split("\n").map(value => value.trim()).filter(Boolean);
     else if (input.value !== "") options[input.name] = input.value;
   });
@@ -4394,6 +4423,8 @@ function saveDialogOptions() {
 
 function taskRequestOptions(task) {
   const options = { ...task.options };
+  delete options.writeMode;
+  if (separateWriteTasks(task)) delete options.name;
   if (task.action !== "download") return options;
   if (task.authorSearch) {
     options.papers = selectedAuthorPaperIds(task).join("\n");
@@ -4404,6 +4435,22 @@ function taskRequestOptions(task) {
   return options;
 }
 
+function separateWriteTasks(task) {
+  return task.action === "write" && task.targets.length > 1 &&
+    task.options.writeMode !== "combined";
+}
+
+function taskRequests(task) {
+  const groups = separateWriteTasks(task)
+    ? task.targets.map(value => [value])
+    : [task.targets];
+  return groups.map(targets => ({
+    action: task.action,
+    targets: taskTargetsForRequest({ ...task, targets }),
+    options: taskRequestOptions(task),
+  }));
+}
+
 async function reviewTask() {
   const task = state.dialog;
   saveDialogOptions();
@@ -4412,14 +4459,16 @@ async function reviewTask() {
   if (reviewButton) reviewButton.textContent = "Running dry-run previews…";
   dialog.setAttribute("aria-busy", "true");
   try {
-    task.plan = await api("/api/plans", {
-      method: "POST",
-      body: {
-        action: task.action,
-        targets: taskTargetsForRequest(task),
-        options: taskRequestOptions(task),
-      },
-    });
+    task.plans = [];
+    for (const request of taskRequests(task)) {
+      task.plans.push(await api("/api/plans", { method: "POST", body: request }));
+    }
+    task.plan = {
+      ...task.plans[0],
+      ...(task.plans.length > 1 ? { title: `Write ${task.plans.length} separate papers` } : {}),
+      units: task.plans.flatMap(plan => plan.units),
+      warnings: [...new Set(task.plans.flatMap(plan => plan.warnings))],
+    };
     renderTaskConfirmation();
   } catch (error) {
     renderTaskConfiguration(error.message);
@@ -4434,7 +4483,10 @@ function renderTaskConfirmation() {
   dialogEyebrow.textContent = "Step 2 of 2 · Confirm";
   dialogTitle.textContent = plan.title;
   dialogBody.replaceChildren();
-  const intro = node("p", "", `This will queue ${plan.units.length} managed run${plan.units.length === 1 ? "" : "s"} with a ${priorityMultiplier(plan.priorityLevel)} scheduling weight. Nothing has started yet.`);
+  const scope = task.plans.length > 1
+    ? `${task.plans.length} separate Write jobs, each producing one paper,`
+    : `${plan.units.length} managed run${plan.units.length === 1 ? "" : "s"}`;
+  const intro = node("p", "", `This will queue ${scope} with a ${priorityMultiplier(plan.priorityLevel)} scheduling weight. Nothing has started yet.`);
   dialogBody.append(intro);
   if (plan.warnings.length) plan.warnings.forEach(value => dialogBody.append(node("div", "warning", value)));
   if (Object.keys(plan.prompts).length) {
@@ -4449,7 +4501,9 @@ function renderTaskConfirmation() {
   plan.units.forEach((unit, index) => {
     const block = node("section", "confirm-block");
     const presentation = problemRunPresentation(plan.action, unit);
-    block.append(node("h3", "", `${index + 1}. ${presentation.title}`));
+    const title = task.plans.length > 1
+      ? targetDisplayLabel(task.targets[index]) : presentation.title;
+    block.append(node("h3", "", `${index + 1}. ${title}`));
     if (presentation.targets.length) {
       block.append(node("div", "confirm-target-summary", presentation.summary));
     }
@@ -4477,26 +4531,40 @@ function renderTaskConfirmation() {
   });
   dialogFooter.replaceChildren(
     button("Back", () => renderTaskConfiguration()),
-    button(`Start ${plan.units.length} run${plan.units.length === 1 ? "" : "s"}`, confirmTask, "button primary"),
+    button(task.plans.length > 1 ? `Start ${task.plans.length} jobs` : `Start ${plan.units.length} run${plan.units.length === 1 ? "" : "s"}`, confirmTask, "button primary"),
   );
 }
 
 async function confirmTask() {
   const task = state.dialog;
   dialogFooter.querySelectorAll("button").forEach(value => value.disabled = true);
+  let started = 0;
   try {
-    const job = await api("/api/jobs", { method: "POST", body: { planId: task.plan.id } });
-    sessionStorage.removeItem(task.storageKey);
-    dialog.close();
-    state.dialog = null;
-    state.selectedJob = job.id;
-    state.selection.clear();
-    await refreshJobs();
-    setTab("activity");
+    for (const plan of task.plans) {
+      const job = await api("/api/jobs", { method: "POST", body: { planId: plan.id } });
+      state.selectedJob = job.id;
+      started += 1;
+    }
   } catch (error) {
+    // Reconfigure only the remaining selections if a batch partially starts.
+    if (started) {
+      task.targets.slice(0, started).forEach(value => state.selection.delete(targetKey(value)));
+      task.targets = task.targets.slice(started);
+      renderSelectionBar();
+    }
     task.plan = null;
-    renderTaskConfiguration(error.message);
+    task.plans = [];
+    renderTaskConfiguration(started
+      ? `${started} Write job${started === 1 ? "" : "s"} started. Review the remaining ${targetCountLabel(task.targets)} to try again. ${error.message}`
+      : error.message);
+    return;
   }
+  sessionStorage.removeItem(task.storageKey);
+  dialog.close();
+  state.dialog = null;
+  state.selection.clear();
+  await refreshJobs().catch(error => showNotice(error.message, true));
+  setTab("activity");
 }
 
 async function refreshCatalog() {
