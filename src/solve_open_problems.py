@@ -1269,6 +1269,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="codex",
         help="Codex CLI executable or command name (default: codex)",
     )
+    codex_cli.add_claude_argument(parser)
     codex_cli.add_prompt_arguments(
         parser,
         default_template=DEFAULT_PROMPT_PATH,
@@ -1453,13 +1454,14 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
     try:
-        codex = codex_cli.resolve_codex_executable(args.codex)
-        codex_version = codex_cli.read_codex_version(codex)
-        # Probe once before announcing or submitting the batch.  Per-turn
-        # probing remains as a guard against a helper that fails later, but a
-        # persistently broken Windows helper must not create one workspace and
-        # failure report per selected problem.
-        codex_cli.require_secure_windows_sandbox(codex, PROJECT_ROOT)
+        # The Windows sandbox is probed once before announcing or submitting
+        # the batch, so a persistently broken helper does not create one
+        # workspace and failure report per selected problem.
+        codex, codex_version = codex_cli.resolve_backends(
+            args,
+            [options.model, review_options.model],
+            windows_probe_workspace=PROJECT_ROOT,
+        )
     except common.CodexError as exc:
         return codex_cli.report_error(parser, exc)
     agent_count = min(args.jobs, len(work_items))

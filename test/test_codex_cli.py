@@ -1,6 +1,7 @@
 import argparse
 from contextlib import redirect_stderr
 from io import StringIO
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -314,6 +315,261 @@ class CodexCliTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 126)
         self.assertTrue(structured)
         self.assertFalse(timed_out)
+
+    def test_claude_models_select_the_claude_code_backend(self):
+        for model in ("claude-opus-5", "Claude-Fable-5-1", "opus", "sonnet"):
+            self.assertEqual(codex_cli.backend_for_model(model), "claude")
+        for model in (None, "gpt-6-astra", "gpt-5.6-sol"):
+            self.assertEqual(codex_cli.backend_for_model(model), "codex")
+
+    def test_claude_command_isolates_workspace_without_web_tools(self):
+        command = codex_cli.build_claude_command(
+            claude="claude",
+            schema_path=Path("schema.json"),
+            options=codex_cli.ModelOptions(
+                model="claude-opus-5",
+                reasoning_effort="ultra",
+            ),
+            web_search="disabled",
+            model_writes_result=True,
+        )
+
+        self.assertEqual(command[:2], ["claude", "--print"])
+        self.assertIn("--safe-mode", command)
+        self.assertEqual(command[command.index("--setting-sources") + 1], "")
+        self.assertEqual(
+            command[command.index("--permission-mode") + 1],
+            "acceptEdits",
+        )
+        self.assertEqual(
+            command[command.index("--tools") + 1],
+            "Bash,Read,Write,Edit,Glob,Grep",
+        )
+        self.assertEqual(command[command.index("--effort") + 1], "max")
+        self.assertEqual(command[command.index("--model") + 1], "claude-opus-5")
+        settings = json.loads(command[command.index("--settings") + 1])
+        self.assertTrue(settings["sandbox"]["enabled"])
+        self.assertTrue(settings["sandbox"]["failIfUnavailable"])
+        self.assertFalse(settings["sandbox"]["allowUnsandboxedCommands"])
+        self.assertEqual(settings["sandbox"]["network"]["allowedDomains"], [])
+        self.assertNotIn("fastMode", settings)
+        self.assertNotIn("--allowedTools", command)
+        self.assertNotIn("--json-schema", command)
+        self.assertNotIn("--dangerously-skip-permissions", command)
+
+    def test_claude_command_offers_web_tools_schema_and_fast_mode(self):
+        with TemporaryDirectory() as temporary:
+            schema = Path(temporary) / "schema.json"
+            schema.write_text(
+                '{"type": "object", "properties": {"x": {"type": "string"}}}',
+                encoding="utf-8",
+            )
+            command = codex_cli.build_claude_command(
+                claude="claude",
+                schema_path=schema,
+                options=codex_cli.ModelOptions(
+                    model="claude-sonnet-5",
+                    fast=True,
+                ),
+                web_search="live",
+            )
+
+        self.assertEqual(
+            command[command.index("--tools") + 1],
+            "Bash,Read,Write,Edit,Glob,Grep,WebSearch,WebFetch",
+        )
+        allowed = command.index("--allowedTools")
+        self.assertEqual(command[allowed + 1:allowed + 3], ["WebSearch", "WebFetch"])
+        self.assertTrue(json.loads(command[command.index("--settings") + 1])["fastMode"])
+        self.assertEqual(
+            json.loads(command[command.index("--json-schema") + 1]),
+            {"type": "object", "properties": {"x": {"type": "string"}}},
+        )
+        self.assertNotIn("--effort", command)
+
+    def test_claude_command_requires_a_model(self):
+        with self.assertRaisesRegex(codex_cli.CodexError, "Claude model ID"):
+            codex_cli.build_claude_command(
+                claude="claude",
+                schema_path=Path("schema.json"),
+                options=codex_cli.ModelOptions(),
+                model_writes_result=True,
+            )
+
+    def test_recognizes_completed_claude_turn_but_not_failed_one(self):
+        with TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            events = workspace / "events.jsonl"
+            result = workspace / "agent-result.json"
+            result.write_text('{"status":"done"}\n', encoding="utf-8")
+            events.write_text(
+                '{"type":"system","subtype":"init"}\n'
+                '{"type":"result","subtype":"success","is_error":false}\n',
+                encoding="utf-8",
+            )
+            self.assertTrue(
+                codex_cli.structured_turn_is_complete(events, result)
+            )
+            events.write_text(
+                '{"type":"result","subtype":"error_during_execution",'
+                '"is_error":true}\n',
+                encoding="utf-8",
+            )
+            self.assertFalse(
+                codex_cli.structured_turn_is_complete(events, result)
+            )
+
+    def test_resolve_backends_resolves_only_the_needed_clis(self):
+        args = argparse.Namespace(codex="codex", claude="claude")
+        with (
+            patch.object(
+                codex_cli,
+                "resolve_codex_executable",
+                return_value="/bin/codex",
+            ) as resolve_codex,
+            patch.object(
+                codex_cli,
+                "read_codex_version",
+                return_value="codex-cli 1.0",
+            ),
+            patch.object(
+                codex_cli,
+                "configure_claude_executable",
+                return_value="/bin/claude",
+            ) as resolve_claude,
+            patch.object(
+                codex_cli,
+                "read_claude_version",
+                return_value="2.0 (Claude Code)",
+            ),
+            patch.object(codex_cli, "require_secure_windows_sandbox") as probe,
+        ):
+            self.assertEqual(
+                codex_cli.resolve_backends(args, ["claude-opus-5", None]),
+                ("/bin/codex", "codex-cli 1.0; 2.0 (Claude Code)"),
+            )
+            probe.assert_not_called()
+            resolve_codex.reset_mock()
+            resolve_claude.reset_mock()
+            self.assertEqual(
+                codex_cli.resolve_backends(
+                    args,
+                    ["claude-opus-5", "claude-sonnet-5"],
+                    windows_probe_workspace=Path("."),
+                ),
+                ("/bin/claude", "2.0 (Claude Code)"),
+            )
+            resolve_codex.assert_not_called()
+            probe.assert_not_called()
+            resolve_claude.assert_called_once_with("claude")
+            self.assertEqual(
+                codex_cli.resolve_backends(
+                    args,
+                    ["gpt-6-astra"],
+                    windows_probe_workspace=Path("."),
+                ),
+                ("/bin/codex", "codex-cli 1.0"),
+            )
+            probe.assert_called_once_with("/bin/codex", Path("."))
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX fake CLI script")
+    def test_claude_turn_stages_structured_output_from_result_event(self):
+        with TemporaryDirectory() as temporary:
+            workspace = Path(temporary) / "workspace"
+            workspace.mkdir()
+            schema = Path(temporary) / "schema.json"
+            schema.write_text('{"type":"object"}', encoding="utf-8")
+            fake = Path(temporary) / "claude"
+            fake.write_text(
+                "#!/bin/sh\n"
+                "cat > prompt.txt\n"
+                "printf '%s\\n' \"$*\" > argv.txt\n"
+                "echo '{\"type\":\"system\",\"subtype\":\"init\"}'\n"
+                "echo '{\"type\":\"result\",\"subtype\":\"success\","
+                "\"is_error\":false,\"permission_denials\":[{\"tool_name\":"
+                "\"Write\"}],\"structured_output\":{\"answer\":\"ok\"}}'\n",
+                encoding="utf-8",
+            )
+            fake.chmod(0o755)
+            with (
+                patch.object(
+                    codex_cli,
+                    "claude_executable",
+                    return_value=str(fake),
+                ),
+                patch.object(codex_cli, "wait_for_codex_launch_slot"),
+            ):
+                result_path = codex_cli.run_structured_codex(
+                    codex="codex",
+                    workspace=workspace,
+                    prompt="solve it",
+                    schema_path=schema,
+                    options=codex_cli.ModelOptions(model="claude-opus-5"),
+                    timeout_seconds=30,
+                    completion_grace_seconds=1,
+                )
+
+            self.assertEqual(
+                json.loads(result_path.read_text(encoding="utf-8")),
+                {"answer": "ok"},
+            )
+            self.assertEqual(
+                (workspace / "prompt.txt").read_text(encoding="utf-8"),
+                "solve it",
+            )
+            self.assertIn(
+                "--model claude-opus-5",
+                (workspace / "argv.txt").read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                "denied 1 tool call(s)",
+                (workspace / "run.log").read_text(encoding="utf-8"),
+            )
+            self.assertTrue(
+                codex_cli.structured_turn_is_complete(
+                    workspace / "events.jsonl",
+                    result_path,
+                )
+            )
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX fake CLI script")
+    def test_claude_turn_failure_reports_the_result_error(self):
+        with TemporaryDirectory() as temporary:
+            workspace = Path(temporary) / "workspace"
+            workspace.mkdir()
+            schema = Path(temporary) / "schema.json"
+            schema.write_text('{"type":"object"}', encoding="utf-8")
+            fake = Path(temporary) / "claude"
+            fake.write_text(
+                "#!/bin/sh\n"
+                "cat > /dev/null\n"
+                "echo '{\"type\":\"result\",\"subtype\":"
+                "\"error_during_execution\",\"is_error\":true,"
+                "\"result\":\"API overloaded\"}'\n"
+                "exit 1\n",
+                encoding="utf-8",
+            )
+            fake.chmod(0o755)
+            with (
+                patch.object(
+                    codex_cli,
+                    "claude_executable",
+                    return_value=str(fake),
+                ),
+                patch.object(codex_cli, "wait_for_codex_launch_slot"),
+            ):
+                with self.assertRaisesRegex(
+                    codex_cli.CodexError,
+                    "did not complete the turn .*API overloaded",
+                ):
+                    codex_cli.run_structured_codex(
+                        codex="codex",
+                        workspace=workspace,
+                        prompt="solve it",
+                        schema_path=schema,
+                        options=codex_cli.ModelOptions(model="claude-opus-5"),
+                        model_writes_result=True,
+                    )
 
 
 if __name__ == "__main__":

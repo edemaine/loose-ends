@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Shared non-interactive Codex CLI execution helpers."""
+"""Shared non-interactive agent CLI execution helpers.
+
+Every task runs one structured turn through either the Codex CLI or the
+Claude Code CLI.  The model ID selects the backend: ``claude-*`` models (and
+the Claude Code aliases ``fable``, ``opus``, ``sonnet``, and ``haiku``) run
+through ``claude -p``; everything else runs through ``codex exec``.
+"""
 
 from __future__ import annotations
 
@@ -16,7 +22,7 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Callable, Mapping
+from typing import Callable, Iterable, Mapping
 
 from validation import common as validation_common
 
@@ -39,6 +45,41 @@ _WINDOWS_ACL_NORMALIZE_LOCK = threading.Lock()
 _next_codex_launch_at = 0.0
 _windows_sandbox_probe_error: str | None = None
 _windows_sandbox_probe_succeeded = False
+CLAUDE_MODEL_ALIASES = frozenset({"fable", "opus", "sonnet", "haiku"})
+# Claude Code accepts low..max; the Codex-only "ultra" level maps to max.
+CLAUDE_EFFORTS = {
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "xhigh": "xhigh",
+    "max": "max",
+    "ultra": "max",
+}
+CLAUDE_TOOLS = ("Bash", "Read", "Write", "Edit", "Glob", "Grep")
+CLAUDE_WEB_TOOLS = ("WebSearch", "WebFetch")
+# Mirror the Codex workspace-write sandbox: shell commands may only write
+# inside the workspace and get no network; the escape hatch that reruns a
+# blocked command outside the sandbox is disabled, and a host without a
+# working sandbox fails the turn instead of running unsandboxed.
+CLAUDE_SANDBOX_SETTINGS: dict[str, object] = {
+    "sandbox": {
+        "enabled": True,
+        "failIfUnavailable": True,
+        "allowUnsandboxedCommands": False,
+        "autoAllowBashIfSandboxed": True,
+        "network": {"strictAllowlist": True, "allowedDomains": []},
+    },
+}
+CLAUDE_SYSTEM_PROMPT_SUFFIX = (
+    "You are running unattended as a batch agent for the Loose Ends research "
+    "workbench. The current working directory is the task workspace: write "
+    "every file the task asks for there, relative to the working directory, "
+    "never in a scratchpad or temporary directory. Nobody can answer "
+    "questions or grant permissions during this run, so do not ask; if a "
+    "tool call is denied, complete the task without it. Do not use git."
+)
+_CLAUDE_EXECUTABLE_LOCK = threading.Lock()
+_claude_executable: str | None = None
 _WINDOWS_RESERVED_DEVICE_NAMES = {
     "aux",
     "con",
@@ -206,7 +247,8 @@ def add_model_arguments(
         default=model_default,
         metavar="MODEL",
         help=(
-            "Codex model ID; for example, gpt-5.6-sol "
+            "Codex or Claude model ID; for example, gpt-5.6-sol or "
+            "claude-opus-5; claude-* models run through the Claude Code CLI "
             f"(default: {model_default_help})"
         ),
     )
@@ -354,29 +396,121 @@ def with_validation_instructions(prompt: str) -> str:
     return prompt.rstrip() + "\n\n" + instructions.strip() + "\n"
 
 
-def resolve_codex_executable(value: str) -> str:
+def is_claude_model(model: str | None) -> bool:
+    """Return whether a model ID selects the Claude Code CLI backend."""
+    if model is None:
+        return False
+    name = model.strip().casefold()
+    return name.startswith("claude") or name in CLAUDE_MODEL_ALIASES
+
+
+def backend_for_model(model: str | None) -> str:
+    """Return ``"claude"`` or ``"codex"`` for a requested model ID."""
+    return "claude" if is_claude_model(model) else "codex"
+
+
+def add_claude_argument(parser: argparse.ArgumentParser) -> None:
+    """Add the Claude Code executable option next to ``--codex``."""
+    parser.add_argument(
+        "--claude",
+        default="claude",
+        help=(
+            "Claude Code CLI executable or command name, used for claude-* "
+            "models (default: claude)"
+        ),
+    )
+
+
+def _resolve_executable(value: str, description: str) -> str:
     executable = shutil.which(value)
     if executable is None:
         raise CodexError(
-            f"could not find the Codex CLI executable {value!r} on PATH"
+            f"could not find the {description} executable {value!r} on PATH"
         )
     return executable
 
 
-def read_codex_version(codex: str) -> str:
+def _read_version(executable: str, description: str) -> str:
     try:
         completed = subprocess.run(
-            [codex, "--version"],
+            [executable, "--version"],
             capture_output=True,
             text=True,
             check=False,
         )
     except OSError as exc:
-        raise CodexError(f"could not run {codex!r}: {exc}") from exc
+        raise CodexError(f"could not run {executable!r}: {exc}") from exc
     if completed.returncode != 0:
         detail = completed.stderr.strip() or f"exit status {completed.returncode}"
-        raise CodexError(f"could not query the Codex CLI version: {detail}")
+        raise CodexError(f"could not query the {description} version: {detail}")
     return completed.stdout.strip()
+
+
+def resolve_codex_executable(value: str) -> str:
+    return _resolve_executable(value, "Codex CLI")
+
+
+def read_codex_version(codex: str) -> str:
+    return _read_version(codex, "Codex CLI")
+
+
+def resolve_claude_executable(value: str) -> str:
+    return _resolve_executable(value, "Claude Code CLI")
+
+
+def read_claude_version(claude: str) -> str:
+    return _read_version(claude, "Claude Code CLI")
+
+
+def configure_claude_executable(value: str) -> str:
+    """Resolve the Claude Code CLI once and use it for every Claude turn."""
+    global _claude_executable
+    executable = resolve_claude_executable(value)
+    with _CLAUDE_EXECUTABLE_LOCK:
+        _claude_executable = executable
+    return executable
+
+
+def claude_executable() -> str:
+    """Return the configured Claude Code CLI, resolving ``claude`` lazily."""
+    with _CLAUDE_EXECUTABLE_LOCK:
+        if _claude_executable is not None:
+            return _claude_executable
+    return configure_claude_executable("claude")
+
+
+def resolve_backends(
+    args: argparse.Namespace,
+    models: Iterable[str | None],
+    *,
+    windows_probe_workspace: Path | None = None,
+) -> tuple[str, str]:
+    """Resolve every agent CLI that the requested models need.
+
+    Return the executable and version to record for the run: the Codex CLI
+    whenever any model runs through Codex, otherwise the Claude Code CLI.
+    Claude turns always use the Claude Code CLI configured here, whichever
+    executable the runner functions are handed.
+    """
+    backends = {backend_for_model(model) for model in models}
+    versions: list[str] = []
+    executable: str | None = None
+    if "codex" in backends:
+        executable = resolve_codex_executable(args.codex)
+        versions.append(read_codex_version(executable))
+        if windows_probe_workspace is not None:
+            # Probe once before announcing or submitting a batch.  Per-turn
+            # probing remains as a guard against a helper that fails later,
+            # but a persistently broken Windows helper must not create one
+            # workspace and failure report per selected task.
+            require_secure_windows_sandbox(executable, windows_probe_workspace)
+    if "claude" in backends:
+        claude = configure_claude_executable(args.claude)
+        versions.append(read_claude_version(claude))
+        if executable is None:
+            executable = claude
+    assert executable is not None
+    return executable, "; ".join(versions)
 
 
 def is_windows_host() -> bool:
@@ -835,21 +969,49 @@ def is_transient_startup_failure(
     )
 
 
+def _is_final_event(event: object) -> bool:
+    """Recognize a successful final event from either CLI's event stream."""
+    if not isinstance(event, dict):
+        return False
+    if event.get("type") == "turn.completed":
+        return True
+    return (
+        event.get("type") == "result"
+        and event.get("subtype") == "success"
+        and not event.get("is_error")
+    )
+
+
 def structured_turn_is_complete(events_path: Path, result_path: Path) -> bool:
-    """Return whether Codex wrote both its final event and valid JSON result."""
+    """Return whether the agent wrote both its final event and valid JSON result."""
     try:
         with result_path.open(encoding="utf-8") as source:
             json.load(source)
         with events_path.open(encoding="utf-8") as source:
             return any(
-                isinstance(event, dict)
-                and event.get("type") == "turn.completed"
+                _is_final_event(event)
                 for line in source
                 if line.strip()
                 for event in (json.loads(line),)
             )
     except (OSError, UnicodeError, json.JSONDecodeError):
         return False
+
+
+def claude_result_event(events_path: Path) -> dict | None:
+    """Return the final Claude Code result event, if the CLI wrote one."""
+    result: dict | None = None
+    try:
+        with events_path.open(encoding="utf-8") as source:
+            for line in source:
+                if not line.strip():
+                    continue
+                event = json.loads(line)
+                if isinstance(event, dict) and event.get("type") == "result":
+                    result = event
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    return result
 
 
 def _stop_codex_process(process: subprocess.Popen) -> None:
@@ -1054,6 +1216,123 @@ def build_exec_command(
     return command
 
 
+def build_claude_command(
+    *,
+    claude: str,
+    schema_path: Path,
+    options: ModelOptions,
+    web_search: str = "disabled",
+    model_writes_result: bool = False,
+) -> list[str]:
+    """Build a non-interactive Claude Code turn isolated like a Codex one.
+
+    User, project, and local settings are ignored (no hooks, CLAUDE.md files,
+    plugins, skills, or MCP servers); shell commands run in the Claude Code
+    sandbox with writes confined to the workspace and no network; the Write
+    and Edit tools are auto-approved only inside the workspace; and web tools
+    are offered only when the task enables web search.  The prompt is read
+    from standard input, and the model runs in the workspace directory.
+    """
+    if web_search not in WEB_SEARCH_MODES:
+        raise CodexError(
+            "web search must be one of " + ", ".join(WEB_SEARCH_MODES)
+        )
+    if options.model is None:
+        raise CodexError("a Claude model ID is required for Claude Code turns")
+    settings: dict[str, object] = dict(CLAUDE_SANDBOX_SETTINGS)
+    if options.fast:
+        settings["fastMode"] = True
+    tools = list(CLAUDE_TOOLS)
+    if web_search != "disabled":
+        tools.extend(CLAUDE_WEB_TOOLS)
+    command = [
+        claude,
+        "--print",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--safe-mode",
+        "--setting-sources",
+        "",
+        "--strict-mcp-config",
+        "--disable-slash-commands",
+        "--no-session-persistence",
+        "--permission-mode",
+        "acceptEdits",
+        "--settings",
+        json.dumps(settings, separators=(",", ":"), sort_keys=True),
+        "--tools",
+        ",".join(tools),
+        "--append-system-prompt",
+        CLAUDE_SYSTEM_PROMPT_SUFFIX,
+        "--model",
+        options.model,
+    ]
+    if web_search != "disabled":
+        command.extend(("--allowedTools", *CLAUDE_WEB_TOOLS))
+    if options.reasoning_effort is not None:
+        effort = CLAUDE_EFFORTS.get(options.reasoning_effort)
+        if effort is None:
+            raise CodexError(
+                f"unsupported Claude Code effort level: {options.reasoning_effort}"
+            )
+        command.extend(("--effort", effort))
+    if not model_writes_result:
+        try:
+            schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise CodexError(f"could not read result schema {schema_path}: {exc}") from exc
+        command.extend(
+            ("--json-schema", json.dumps(schema, separators=(",", ":")))
+        )
+    return command
+
+
+def _finish_claude_turn(
+    *,
+    workspace: Path,
+    events_path: Path,
+    result_path: Path,
+    log_path: Path,
+    model_writes_result: bool,
+) -> None:
+    """Check Claude Code's final event and stage a driver-owned result."""
+    event = claude_result_event(events_path)
+    if event is None:
+        return
+    denials = event.get("permission_denials")
+    if isinstance(denials, list) and denials:
+        with log_path.open("a", encoding="utf-8") as log:
+            log.write(
+                f"\nDriver: Claude Code denied {len(denials)} tool call(s) "
+                "outside the workspace policy: "
+                + ", ".join(
+                    str(denial.get("tool_name", "?"))
+                    for denial in denials
+                    if isinstance(denial, dict)
+                )
+                + "\n"
+            )
+    if event.get("is_error") or event.get("subtype") != "success":
+        detail = event.get("result") or event.get("subtype") or "unknown error"
+        raise CodexError(
+            f"Claude Code did not complete the turn ({detail}); "
+            f"workspace preserved at {workspace}"
+        )
+    if model_writes_result:
+        return
+    structured = event.get("structured_output")
+    if not isinstance(structured, dict):
+        raise CodexError(
+            "Claude Code returned no structured output; "
+            f"workspace preserved at {workspace}"
+        )
+    result_path.write_text(
+        json.dumps(structured, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+
 def run_structured_codex(
     *,
     codex: str,
@@ -1070,25 +1349,41 @@ def run_structured_codex(
     completion_grace_seconds: float | None = None,
     model_writes_result: bool = False,
 ) -> Path:
-    """Run one structured Codex turn and return its final-response path."""
+    """Run one structured agent turn and return its final-response path.
+
+    The model ID in ``options`` selects the backend: Claude models run
+    through the Claude Code CLI configured by ``resolve_backends``, and every
+    other model runs through the Codex CLI given as ``codex``.
+    """
     workspace = workspace.resolve()
+    backend = backend_for_model(options.model)
     grant_workspace_owner_inheritance(workspace)
-    require_secure_windows_sandbox(codex, workspace)
+    if backend == "codex":
+        require_secure_windows_sandbox(codex, workspace)
     result_path = workspace / result_filename
     events_path = workspace / events_filename
     log_path = workspace / log_filename
     events_path.write_text("", encoding="utf-8")
     log_path.write_text("", encoding="utf-8")
-    command = build_exec_command(
-        codex=codex,
-        workspace=workspace,
-        prompt=prompt,
-        schema_path=schema_path,
-        result_path=result_path,
-        options=options,
-        web_search=web_search,
-        model_writes_result=model_writes_result,
-    )
+    if backend == "claude":
+        command = build_claude_command(
+            claude=claude_executable(),
+            schema_path=schema_path,
+            options=options,
+            web_search=web_search,
+            model_writes_result=model_writes_result,
+        )
+    else:
+        command = build_exec_command(
+            codex=codex,
+            workspace=workspace,
+            prompt=prompt,
+            schema_path=schema_path,
+            result_path=result_path,
+            options=options,
+            web_search=web_search,
+            model_writes_result=model_writes_result,
+        )
     environment = codex_subprocess_environment()
 
     completed: subprocess.CompletedProcess | None = None
@@ -1164,17 +1459,31 @@ def run_structured_codex(
         ):
             break
 
-    note_windows_sandbox_failure(log_path)
-    try:
-        normalize_workspace_access(workspace, codex)
-    except CodexError as exc:
-        if not structured_turn_is_complete(events_path, result_path):
-            raise
-        with log_path.open("a", encoding="utf-8") as log:
-            log.write(f"\nDriver ACL recovery warning: {exc}\n")
+    if backend == "claude":
+        if not timed_out:
+            _finish_claude_turn(
+                workspace=workspace,
+                events_path=events_path,
+                result_path=result_path,
+                log_path=log_path,
+                model_writes_result=model_writes_result,
+            )
+            structured_result_complete = structured_turn_is_complete(
+                events_path,
+                result_path,
+            )
+    else:
+        note_windows_sandbox_failure(log_path)
+        try:
+            normalize_workspace_access(workspace, codex)
+        except CodexError as exc:
+            if not structured_turn_is_complete(events_path, result_path):
+                raise
+            with log_path.open("a", encoding="utf-8") as log:
+                log.write(f"\nDriver ACL recovery warning: {exc}\n")
     if timed_out:
         raise CodexError(
-            f"Codex exceeded the {timeout_seconds:g}-second wall-clock "
+            f"The agent exceeded the {timeout_seconds:g}-second wall-clock "
             f"timeout; workspace preserved at {workspace}"
         )
     if (
@@ -1183,8 +1492,8 @@ def run_structured_codex(
     ):
         returncode = completed.returncode if completed is not None else "unknown"
         raise CodexError(
-            f"Codex exited with status {returncode}; "
-            f"workspace preserved at {workspace}"
+            f"{'Claude Code' if backend == 'claude' else 'Codex'} exited "
+            f"with status {returncode}; workspace preserved at {workspace}"
         )
     return result_path
 
@@ -1264,7 +1573,7 @@ def run_validated_codex(
         if report.valid or not report.repairable:
             break
         repair_prompt = (
-            "The previous Codex turn left generated output that failed the "
+            "The previous agent turn left generated output that failed the "
             "authoritative deterministic validator. Preserve all substantive "
             "work and staged inputs. Fix only the reported output-contract "
             "issues, run `python -m validation.validate` until it passes, and "

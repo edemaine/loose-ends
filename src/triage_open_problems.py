@@ -503,6 +503,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="codex",
         help="Codex CLI executable or command name (default: codex)",
     )
+    codex_cli.add_claude_argument(parser)
     codex_cli.add_prompt_arguments(
         parser,
         default_template=DEFAULT_PROMPT_PATH,
@@ -625,11 +626,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if stale:
         try:
-            codex = (
-                repaired_codex
-                or codex_cli.resolve_codex_executable(args.codex)
+            codex, codex_version = codex_cli.resolve_backends(
+                args,
+                [options.model],
             )
-            codex_version = codex_cli.read_codex_version(codex)
         except common.CodexError as exc:
             return codex_cli.report_error(parser, exc)
     else:
@@ -714,6 +714,8 @@ def main(argv: list[str] | None = None) -> int:
             str(args.jobs),
             "--codex",
             args.codex,
+            "--claude",
+            args.claude,
         ]
         for problem in selected:
             solver_arguments.extend(

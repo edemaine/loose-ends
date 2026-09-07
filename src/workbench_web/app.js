@@ -3838,17 +3838,45 @@ function field(name, label, { type = "text", value = "", help = "", full = false
   return wrapper;
 }
 
-function modelField(name, label, value, defaultLabel) {
-  const options = [
-    ["", defaultLabel],
+// Model IDs starting with "claude" run through the Claude Code CLI; every
+// other model runs through the Codex CLI.
+const MODEL_CHOICES = [
+  ["Codex", [
     ["gpt-6-astra", "GPT-6 Astra"],
     ["gpt-5.6-sol", "GPT-5.6 Sol"],
     ["gpt-5.6-terra", "GPT-5.6 Terra"],
     ["gpt-5.6-luna", "GPT-5.6 Luna"],
-  ];
+  ]],
+  ["Claude Code", [
+    ["claude-fable-5-1", "Claude Fable 5.1"],
+    ["claude-opus-5", "Claude Opus 5"],
+    ["claude-sonnet-5", "Claude Sonnet 5"],
+  ]],
+];
+
+function modelField(name, label, value, defaultLabel) {
+  const wrapper = node("label", "field");
+  wrapper.append(node("span", "", label));
+  const input = node("select");
+  input.name = name;
+  const addOption = (parent, optionValue, optionLabel) => {
+    const option = node("option", "", optionLabel);
+    option.value = optionValue;
+    parent.append(option);
+  };
+  addOption(input, "", defaultLabel);
+  MODEL_CHOICES.forEach(([groupLabel, models]) => {
+    const group = node("optgroup");
+    group.label = groupLabel;
+    models.forEach(([id, text]) => addOption(group, id, text));
+    input.append(group);
+  });
   // Preserve model IDs from saved task drafts, including older models.
-  if (value && !options.some(([id]) => id === value)) options.push([value, value]);
-  return field(name, label, { type: "select", value: value || "", options });
+  const known = MODEL_CHOICES.flatMap(([, models]) => models.map(([id]) => id));
+  if (value && !known.includes(value)) addOption(input, value, value);
+  input.value = value || "";
+  wrapper.append(input, node("small", "", "Claude models run through the Claude Code CLI."));
+  return wrapper;
 }
 
 function checkbox(name, label, help = "", checked = false) {

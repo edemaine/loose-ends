@@ -884,6 +884,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="codex",
         help="Codex CLI executable or command name (default: codex)",
     )
+    codex_cli.add_claude_argument(parser)
     codex_cli.add_prompt_arguments(
         parser,
         default_template=DEFAULT_PROMPT_PATH,
@@ -1033,8 +1034,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if pending:
         try:
-            codex = codex_cli.resolve_codex_executable(args.codex)
-            codex_version = codex_cli.read_codex_version(codex)
+            codex, codex_version = codex_cli.resolve_backends(
+                args,
+                [options.model],
+            )
         except common.CodexError as exc:
             return codex_cli.report_error(parser, exc)
         print(

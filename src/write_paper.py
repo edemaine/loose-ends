@@ -2320,6 +2320,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="codex",
         help="Codex CLI executable or command name (default: codex)",
     )
+    codex_cli.add_claude_argument(parser)
     parser.add_argument(
         "--latexmk",
         default="latexmk",
@@ -2483,8 +2484,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     try:
-        codex = codex_cli.resolve_codex_executable(args.codex)
-        codex_version = codex_cli.read_codex_version(codex)
+        codex, codex_version = codex_cli.resolve_backends(
+            args,
+            [options.model, review_options.model],
+        )
         latexmk = resolve_latexmk(args.latexmk)
         manuscript_directory.mkdir(parents=True, exist_ok=True)
         print(

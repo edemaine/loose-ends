@@ -61,6 +61,8 @@ To use Loose Ends, install the following prerequisites if you haven't already:
 * Python dependencies: `python -m pip install -r requirements.txt`
 * [Codex CLI](https://learn.chatgpt.com/docs/codex/cli), and run
   `codex login` to authenticate your account
+* Optionally, [Claude Code](https://code.claude.com/docs/en/overview), and run
+  `claude` once to log in, if you want to run tasks with Claude models
 * LaTeX, such as [TeX Live](https://www.tug.org/texlive/), including `latexmk`,
   to write manuscripts
 
@@ -455,6 +457,26 @@ Reasoning effort is separate from the model ID. Supported levels include
 support only a subset. `--fast` requests Codex's faster service tier for these
 runs without changing the global CLI configuration; Fast mode consumes credits
 at a higher rate.
+
+### Claude Code backend
+
+A model ID starting with `claude` (for example, `--model claude-opus-5`, or
+`--review-model claude-fable-5-1` for the critic only) runs that agent through
+the [Claude Code](https://code.claude.com/docs/en/overview) CLI instead of
+Codex; `--claude` names the executable, as `--codex` does for Codex. The
+workbench's model menu lists both families. Each Claude turn ignores your
+user, project, and local Claude Code settings (no hooks, `CLAUDE.md` files,
+plugins, skills, or MCP servers), runs shell commands in Claude Code's sandbox
+with writes confined to the workspace and no network, auto-approves file edits
+only inside the workspace, and offers the `WebSearch` and `WebFetch` tools only
+when the task's web search is enabled. Because that sandbox runs on macOS,
+Linux, and WSL2 only, Claude turns fail early on native Windows rather than
+running unsandboxed. Reasoning effort maps onto Claude Code's `--effort`
+levels, with `ultra` treated as `max`, and `--fast` turns on Claude Code's fast
+mode for models that support it. Claude Code writes the same `events.jsonl`,
+`run.log`, and `agent-result.json` files, so attempts, reviews, and
+manuscripts are recorded and reviewed identically whichever backend produced
+them.
 
 Codex writes in a temporary workspace beneath the paper's `analysis/`
 directory. The runner stages disposable copies of `paper.pdf` and `source/`
