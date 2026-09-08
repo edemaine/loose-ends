@@ -47,6 +47,7 @@ const state = {
   runLogLoads: new Map(),
   expandedRuns: new Set(),
   expandedJobScopes: new Set(),
+  expandedProblemBackgrounds: new Set(),
   dialog: null,
 };
 
@@ -1774,6 +1775,22 @@ function markdown(value, missing = "No content available.", env = {}) {
     body.append(node("p", "", missing));
   } else if (markdownRenderer) {
     body.innerHTML = markdownRenderer.render(value, env);
+    if (env.artifactDirectory) {
+      const directory = env.artifactDirectory.replace(/\\/g, "/");
+      const base = `https://artifact.invalid/${directory.replace(/^\/+/, "").split("/").map(encodeURIComponent).join("/")}/`;
+      body.querySelectorAll("a[href]").forEach(link => {
+        let href = link.getAttribute("href");
+        // Linkify mistakes filenames with a real TLD (e.g. attempt.md) for websites.
+        if (env.artifactFiles?.has(link.textContent) && href === `http://${link.textContent}`) href = link.textContent;
+        if (!href || /^(?:[a-z][a-z\d+.-]*:|\/|#)/i.test(href)) return;
+        try {
+          const resolved = new URL(href, base);
+          let path = decodeURIComponent(resolved.pathname);
+          if (/^[a-z]:/i.test(directory)) path = path.slice(1);
+          link.href = artifactViewUrl(path) + resolved.hash;
+        } catch { /* Leave malformed links as written. */ }
+      });
+    }
   } else {
     const pre = node("pre", "", value);
     body.append(pre);
@@ -1868,8 +1885,43 @@ function sourcePaperForProblem(item) {
   );
 }
 
+function problemDetailBadges(item, dimensions) {
+  const badges = node("div", "badges");
+  reviewModel.detailBadges(item).filter(value => dimensions.includes(value.dimension)).forEach(value => {
+    let className = value.value;
+    if (value.dimension === "priority") className = value.value === "high" ? "error" : value.value === "medium" ? "warn" : "neutral";
+    else if (value.dimension === "warning") className = "error";
+    else if (["coverage", "importance", "confidence", "literature"].includes(value.dimension)) className = "neutral";
+    badges.append(node("span", `badge ${className || "neutral"}`, value.label));
+  });
+  return badges;
+}
+
+function claimAssessment(assessment, env = {}) {
+  const section = node("div", "claim-assessment");
+  const status = assessment.assessment || "unknown";
+  section.append(
+    badge(`Reviewer: ${reviewModel.humanize(status)}`, status === "supported" ? "succeeded" : status === "incorrect" ? "error" : "warn"),
+    markdown(assessment.explanation, "No explanation available.", env),
+  );
+  return section;
+}
+
+function problemDocumentButton(label, tab) {
+  return button(label, () => {
+    state.detailTab = tab;
+    syncNavigation({ preserveScroll: true });
+    requestAnimationFrame(() => {
+      const documents = document.getElementById("problem-documents");
+      documents?.scrollIntoView({ block: "start" });
+      documents?.focus({ preventScroll: true });
+      rememberCurrentScroll();
+    });
+  }, "button");
+}
+
 function renderReviewDetail(item) {
-  const shell = node("div", "main-inner");
+  const shell = node("div", "main-inner problem-detail");
   const selectedSummary = state.catalog.reviews.find(value => value.itemKey === item.itemKey);
   if (selectedSummary && item !== selectedSummary) {
     item = { ...selectedSummary, ...item };
@@ -1879,24 +1931,70 @@ function renderReviewDetail(item) {
   copy.append(node("div", "eyebrow", `${item.paperTitle} · ${item.problemId}`));
   copy.append(node("h1", "", item.problemTitle));
   copy.append(node("p", "", item.paperAuthors?.join(", ") || "Authors unavailable"));
-  const badges = node("div", "badges");
-  badges.append(badge(item.explicitness, "neutral"));
-  reviewModel.detailBadges(item).forEach(value => {
-    let className = value.value;
-    if (value.dimension === "priority") className = value.value === "high" ? "error" : value.value === "medium" ? "warn" : "neutral";
-    else if (value.dimension === "warning") className = "error";
-    else if (["coverage", "importance", "confidence", "literature"].includes(value.dimension)) className = "neutral";
-    badges.append(node("span", `badge ${className || "neutral"}`, value.label));
-  });
-  copy.append(badges);
   hero.append(copy);
   shell.append(hero);
+
+  const problem = problemTarget(item);
+  const attempt = item.attemptDirectory ? attemptTarget(item) : null;
+  const sourcePaper = sourcePaperForProblem(item);
+  const statement = node("section", "problem-statement panel");
+  const statementHeading = node("div", "section-title");
+  const statementLabel = node("div", "problem-section-label");
+  statementLabel.append(node("h2", "", "Problem"), badge(item.explicitness, "neutral"));
+  statementHeading.append(statementLabel);
+  if (sourcePaper) statementHeading.append(routeLink(
+    { tab: "papers", paper: sourcePaper }, "View source paper", "button",
+  ));
+  // Parse the complete entry first so split sections share reference definitions.
+  const statementEnv = {};
+  if (markdownRenderer && item.problemStatement) markdownRenderer.parse(item.problemStatement, statementEnv);
+  statement.append(statementHeading, markdown(
+    item.problemStatementShort ?? item.problemStatement,
+    state.detailCache.has(item.itemKey) ? "No problem statement available." : "Loading problem statement…",
+    statementEnv,
+  ));
+  if (item.problemSource) {
+    const source = node("div", "problem-source");
+    source.append(node("strong", "", "Source"), markdown(item.problemSource, "", statementEnv));
+    statement.append(source);
+  }
+  if (item.problemBackground) {
+    const background = node("details", "problem-background");
+    background.open = state.expandedProblemBackgrounds.has(item.problemKey);
+    background.append(node("summary", "", "Context and background"), markdown(item.problemBackground, "", statementEnv));
+    background.addEventListener("toggle", () => {
+      if (!background.isConnected) return;
+      if (background.open) state.expandedProblemBackgrounds.add(item.problemKey);
+      else state.expandedProblemBackgrounds.delete(item.problemKey);
+    });
+    statement.append(background);
+  }
+  shell.append(statement);
 
   const attempts = reviewModel.attemptsForProblem(
     state.catalog.reviews,
     item.problemKey,
   );
   const latestAttempt = attempts[0];
+  const attemptHeading = node("div", "problem-attempt-heading");
+  const attemptLabel = node("div", "problem-section-label");
+  attemptLabel.append(node("span", "", "Solution"));
+  if (attempt) {
+    attemptLabel.append(node("span", "problem-attempt-label",
+      `${item.attemptName}${latestAttempt?.itemKey === item.itemKey ? " · latest" : ""}`,
+    ));
+  } else attemptLabel.append(node("span", "muted", "No attempts yet"));
+  const solutionActions = node("div", "actions");
+  addAction(solutionActions, attempt ? "Solve again" : "Solve", "solve", [problem], true);
+  if (attempt) {
+    addAction(solutionActions, item.attemptStatus === "reviewed" ? "Review again" : "Review", "review", [attempt]);
+    addAction(solutionActions, "Write this result", "write", [attempt]);
+  }
+  attemptHeading.append(attemptLabel, relatedTaskHost({
+    paperPath: item.paperDirectory,
+    problemPath: `${item.paperDirectory}/${item.problemId}`,
+  }), solutionActions);
+  shell.append(attemptHeading);
   if (latestAttempt && latestAttempt.itemKey !== item.itemKey) {
     shell.append(olderVersionWarning(
       "attempt",
@@ -1912,70 +2010,88 @@ function renderReviewDetail(item) {
     ));
   }
 
-  if (item.attemptDisplayPath) shell.append(node("code", "attempt-path", item.attemptDisplayPath));
-
-  const actions = node("div", "actions");
-  const problem = problemTarget(item);
-  const attempt = item.attemptDirectory ? attemptTarget(item) : null;
-  const sourcePaper = sourcePaperForProblem(item);
-  if (sourcePaper) {
-    actions.append(routeLink(
-      { tab: "papers", paper: sourcePaper },
-      "View source paper",
-      "button",
-    ));
-  }
-  addAction(actions, item.triageCurrent ? "Triage again" : "Triage", "triage", [problem]);
-  addAction(actions, item.literatureStatus ? "Search literature again" : "Search literature", "literature", [problem]);
-  addAction(actions, attempt ? "Solve again" : "Solve", "solve", [problem], true);
+  const summaries = reviewModel.summaryCards(item);
   if (attempt) {
-    addAction(actions, item.attemptStatus === "reviewed" ? "Review again" : "Review", "review", [attempt]);
-    addAction(actions, "Write this result", "write", [attempt]);
+    const directory = item.attemptDirectory.replace(/\\/g, "/");
+    const claimEnv = {
+      artifactDirectory: directory,
+      artifactFiles: new Set((item.files || []).map(file =>
+        (typeof file === "string" ? file : file.path).replace(/\\/g, "/"),
+      ).filter(path => path.startsWith(`${directory}/`)).map(path => path.slice(directory.length + 1))),
+    };
+    const solution = node("section", "section problem-solution");
+    const heading = node("div", "section-title");
+    const label = node("div", "problem-section-label");
+    label.append(node("h2", "", "Solution claims"), problemDetailBadges(item, ["status", "claim", "warning"]));
+    heading.append(label, problemDocumentButton("Read full solution", "attempt"));
+    solution.append(heading);
+    solution.append(markdown(item.solverSummary, "No solver summary available."));
+    const claims = Array.isArray(item.checkableClaims) ? item.checkableClaims : [];
+    claims.forEach(claim => {
+      const article = node("article", "solution-claim");
+      article.append(node("h3", "", `${claim.id} · ${reviewModel.humanize(claim.type || "claim")}`));
+      article.append(markdown(claim.statement, "No claim statement available.", claimEnv));
+      if (claim.support) article.append(node("h4", "", "Supporting argument"), markdown(claim.support, "", claimEnv));
+      if (claim.remaining_gap) article.append(node("h4", "", "Solver’s remaining gap"), markdown(claim.remaining_gap, "", claimEnv));
+      const assessments = (item.claimReviews || []).filter(value => value.claim_id === claim.id);
+      assessments.forEach(value => article.append(claimAssessment(value, claimEnv)));
+      if (!assessments.length) article.append(node("p", "claim-unreviewed", "No assessment for this claim."));
+      solution.append(article);
+    });
+    if (!claims.length) solution.append(node("p", "claim-unreviewed", state.detailCache.has(item.itemKey)
+      ? "No structured claims recorded. See the full solution for details."
+      : "Loading claims…"));
+    shell.append(solution);
   }
-  shell.append(actions);
 
+  if (item.attemptStatus === "reviewed") {
+    const review = node("section", "section problem-review");
+    const heading = node("div", "section-title");
+    const label = node("div", "problem-section-label");
+    label.append(node("h2", "", "Review"), problemDetailBadges(item, ["priority", "correctness", "coverage", "importance", "confidence"]));
+    heading.append(label, problemDocumentButton("Read full critique", "critique"));
+    review.append(heading);
+    review.append(markdown(item.criticSummary, "No review summary available."));
+    // Keep legacy or unmatched assessments visible, without inventing claim text.
+    const claimIds = new Set((item.checkableClaims || []).map(claim => claim.id));
+    (item.claimReviews || []).filter(value => !claimIds.has(value.claim_id)).forEach(value => {
+      const unmatched = node("div", "solution-claim");
+      unmatched.append(node("h3", "", `${value.claim_id || "Unknown claim"} · statement unavailable`), claimAssessment(value));
+      review.append(unmatched);
+    });
+    appendStringList(review, "Blocking gaps", item.blockingGaps);
+    appendStringList(review, "Recommended next steps", item.recommendedNextSteps);
+    appendStringList(review, "Warnings", item.warnings);
+    shell.append(review);
+  }
+
+  const background = node("section", "section problem-research");
+  const backgroundHeading = node("div", "section-title");
+  const backgroundActions = node("div", "actions");
+  addAction(backgroundActions, item.triageCurrent ? "Triage again" : "Triage", "triage", [problem]);
+  addAction(backgroundActions, item.literatureStatus ? "Search literature again" : "Search literature", "literature", [problem]);
+  backgroundHeading.append(node("h2", "", "Research background"), backgroundActions);
+  background.append(backgroundHeading);
+  const backgroundSummaries = node("div", "summary-grid");
+  summaries.filter(card => ["triage", "literature"].includes(card.key)).forEach(card => {
+    backgroundSummaries.append(summaryPanel(card.title, card.value, card.missing));
+  });
+  background.append(backgroundSummaries);
+  shell.append(background);
+
+  const manuscriptPanel = problemManuscriptsPanel(item);
+  if (manuscriptPanel) shell.append(manuscriptPanel);
   shell.append(relatedTasksPanel({
     paperPath: item.paperDirectory,
     problemPath: `${item.paperDirectory}/${item.problemId}`,
   }));
-  const manuscriptPanel = problemManuscriptsPanel(item);
-  if (manuscriptPanel) shell.append(manuscriptPanel);
-
-  const problemStatement = node("section", "problem-statement panel");
-  problemStatement.append(
-    node("h2", "", "Open problem statement"),
-    markdown(item.problemStatement, "Loading problem statement…"),
-  );
-  shell.append(problemStatement);
-
-  const summaries = node("div", "summary-grid");
-  reviewModel.summaryCards(item).forEach(card => {
-    summaries.append(summaryPanel(card.title, card.value, card.missing));
-  });
-  if (summaries.children.length) shell.append(summaries);
-
-  if (item.claimReviews?.length) {
-    const section = node("section", "section panel");
-    section.append(node("h2", "", "Claim assessments"));
-    const list = node("ul", "claim-list");
-    item.claimReviews.forEach(claim => {
-      const row = node("li");
-      row.append(
-        node("strong", "", `${claim.claim_id || "?"} — ${claim.assessment || "unknown"}: `),
-        document.createTextNode(claim.explanation || ""),
-      );
-      list.append(row);
-    });
-    section.append(list);
-    shell.append(section);
-  }
-  appendStringList(shell, "Blocking gaps", item.blockingGaps);
-  appendStringList(shell, "Recommended next steps", item.recommendedNextSteps);
-  appendStringList(shell, "Warnings", item.warnings);
 
   const tabs = reviewModel.detailTabs(item);
   if (!tabs.some(([key]) => key === state.detailTab)) state.detailTab = tabs[0][0];
   const tabbar = node("div", "detail-tabs");
+  tabbar.id = "problem-documents";
+  tabbar.tabIndex = -1;
+  tabbar.setAttribute("aria-label", "Full documents");
   tabs.forEach(([key, label]) => {
     tabbar.append(button(label, () => {
       state.detailTab = key;
@@ -1988,7 +2104,10 @@ function renderReviewDetail(item) {
   else if (state.detailTab === "critique") section.append(markdown(item.critique, "No critique is installed."));
   else if (state.detailTab === "triage") section.append(markdown(item.triageReport, "Loading triage report…"));
   else if (state.detailTab === "literature") section.append(markdown(item.literatureReport, "No literature report is installed."));
-  else section.append(fileGrid(item.files || []));
+  else {
+    if (item.attemptDisplayPath) section.append(node("code", "attempt-path", item.attemptDisplayPath));
+    section.append(fileGrid(item.files || []));
+  }
   shell.append(section);
   main.replaceChildren(shell);
 }
@@ -3544,6 +3663,7 @@ function relatedTasksPanel({
 function syncRelatedTasks() {
   if (!["research", "papers", "manuscripts"].includes(state.tab)) return;
   sidebar.querySelectorAll(".sidebar-related-tasks").forEach(fillRelatedTaskHost);
+  main.querySelectorAll(".sidebar-related-tasks").forEach(fillRelatedTaskHost);
   main.querySelectorAll(".related-tasks").forEach(fillRelatedTasksPanel);
 }
 

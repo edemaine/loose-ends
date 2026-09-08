@@ -78,7 +78,7 @@ IGNORED_PREFIXES = (
     ".triage-install-",
 )
 DRAFT_RE = re.compile(r"^draft-([0-9]{3,})$")
-CATALOG_CACHE_SCHEMA_VERSION = 4
+CATALOG_CACHE_SCHEMA_VERSION = 5
 ROOT_CACHE_DIRECTORY = ".loose-ends"
 PAPER_CACHE_FILENAME = "workbench-papers.json"
 MANUSCRIPT_CACHE_FILENAME = "workbench-manuscripts.json"
@@ -1102,6 +1102,7 @@ class CatalogManager:
             for item in value.get("reviews", []):
                 for field in (
                     "externalSources",
+                    "checkableClaims",
                     "claimReviews",
                     "blockingGaps",
                     "recommendedNextSteps",

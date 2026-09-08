@@ -91,6 +91,74 @@ def fake_plan(
     }
 
 
+class ProblemDetailTests(unittest.TestCase):
+    def test_statement_parts_preserve_math_and_nested_support(self):
+        value = (
+            "### A conjecture\n\n"
+            "- **Precise statement:** Show that\n"
+            "  \\[\n  f(n) \\le n^2.\n  \\]\n"
+            "  Under these assumptions:\n"
+            "  - The input is finite.\n"
+            "  - All weights are positive.\n"
+            "- **Source location:** Section 3, [paper][source].\n"
+            "- **Context:** An earlier result.\n\n"
+            "[source]: https://example.org/paper\n"
+        )
+        parts = human_review.problem_statement_parts(value)
+        self.assertEqual(parts["problemStatementShort"],
+            "Show that\n\\[\nf(n) \\le n^2.\n\\]\nUnder these assumptions:\n"
+            "- The input is finite.\n- All weights are positive.")
+        self.assertEqual(parts["problemSource"], "Section 3, [paper][source].")
+        self.assertIn("**Context:** An earlier result.", parts["problemBackground"])
+        self.assertIn("[source]: https://example.org/paper", parts["problemBackground"])
+        self.assertNotIn("Precise statement", parts["problemBackground"])
+
+    def test_heading_statement_and_unfamiliar_formats(self):
+        parts = human_review.problem_statement_parts(
+            "### Statement\n\nProve it.\n\n### Context\n\nBackground."
+        )
+        self.assertEqual(parts["problemStatementShort"], "Prove it.")
+        self.assertEqual(parts["problemBackground"], "### Context\n\nBackground.")
+        for value in (
+            "Unlabeled statement.\n\nMore context.",
+            "- **Statement:** First.\n- **Statement:** Second.",
+            "### Statement\n\n### Context\nOnly background.",
+        ):
+            with self.subTest(value=value):
+                parts = human_review.problem_statement_parts(value)
+                self.assertEqual(parts["problemStatementShort"], value)
+                self.assertEqual(parts["problemBackground"], "")
+
+    def test_lazy_detail_includes_claims_and_current_statement(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = make_paper(root)
+            attempt = paper / "OP-001" / "attempt-001"
+            attempt.mkdir(parents=True)
+            claims = [{"id": "C-001", "type": "lemma", "statement": "Claim.",
+                       "support": "Proof.", "remaining_gap": ""}]
+            common.write_json(attempt / "solver-result.json", {
+                "claimed_result_type": "partial_result", "summary": "Partial progress.",
+                "checkable_claims": claims,
+            })
+            (attempt / "attempt.md").write_text("# Full solution", encoding="utf-8")
+            manager = CatalogManager([root], root / "manuscripts", EventHub())
+            self.addCleanup(manager.close)
+            self.assertTrue(manager.wait_until_ready(8))
+            summary = manager.snapshot()["reviews"][0]
+            self.assertNotIn("checkableClaims", summary)
+            detail = manager.review_detail(summary["itemKey"])
+            self.assertEqual(detail["checkableClaims"], claims)
+            self.assertEqual(detail["solverAttempt"], "# Full solution")
+            (paper / "analysis" / "open-problems.md").write_text(
+                "## OP-001\n\n- **Statement:** Updated.\n- **Context:** Background.",
+                encoding="utf-8",
+            )
+            detail = manager.review_detail(summary["itemKey"])
+            self.assertEqual(detail["problemStatementShort"], "Updated.")
+            self.assertEqual(detail["problemBackground"], "- **Context:** Background.")
+
+
 class WorkbenchPlanningTests(unittest.TestCase):
     def test_write_dialog_job_flow(self):
         result = subprocess.run(
