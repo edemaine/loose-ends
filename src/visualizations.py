@@ -19,10 +19,11 @@ LLM-generated annotations and widgets:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
 import errno
-from functools import wraps
+from functools import partial, wraps
 import hashlib
 import inspect
 import json
@@ -358,49 +359,67 @@ def install_run(
                 merged["schema_version"] = ANNOTATIONS_SCHEMA_VERSION
                 merged["document_digest"] = document_digest
                 common.write_json(staged_annotations, merged)
-            # Move everything into place.
-            os.replace(run_directory, runs / run_name)
-            replaced = runs / run_name / "replaced"
-            for widget in new_widgets:
-                destination = package / WIDGETS_DIRECTORY / widget["id"]
-                destination.parent.mkdir(exist_ok=True)
-                if destination.exists():
-                    replaced.mkdir(exist_ok=True)
-                    os.replace(destination, replaced / widget["id"])
-                os.replace(staging / WIDGETS_DIRECTORY / widget["id"], destination)
-            if staged_annotations.is_file():
-                destination = package / ANNOTATIONS_NAME
-                if destination.exists():
-                    replaced.mkdir(exist_ok=True)
-                    shutil.copyfile(destination, replaced / ANNOTATIONS_NAME)
-                os.replace(staged_annotations, destination)
-                manifest["annotations"] = ANNOTATIONS_NAME
-                manifest.pop("stale_annotations", None)
-                if review_result is not None:
-                    manifest["annotations_review"] = review_result.get("annotations_review")
-            kept = [w for w in manifest.get("widgets", []) if isinstance(w, dict) and w.get("id") not in {n["id"] for n in new_widgets}]
-            manifest["widgets"] = kept + new_widgets
-            manifest.setdefault("runs", []).append({
-                **provenance,
-                "name": run_name,
-                "generated_at": now,
-                "anchors": anchors,
-                "status": generated_result.get("status"),
-                "summary": generated_result.get("summary", ""),
-                "widgets": [widget["id"] for widget in new_widgets],
-                "annotations_updated": bool(generated_result.get("annotations_updated")),
-                "repair_rounds": int(generated_result.get("repair_rounds", 0)),
-                "review_summary": (review_result or {}).get("summary", ""),
-                "warnings": list(generated_result.get("warnings", [])) + list((review_result or {}).get("warnings", [])),
-            })
-            addressed = [note_id for note_id in generated_result.get("notes_addressed", []) if isinstance(note_id, str)]
-            if addressed:
-                mark_notes_addressed(package, addressed, run_name)
-                manifest["runs"][-1]["notes_addressed"] = addressed
-            manifest["generated_at"] = now
-            write_manifest(package, manifest)
+            # Move everything into place. Each move records its undo, so a
+            # failure anywhere below leaves the package exactly as it was and
+            # the run stays recoverable from its preserved workspace.
+            undo: list[Callable[[], None]] = []
+            try:
+                os.replace(run_directory, runs / run_name)
+                undo.append(partial(shutil.rmtree, runs / run_name, ignore_errors=True))
+                replaced = runs / run_name / "replaced"
+                for widget in new_widgets:
+                    destination = package / WIDGETS_DIRECTORY / widget["id"]
+                    destination.parent.mkdir(exist_ok=True)
+                    if destination.exists():
+                        replaced.mkdir(exist_ok=True)
+                        os.replace(destination, replaced / widget["id"])
+                        undo.append(partial(os.replace, replaced / widget["id"], destination))
+                    os.replace(staging / WIDGETS_DIRECTORY / widget["id"], destination)
+                    undo.append(partial(shutil.rmtree, destination, ignore_errors=True))
+                if staged_annotations.is_file():
+                    destination = package / ANNOTATIONS_NAME
+                    if destination.exists():
+                        replaced.mkdir(exist_ok=True)
+                        shutil.copyfile(destination, replaced / ANNOTATIONS_NAME)
+                        undo.append(partial(shutil.copyfile, replaced / ANNOTATIONS_NAME, destination))
+                    else:
+                        undo.append(partial(destination.unlink, missing_ok=True))
+                    os.replace(staged_annotations, destination)
+                    manifest["annotations"] = ANNOTATIONS_NAME
+                    manifest.pop("stale_annotations", None)
+                    if review_result is not None:
+                        manifest["annotations_review"] = review_result.get("annotations_review")
+                kept = [w for w in manifest.get("widgets", []) if isinstance(w, dict) and w.get("id") not in {n["id"] for n in new_widgets}]
+                manifest["widgets"] = kept + new_widgets
+                manifest.setdefault("runs", []).append({
+                    **provenance,
+                    "name": run_name,
+                    "generated_at": now,
+                    "anchors": anchors,
+                    "status": generated_result.get("status"),
+                    "summary": generated_result.get("summary", ""),
+                    "widgets": [widget["id"] for widget in new_widgets],
+                    "annotations_updated": bool(generated_result.get("annotations_updated")),
+                    "repair_rounds": int(generated_result.get("repair_rounds", 0)),
+                    "review_summary": (review_result or {}).get("summary", ""),
+                    "warnings": list(generated_result.get("warnings", [])) + list((review_result or {}).get("warnings", [])),
+                })
+                addressed = [note_id for note_id in generated_result.get("notes_addressed", []) if isinstance(note_id, str)]
+                if addressed:
+                    mark_notes_addressed(package, addressed, run_name)
+                    manifest["runs"][-1]["notes_addressed"] = addressed
+                manifest["generated_at"] = now
+                write_manifest(package, manifest)
+            except BaseException:
+                for step in reversed(undo):
+                    try:
+                        step()
+                    except OSError:
+                        pass
+                raise
         except (OSError, ValueError, KeyError) as exc:
-            raise common.CodexError(f"could not install visualization run; staging preserved at {staging}: {exc}") from exc
+            shutil.rmtree(staging, ignore_errors=True)
+            raise common.CodexError(f"could not install visualization run: {exc}; the package is unchanged") from exc
         shutil.rmtree(staging, ignore_errors=True)
         installed = runs / run_name
         common.report_artifacts(path for path in package.rglob("*") if path.is_file() and path.name != ".update.lock" and RUNS_DIRECTORY not in path.relative_to(package).parts[:1])
@@ -717,8 +736,11 @@ def resolve_file(directory: Path, relative_value: str) -> Path:
 
 
 def write_manifest(directory: Path, manifest: dict) -> None:
+    """Replace the manifest atomically: readers never see a partial file."""
     manifest = {**manifest, "schema_version": MANIFEST_SCHEMA_VERSION}
-    common.write_json(directory / MANIFEST_NAME, manifest)
+    temporary = directory / f".{MANIFEST_NAME}.tmp"
+    common.write_json(temporary, manifest)
+    os.replace(temporary, directory / MANIFEST_NAME)
 
 
 def new_manifest(document: dict, *, source: dict) -> dict:

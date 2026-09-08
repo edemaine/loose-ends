@@ -111,6 +111,19 @@ if (window.parent !== window) {
         const button = [...root.querySelectorAll("button")].find(b => b.textContent === label);
         assert(button, `Missing button ${label}`); button.click();
       };
+      // Collapsing must keep working once a widget panel restyles the proof body.
+      const proof = doc.getElementById("proof-1");
+      const proofBody = () => win.getComputedStyle(proof.querySelector(":scope > .proof-body")).display;
+      const proofToggle = () => proof.querySelector(":scope > .proof-head > .toggle").click();
+      assert(proof.classList.contains("with-panel") && proofBody() === "grid", "A proof with a widget opens beside its panel");
+      proofToggle();
+      assert(proofBody() === "none", "The proof toggle hides a proof that has a panel");
+      proofToggle();
+      assert(proofBody() === "grid", "The proof toggle shows it again with its panel");
+      click(doc, "Show proofs"); click(doc, "Hide proofs");
+      assert(proofBody() === "none", "Hide proofs also hides a proof that has a panel");
+      click(doc, "Show proofs");
+      assert(proofBody() === "grid", "Show proofs restores the panel layout");
       const select = value => {
         const element = card().querySelector("select");
         element.value = value; element.dispatchEvent(new win.Event("change"));

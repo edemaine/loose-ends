@@ -13,6 +13,12 @@ Usage examples:
 
     python src/visualize_paper.py manuscripts/NAME/draft-002 --document-only
         Only (re)build the converted document; no Codex run.
+
+    python src/visualize_paper.py manuscripts/NAME/draft-002 \\
+        --install-workspace manuscripts/NAME/draft-002/.visualize-run-XXXX \\
+        --review-workspace manuscripts/NAME/draft-002/.visualization-review-run-YYYY
+        Install a finished run whose installation failed (the error names
+        both directories); nothing is generated again.
 """
 
 from __future__ import annotations
@@ -21,6 +27,7 @@ import argparse
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import shlex
 import shutil
 import tempfile
 
@@ -28,6 +35,7 @@ import codex_cli
 import open_problem_common as common
 import paper_document
 import visualization_contract
+from validation import common as validation_common
 from validation import visualization as visualization_validation
 from validation import visualization_review as review_validation
 import visualizations
@@ -431,6 +439,19 @@ def visualize(
         request = _request(document, anchors, manifest, notes)
         common.write_json(inputs / "request.json", request)
         common.write_json(inputs / "reader-notes.json", {"notes": notes})
+        # Kept with the inputs so a preserved workspace can be installed later.
+        provenance = {
+            "config_digest": config_digest,
+            "review_config_digest": review_config_digest,
+            "codex_version": codex_version,
+            "requested_model": options.model,
+            "requested_reasoning_effort": options.reasoning_effort,
+            "requested_fast_mode": options.fast,
+            "review_model": review_options.model,
+            "review_reasoning_effort": review_options.reasoning_effort,
+            "review_fast_mode": review_options.fast,
+        }
+        common.write_json(inputs / "provenance.json", provenance)
         codex_cli.grant_sandbox_read_access(inputs)
         rendered_prompt = _render_prompt(prompt, document, request)
         validator = codex_cli.OutputValidator(
@@ -485,23 +506,83 @@ def visualize(
             generated_result = codex_cli.validated_result(report)
             review_workspace, review_result = None, None
         generated_result["repair_rounds"] = repairs
-        installed = visualizations.install_run(
-            source.package, manifest, anchors, workspace, generated_result, review_workspace, review_result,
-            provenance={
-                "config_digest": config_digest,
-                "review_config_digest": review_config_digest,
-                "codex_version": codex_version,
-                "requested_model": options.model,
-                "requested_reasoning_effort": options.reasoning_effort,
-                "requested_fast_mode": options.fast,
-                "review_model": review_options.model,
-                "review_reasoning_effort": review_options.reasoning_effort,
-                "review_fast_mode": review_options.fast,
-            },
-            document_digest=document.get("source", {}).get("digest", ""),
-        )
+        try:
+            installed = visualizations.install_run(
+                source.package, manifest, anchors, workspace, generated_result, review_workspace, review_result,
+                provenance=provenance, document_digest=document.get("source", {}).get("digest", ""),
+            )
+        except (common.CodexError, OSError, ValueError) as exc:
+            # The expensive part is done; say how to keep it.
+            raise common.CodexError(_recovery_hint(exc, source, workspace, review_workspace)) from exc
     except (common.CodexError, OSError, ValueError) as exc:
         raise common.CodexError(common.preserved_workspace_message(exc, workspace)) from exc
+    common.cleanup_workspace(workspace, installed_log=installed / "run.log")
+    if review_workspace is not None:
+        common.cleanup_workspace(review_workspace, installed_log=installed / "review-run.log")
+    return RunOutcome(
+        source, installed,
+        [widget["id"] for widget in generated_result.get("widgets", [])],
+        bool(generated_result.get("annotations_updated")),
+        (review_result or {}).get("summary", ""),
+    )
+
+
+def _recovery_hint(exc: BaseException, source: visualizations.SourceRef, workspace: Path, review_workspace: Path | None) -> str:
+    command = ["python", "src/visualize_paper.py", str(source.directory), "--install-workspace", str(workspace)]
+    if review_workspace is not None:
+        command += ["--review-workspace", str(review_workspace)]
+    return (
+        f"{exc}; the generated files are preserved in {workspace}. Once the cause is fixed, "
+        "install them without another Codex run: " + " ".join(shlex.quote(part) for part in command)
+    )
+
+
+def _validated_workspace(validate, workspace: Path, description: str) -> dict:
+    """Recheck a preserved workspace against the expectations staged with it."""
+    try:
+        expectations = common.read_json(
+            workspace / "validation" / validation_common.EXPECTATIONS_FILENAME,
+            description=f"{description} expectations",
+        )
+    except common.CodexError as exc:
+        raise common.CodexError(f"{workspace} is not a preserved {description} workspace: {exc}") from exc
+    report = validate(workspace=workspace, expectations=expectations)
+    if not report.valid or report.result is None:
+        issues = "; ".join(issue.render() for issue in report.issues) or "no structured result"
+        raise common.CodexError(f"the preserved {description} in {workspace} fails validation: {issues}")
+    return report.result
+
+
+def install_preserved(source: visualizations.SourceRef, workspace: Path, review_workspace: Path | None = None) -> RunOutcome:
+    """Install a run whose Codex work finished but whose installation failed.
+
+    A preserved workspace holds everything the run produced (inputs, validated
+    output, review), so nothing is generated again; the output is rechecked
+    against the expectations staged with it and must still match the document.
+    """
+    workspace = workspace.expanduser().resolve()
+    review_workspace = review_workspace.expanduser().resolve() if review_workspace is not None else None
+    document, manifest = visualizations.ensure_document(source)
+    staged = common.read_json(workspace / "inputs" / "document" / paper_document.DOCUMENT_JSON, description="staged document")
+    request = common.read_json(workspace / "inputs" / "request.json", description="staged request")
+    digest = document.get("source", {}).get("digest", "")
+    if staged.get("source", {}).get("digest") != digest:
+        raise common.CodexError(
+            f"{workspace} was generated for an earlier version of the document; run the visualization again instead"
+        )
+    anchors = resolve_anchors(document, [anchor for anchor in request.get("anchors", []) if isinstance(anchor, str)])
+    generated_result = _validated_workspace(visualization_validation.validate, workspace, "visualization")
+    generated_result["repair_rounds"] = len(list(workspace.glob("review-before-repair-*")))
+    review_result = None
+    if review_workspace is not None:
+        review_result = _validated_workspace(review_validation.validate, review_workspace, "review")
+    provenance = common.load_json(workspace / "inputs" / "provenance.json")
+    provenance = dict(provenance) if isinstance(provenance, dict) else {}
+    provenance["recovered_from"] = str(workspace)
+    installed = visualizations.install_run(
+        source.package, manifest, anchors, workspace, generated_result, review_workspace, review_result,
+        provenance=provenance, document_digest=digest,
+    )
     common.cleanup_workspace(workspace, installed_log=installed / "run.log")
     if review_workspace is not None:
         common.cleanup_workspace(review_workspace, installed_log=installed / "review-run.log")
@@ -528,6 +609,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--repair-rounds", type=int, default=None, metavar="N",
         help=f"designer repair rounds after a review with blocking gaps (default: {DEFAULT_REPAIR_ROUNDS}, or 0 for notes-only runs)",
+    )
+    parser.add_argument(
+        "--install-workspace", type=Path, metavar="DIR",
+        help="install the preserved workspace of a run whose installation failed, without running Codex",
+    )
+    parser.add_argument(
+        "--review-workspace", type=Path, metavar="DIR",
+        help="with --install-workspace: that run's preserved review workspace",
     )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--codex", default="codex")
@@ -557,6 +646,20 @@ def main(argv: list[str] | None = None) -> int:
     try:
         sources = [visualizations.source_from_path(path) for path in args.sources]
         anchors = list(dict.fromkeys(args.anchor)) or [DEFAULT_ANCHOR]
+        if args.review_workspace is not None and args.install_workspace is None:
+            raise common.CodexError("--review-workspace requires --install-workspace")
+        if args.install_workspace is not None:
+            if len(sources) != 1:
+                raise common.CodexError("--install-workspace installs the preserved run of exactly one source")
+            outcome = install_preserved(sources[0], args.install_workspace, args.review_workspace)
+            print(
+                f"Installed {outcome.run_directory} from {args.install_workspace}: "
+                f"widgets {', '.join(outcome.widgets) or 'none'}; "
+                f"annotations {'updated' if outcome.annotations_updated else 'unchanged'}."
+            )
+            if outcome.review_summary:
+                print(f"Review: {outcome.review_summary}")
+            return 0
         if args.document_only:
             for source in sources:
                 document, _manifest = visualizations.ensure_document(source, rebuild=True)

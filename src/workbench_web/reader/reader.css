@@ -179,11 +179,12 @@ li > .par { margin-bottom: 6px; }
 .proof { margin: 12px auto 20px; max-width: 780px; }
 .proof-head { display: flex; align-items: baseline; gap: 8px; }
 .proof-label { font-style: italic; font-weight: 600; }
+/* Collapsing must win over every layout rule below (the panel grid included). */
 .proof.collapsed > .proof-body { display: none; }
 .proof-body { padding-left: 8px; }
 .qed { float: right; margin-left: 8px; }
 .proof.with-panel { max-width: 1100px; }
-.proof.with-panel > .proof-body { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 26px; align-items: start; padding-left: 0; }
+.proof.with-panel:not(.collapsed) > .proof-body { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 26px; align-items: start; padding-left: 0; }
 .proof.with-panel > .proof-body > .proof-text { max-width: 780px; min-width: 0; }
 .proof.with-panel > .proof-body > .proof-panel { position: sticky; top: 52px; max-height: calc(100vh - 62px); overflow: auto; }
 .par.step-active { background: var(--highlight); box-shadow: 0 0 0 6px var(--highlight); border-radius: 3px; }

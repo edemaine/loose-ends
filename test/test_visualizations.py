@@ -1266,3 +1266,154 @@ class VisualizationValidationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+FULL_RUN_DOCUMENT = {
+    "schema_version": 1, "title": "Fixture paper", "source": {"digest": "digest-full"},
+    "sections": [], "figures": [], "equations": [], "warnings": [],
+    "statements": [{"id": "thm:main", "kind": "theorem", "label": "Theorem 1", "title": "Main", "text": "Main.", "paragraphs": ["par-1"], "proofs": ["proof-1"]}],
+    "proofs": [{"id": "proof-1", "title": "Proof", "of": "thm:main", "paragraphs": ["par-2", "par-3"]}],
+    "paragraphs": [
+        {"id": "par-1", "text": "Every double lattice polygon tiles."},
+        {"id": "par-2", "text": "Choose a side $s_0$ and reflect the polygon across it."},
+        {"id": "par-3", "text": "Then every vertex stays in the lattice."},
+    ],
+}
+
+
+def fake_codex_turn(*, workspace: Path, **_kwargs) -> Path:
+    """Stand in for one Codex turn: leave behind the files a real turn would."""
+    if workspace.name.startswith(".visualization-review-run-"):
+        generated = common.read_json(workspace / "inputs" / "generated" / "agent-result.json")
+        (workspace / "critique.md").write_text("# Review\n\nFine.", encoding="utf-8")
+        common.write_json(workspace / "agent-result.json", {
+            "summary": "Reviewed.",
+            "annotations_review": {"accuracy": "accurate" if generated.get("annotations_updated") else "not_applicable", "findings": []},
+            "widget_reviews": [
+                {"id": widget["id"], "fidelity": "well_supported", "interaction_quality": "works", "summary": "Fine.", "findings": [], "blocking_gaps": []}
+                for widget in generated["widgets"]
+            ],
+            "warnings": [],
+        })
+        return workspace / "agent-result.json"
+    request = common.read_json(workspace / "inputs" / "request.json")
+    (workspace / "output").mkdir(exist_ok=True)
+    widgets = []
+    if request["annotations"]:
+        common.write_json(workspace / "output" / "annotations.json", {
+            "main_result": "thm:main",
+            "glossary": [{"id": "double", "term": "double", "forms": ["doubles"], "latex_forms": ["\\mathcal D(P)"], "kind": "definition", "anchor": "par-1", "gloss": "The double."}],
+            "proof_outlines": {"proof-1": [{"title": "Reflect", "paragraphs": ["par-2"]}, {"title": "Lattice", "paragraphs": ["par-3"]}]},
+        })
+        widgets.append(write_widget(workspace, "thm-main", "thm:main", "statement"))
+    for wanted in request["widgets"]:
+        if wanted["kind"] == "proof":
+            widgets.append(write_widget(
+                workspace, wanted["widget_id"], wanted["id"], "proof",
+                steps=[{"title": "Reflect", "paragraphs": ["par-2"], "phrase": "reflect the polygon"}, {"title": "Lattice", "paragraphs": ["par-3"]}],
+                examples=[{"id": "generic", "label": "Generic"}],
+            ))
+        else:
+            widgets.append(write_widget(workspace, wanted["widget_id"], wanted["id"], "statement"))
+    result = sample_result(widgets)
+    result["annotations_updated"] = bool(request["annotations"])
+    result["notes_addressed"] = []
+    common.write_json(workspace / "agent-result.json", result)
+    return workspace / "agent-result.json"
+
+
+class FullRunTests(unittest.TestCase):
+    """Drive visualize() end to end with a fake Codex: staging, validation,
+    review, and installation all run for real, so a crash in the glue after
+    the (expensive) model work cannot slip through the unit tests."""
+
+    @staticmethod
+    def make_source(root: Path) -> visualizations.SourceRef:
+        draft = root / "draft-001"
+        draft.mkdir()
+        (draft / "main.tex").write_text("\\documentclass{article}", encoding="utf-8")
+        package = draft / "visualization"
+        package.mkdir()
+        common.write_json(package / "document.json", FULL_RUN_DOCUMENT)
+        (package / "document.html").write_text("<p>doc</p>", encoding="utf-8")
+        return visualizations.source_from_path(draft)
+
+    @staticmethod
+    def run_visualize(source: visualizations.SourceRef, anchors: list[str]) -> visualize_paper.RunOutcome:
+        return visualize_paper.visualize(
+            source, anchors, codex="codex", codex_version="test",
+            prompt="Designer", schema_path=visualize_paper.DEFAULT_SCHEMA_PATH, config_digest="config",
+            options=codex_cli.ModelOptions("designer-model", "high", False), web_search="disabled",
+            review=True, review_prompt="Reviewer", review_schema_path=visualize_paper.DEFAULT_REVIEW_SCHEMA_PATH,
+            review_config_digest="review-config", review_options=codex_cli.ModelOptions("critic-model", None, False),
+            review_web_search="disabled",
+        )
+
+    def patched(self):
+        for target in (
+            patch.object(codex_cli, "run_structured_codex", side_effect=fake_codex_turn),
+            patch.object(codex_cli, "grant_sandbox_read_access"),
+            patch.object(common, "report_artifacts"),
+            patch("builtins.print"),
+        ):
+            self.enterContext(target)
+
+    def test_full_run_installs_generated_output_and_cleans_up(self):
+        self.patched()
+        with TemporaryDirectory() as temporary:
+            source = self.make_source(Path(temporary))
+            outcome = self.run_visualize(source, ["default"])
+            self.assertEqual((outcome.widgets, outcome.annotations_updated, outcome.review_summary), (["thm-main"], True, "Reviewed."))
+            manifest = visualizations.load_manifest(source.package)
+            self.assertEqual([widget["id"] for widget in manifest["widgets"]], ["thm-main"])
+            run = manifest["runs"][-1]
+            self.assertEqual(
+                (run["name"], run["anchors"], run["requested_model"], run["review_model"], run["status"], run["repair_rounds"]),
+                ("run-001", ["default"], "designer-model", "critic-model", "complete", 0),
+            )
+            self.assertEqual(common.load_json(source.package / "annotations.json")["main_result"], "thm:main")
+            self.assertEqual(common.load_json(source.package / "widgets" / "thm-main" / "review.json")["fidelity"], "well_supported")
+            self.assertEqual(common.load_json(source.package / "widgets" / "thm-main" / "widget.json")["run"], "run-001")
+            self.assertTrue((source.package / "runs" / "run-001" / "critique.md").is_file())
+            self.assertEqual([path.name for path in source.directory.iterdir() if path.name.startswith(".")], [])
+
+    def test_failed_install_leaves_the_package_unchanged_and_the_run_recoverable(self):
+        self.patched()
+        with TemporaryDirectory() as temporary:
+            source = self.make_source(Path(temporary))
+            self.run_visualize(source, ["default"])
+            before = (source.package / "visualization.json").read_text(encoding="utf-8")
+            with patch.object(visualizations, "write_manifest", side_effect=OSError("disk full")):
+                with self.assertRaises(common.CodexError) as raised:
+                    self.run_visualize(source, ["proof-1"])
+            message = str(raised.exception)
+            workspace = next(source.directory.glob(".visualize-run-*")).resolve()
+            review_workspace = next(source.directory.glob(".visualization-review-run-*")).resolve()
+            self.assertIn("disk full", message)
+            self.assertIn(f"--install-workspace {workspace} --review-workspace {review_workspace}", message)
+            # Nothing of the failed run reached the package.
+            self.assertEqual((source.package / "visualization.json").read_text(encoding="utf-8"), before)
+            self.assertFalse((source.package / "widgets" / "proof-1").exists())
+            self.assertFalse((source.package / "runs" / "run-002").exists())
+            self.assertEqual([path.name for path in source.package.iterdir() if path.name.startswith(".visualization-install-")], [])
+            # The run is refused for a document it was not generated against...
+            common.write_json(source.package / "document.json", {**FULL_RUN_DOCUMENT, "source": {"digest": "digest-other"}})
+            with self.assertRaisesRegex(common.CodexError, "earlier version of the document"):
+                visualize_paper.install_preserved(source, workspace, review_workspace)
+            common.write_json(source.package / "document.json", FULL_RUN_DOCUMENT)
+            # ...and installed, with its provenance, once the cause is fixed.
+            outcome = visualize_paper.install_preserved(source, workspace, review_workspace)
+            self.assertEqual((outcome.widgets, outcome.annotations_updated), (["proof-1"], False))
+            manifest = visualizations.load_manifest(source.package)
+            self.assertEqual([widget["id"] for widget in manifest["widgets"]], ["thm-main", "proof-1"])
+            run = manifest["runs"][-1]
+            self.assertEqual(
+                (run["name"], run["anchors"], run["requested_model"], run["review_model"], run["recovered_from"]),
+                ("run-002", ["proof-1"], "designer-model", "critic-model", str(workspace)),
+            )
+            self.assertEqual(common.load_json(source.package / "widgets" / "proof-1" / "review.json")["fidelity"], "well_supported")
+            self.assertEqual(common.load_json(source.package / "annotations.json")["main_result"], "thm:main")
+            self.assertFalse(workspace.exists())
+            self.assertFalse(review_workspace.exists())
+            with self.assertRaisesRegex(common.CodexError, "not a preserved visualization workspace|staged"):
+                visualize_paper.install_preserved(source, source.package / "runs" / "run-002")
