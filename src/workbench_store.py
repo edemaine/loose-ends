@@ -302,8 +302,8 @@ class WorkbenchStore:
                     INSERT INTO runs (
                         id, job_id, unit_index, label, status, argv_json, cwd,
                         targets_json, resources_json, probe_json, log_path,
-                        created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?)
+                        created_at, updated_at, retry_of
+                    ) VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         run_id,
@@ -318,6 +318,7 @@ class WorkbenchStore:
                         str(log_path),
                         now,
                         now,
+                        unit.get("retryOf"),
                     ),
                 )
         return self.get_job(job_id)
@@ -816,6 +817,41 @@ class WorkbenchStore:
                 cancel_requested=1,
             )
         return self.get_run(run_id)
+
+    def retry_job(self, job_id: str) -> dict:
+        """Create a separate task for the latest failed and partial runs."""
+        original = self.get_job(job_id)
+        latest = {run["unit_index"]: run for run in original["runs"]}
+        runs = [
+            run for run in latest.values()
+            if run["status"] in {"failed", "partial"}
+        ]
+        if not runs:
+            raise ValueError("this task has no failed or partial runs to retry")
+        units = [
+            {
+                **{key: run[key] for key in (
+                    "label", "argv", "cwd", "targets", "resources", "probe",
+                )},
+                "retryOf": run["id"],
+            }
+            for run in runs
+        ]
+        targets = []
+        for unit in units:
+            for target in unit["targets"]:
+                if target not in targets:
+                    targets.append(target)
+        request = {**original["request"], "targets": targets}
+        plan = {
+            "action": original["action"],
+            "title": f"Retry: {original['title']}",
+            "priorityLevel": original["priority_level"],
+            "targets": targets,
+            "units": units,
+            "retryOf": job_id,
+        }
+        return self.create_job(request, plan)
 
     def retry_run(self, run_id: str) -> dict:
         original = self.get_run(run_id)

@@ -2253,6 +2253,10 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                 self.send_json(job)
                 self.app.scheduler.schedule()
                 self.app.hub.publish("tasks.changed")
+            elif match := re.fullmatch(r"/api/jobs/([0-9a-f-]+)/retry", parsed.path):
+                self.send_json(self.app.store.retry_job(match.group(1)), 201)
+                self.app.scheduler.schedule()
+                self.app.hub.publish("tasks.changed")
             elif match := re.fullmatch(r"/api/runs/([0-9a-f-]+)/cancel", parsed.path):
                 self.send_json(self.app.store.request_cancel(match.group(1)))
                 self.app.scheduler.schedule()

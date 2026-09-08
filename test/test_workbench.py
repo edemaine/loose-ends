@@ -1762,6 +1762,51 @@ class WorkbenchStoreTests(unittest.TestCase):
             store.update_scheduler_settings(queue_paused=False)
             self.assertEqual(store.claim_next_run(set())["id"], second["id"])
 
+    def test_retry_job_creates_separate_task_for_latest_failed_and_partial(self):
+        with TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            store = WorkbenchStore(state / "workbench.sqlite3", state)
+            plan = fake_plan([sys.executable, "-c", "pass"], unit_count=8, priority_level=2)
+            for index, unit in enumerate(plan["units"]):
+                unit["targets"] = [{"kind": "problem", "path": f"/paper/OP-{index}"}]
+                unit["resources"] = [f"problem:/paper/OP-{index}"]
+                unit["probe"] = {"index": index}
+            original = store.create_job({"action": "solve", "options": {"fast": True}}, plan)
+            statuses = ["failed", "partial", "succeeded", "running", "queued", "canceled", "interrupted", "failed"]
+            for run, status in zip(original["runs"], statuses):
+                store.update_run(run["id"], status=status)
+            store.update_run(original["runs"][1]["id"], outputs_json=["saved-output.json"])
+            recovered = store.retry_run(original["runs"][-1]["id"])
+            store.update_run(recovered["id"], status="succeeded")
+            before = store.get_job(original["id"])
+            store.pause_for_codex_credits("Out of credits")
+
+            retried = store.retry_job(original["id"])
+
+            self.assertNotEqual(retried["id"], original["id"])
+            self.assertEqual(store.get_job(original["id"]), before)
+            self.assertEqual(retried["priority_level"], 2)
+            self.assertEqual(retried["request"]["options"], {"fast": True})
+            self.assertEqual(retried["plan"]["retryOf"], original["id"])
+            self.assertEqual(retried["plan"]["targets"], [unit["targets"][0] for unit in plan["units"][:2]])
+            self.assertEqual(len(retried["runs"]), 2)
+            for new, old in zip(retried["runs"], before["runs"]):
+                self.assertEqual(new["status"], "queued")
+                self.assertEqual(new["outputs"], [])
+                self.assertEqual(new["retry_of"], old["id"])
+                for key in ("argv", "cwd", "targets", "resources", "probe"):
+                    self.assertEqual(new[key], old[key])
+            self.assertTrue(store.scheduler_settings()["queuePaused"])
+
+    def test_retry_job_rejects_no_failed_or_partial_runs(self):
+        with TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            store = WorkbenchStore(state / "workbench.sqlite3", state)
+            job = store.create_job({"action": "solve"}, fake_plan(["unused"]))
+            with self.assertRaisesRegex(ValueError, "no failed or partial"):
+                store.retry_job(job["id"])
+            self.assertEqual(len(store.list_jobs()), 1)
+
     def test_scheduler_settings_persist(self):
         with TemporaryDirectory() as temporary:
             state = Path(temporary)

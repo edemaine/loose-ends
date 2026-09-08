@@ -3001,6 +3001,9 @@ function runAttentionPanel(job) {
     node("h2", "", "Needs attention"),
     badge(`${runs.length} run${runs.length === 1 ? "" : "s"}`, "failed"),
   );
+  if (runs.some(run => ["failed", "partial"].includes(run.status))) {
+    heading.append(button("Retry all failed/partial", event => retryJob(job, event.currentTarget), "button primary"));
+  }
   panel.append(heading);
   const list = node("div", "run-attention-list");
   runs.forEach(run => {
@@ -3279,6 +3282,24 @@ function refreshVisibleRunElapsed(job) {
     if (!run || !taskStatus(run.status).active || !run.started_at) return;
     label.textContent = `Elapsed ${formatDuration(run.started_at, now)}`;
   });
+}
+
+async function retryJob(job, control) {
+  const runs = latestJobRuns(job).filter(run => ["failed", "partial"].includes(run.status));
+  const partial = runs.some(run => run.status === "partial");
+  const message = `Create a new task with ${runs.length} failed/partial run${runs.length === 1 ? "" : "s"}, using the same commands and settings?`
+    + (partial ? " Partial runs restart their commands and may repeat completed work." : "");
+  if (!window.confirm(message)) return;
+  control.disabled = true;
+  try {
+    const retried = await api(`/api/jobs/${job.id}/retry`, { method: "POST", body: {} });
+    state.selectedJob = retried.id;
+    await refreshJobs();
+  } catch (error) {
+    showNotice(error.message, true);
+  } finally {
+    control.disabled = false;
+  }
 }
 
 async function mutateRun(runId, action) {
