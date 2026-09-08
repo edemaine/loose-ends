@@ -1074,7 +1074,9 @@ installed output before a later phase failed is marked partial so the next
 action can operate on that output without accidentally duplicating it.
 
 Use the worker control in the top bar to change concurrent CLI invocations or
-pause new starts. On Windows, each worker process tree gets a separate Job
+pause new starts. Codex credit exhaustion automatically pauses the queue;
+replenish credits and use **Resume queue** to restart pending work. Active runs
+continue. On Windows, each worker process tree gets a separate Job
 Object committed-memory limit. On Linux, each worker gets a separate cgroups v2
 `memory.max` limit, with `memory.swap.max` set to zero so the worker cannot evade
 its ceiling by moving allocations into swap; infinity restores both controls to

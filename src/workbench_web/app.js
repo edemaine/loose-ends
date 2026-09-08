@@ -1064,7 +1064,9 @@ function renderSchedulerControl() {
     : state.settings.memoryLimitPending
       ? "Pause manually"
       : "Pause queue";
-  if (state.settings.memoryLimitPending && state.settings.memory?.error) {
+  if (state.settings.queuePauseReason === "codex_credits") {
+    workerStatus.textContent = `${counts.active} active; ${counts.queued} waiting. Codex credits exhausted. Replenish credits, then resume the queue. Active runs continue.`;
+  } else if (state.settings.memoryLimitPending && state.settings.memory?.error) {
     workerStatus.textContent = `${counts.active} active; ${counts.queued} waiting. Queue paused because memory enforcement failed.`;
   } else if (state.settings.memoryLimitPending) {
     workerStatus.textContent = `${counts.active} active; ${counts.queued} waiting. Queue paused until the lower memory limit can be applied.`;

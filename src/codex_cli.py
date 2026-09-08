@@ -33,6 +33,7 @@ MAX_CODEX_START_ATTEMPTS = 3
 CODEX_POLL_INTERVAL_SECONDS = 0.5
 CODEX_STOP_GRACE_SECONDS = 10.0
 WINDOWS_SANDBOX_ACL_FAILURE = "helper_unknown_error: apply deny-read acls"
+WORKBENCH_DATABASE_ENV = "LOOSE_ENDS_WORKBENCH_DATABASE"
 _CODEX_LAUNCH_LOCK = threading.Lock()
 _WINDOWS_SANDBOX_PROBE_LOCK = threading.Lock()
 _WINDOWS_ACL_NORMALIZE_LOCK = threading.Lock()
@@ -51,6 +52,41 @@ _WINDOWS_RESERVED_DEVICE_NAMES = {
 
 class CodexError(RuntimeError):
     """A local Codex invocation or its workspace could not be used."""
+
+
+def codex_credit_error(events_path: Path) -> str | None:
+    """Recognize account exhaustion only in Codex error events."""
+    with events_path.open(encoding="utf-8", errors="replace") as events:
+        for line in events:
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            if event.get("type") == "error":
+                error = event
+            elif event.get("type") == "turn.failed":
+                error = event.get("error")
+            else:
+                continue
+            if not isinstance(error, dict):
+                continue
+            message = str(error.get("message", ""))
+            if error.get("code") in {"usage_limit_reached", "insufficient_quota"} or any(
+                phrase in message.casefold()
+                for phrase in ("hit your usage limit", "out of credits", "insufficient credits")
+            ):
+                return message or str(error["code"])
+    return None
+
+
+def pause_queue_for_credit_error(message: str) -> None:
+    database = os.environ.get(WORKBENCH_DATABASE_ENV)
+    if database:
+        from workbench_store import WorkbenchStore
+
+        WorkbenchStore(Path(database)).pause_for_codex_credits(message)
 
 
 @dataclass(frozen=True)
@@ -1152,6 +1188,10 @@ def run_structured_codex(
                 f"{workspace}: {exc}"
             ) from exc
 
+        credit_error = codex_credit_error(events_path)
+        if credit_error is not None:
+            pause_queue_for_credit_error(credit_error)
+            break
         if completed.returncode == 0 or structured_result_complete or timed_out:
             break
         if (
@@ -1172,6 +1212,11 @@ def run_structured_codex(
             raise
         with log_path.open("a", encoding="utf-8") as log:
             log.write(f"\nDriver ACL recovery warning: {exc}\n")
+    if credit_error is not None:
+        raise CodexError(
+            f"Codex credits exhausted: {credit_error}; "
+            f"workspace preserved at {workspace}"
+        )
     if timed_out:
         raise CodexError(
             f"Codex exceeded the {timeout_seconds:g}-second wall-clock "

@@ -1744,6 +1744,24 @@ class WorkbenchStoreTests(unittest.TestCase):
             store.update_job_scheduling(job["id"], paused=False)
             self.assertIsNotNone(store.claim_next_run(set()))
 
+    def test_credit_pause_blocks_pending_runs_until_resumed(self):
+        with TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            store = WorkbenchStore(state / "workbench.sqlite3", state)
+            job = store.create_job(
+                {"action": "solve"},
+                fake_plan([sys.executable, "-c", "pass"], unit_count=2),
+            )
+            first, second = job["runs"]
+            store.mark_starting(first["id"])
+            store.pause_for_codex_credits("You've hit your usage limit.")
+
+            self.assertIsNone(store.claim_next_run(set()))
+            self.assertEqual(store.get_run(first["id"])["status"], "starting")
+            self.assertEqual(store.get_run(second["id"])["status"], "queued")
+            store.update_scheduler_settings(queue_paused=False)
+            self.assertEqual(store.claim_next_run(set())["id"], second["id"])
+
     def test_scheduler_settings_persist(self):
         with TemporaryDirectory() as temporary:
             state = Path(temporary)

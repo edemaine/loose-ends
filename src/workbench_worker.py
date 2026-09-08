@@ -158,6 +158,7 @@ def run_worker(database: Path, run_id: str) -> int:
     )
     environment = os.environ.copy()
     environment["PYTHONUNBUFFERED"] = "1"
+    environment[codex_cli.WORKBENCH_DATABASE_ENV] = str(store.database)
     artifact_log = log_path.parent / "artifacts.txt"
     artifact_log.touch(exist_ok=True)
     environment[artifact_reporting.ARTIFACT_LOG_ENV] = str(artifact_log)
