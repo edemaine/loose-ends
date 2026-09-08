@@ -686,6 +686,8 @@ def build_plan(
             "-u",
             str(script / "write_paper.py"),
             *(target["path"] for target in targets),
+            "--output-dir",
+            str(manuscripts.resolve()),
             "--max-rounds",
             str(_positive_integer(options, "maxRounds", 1)),
         ]

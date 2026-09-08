@@ -1529,7 +1529,7 @@ class WorkbenchPlanningTests(unittest.TestCase):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
             paper = make_paper(root)
-            manuscripts = root / "manuscripts"
+            manuscripts = root / "JCDCGGG-manuscripts"
             plan = build_plan(
                 {
                     "action": "write",
@@ -1544,6 +1544,11 @@ class WorkbenchPlanningTests(unittest.TestCase):
             self.assertIn(
                 f"manuscript:{manuscripts.resolve()}",
                 plan["units"][0]["resources"],
+            )
+            argv = plan["units"][0]["argv"]
+            self.assertIn("--output-dir", argv)
+            self.assertEqual(
+                argv[argv.index("--output-dir") + 1], str(manuscripts.resolve())
             )
 
     def test_planner_rejects_targets_outside_configured_roots(self):
