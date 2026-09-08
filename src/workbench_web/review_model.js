@@ -573,8 +573,8 @@
       cards.push({
         key: "critic",
         title: item.reviewSchema === "legacy"
-          ? `Critic · legacy ${humanize(item.legacyVerdict)}`
-          : `Critic · ${humanize(item.correctness)} · ${humanize(item.reviewedCoverage)}`,
+          ? `Review · legacy ${humanize(item.legacyVerdict)}`
+          : `Review · ${humanize(item.correctness)} · ${humanize(item.reviewedCoverage)}`,
         value: item.criticSummary,
         missing: "No critic summary.",
       });
@@ -584,8 +584,8 @@
 
   function detailTabs(item) {
     const tabs = [];
-    if (item.attemptStatus !== "unattempted") tabs.push(["attempt", "Solution attempt"]);
-    if (item.attemptStatus === "reviewed") tabs.push(["critique", "Critique"]);
+    if (item.attemptStatus !== "unattempted") tabs.push(["attempt", "Solution"]);
+    if (item.attemptStatus === "reviewed") tabs.push(["critique", "Review"]);
     if (item.triageReport || item.hasTriageReport) tabs.push(["triage", "Triage"]);
     if (item.literatureReport || item.hasLiteratureReport) tabs.push(["literature", "Literature"]);
     tabs.push(["files", `Files (${item.fileCount ?? (item.files || []).length})`]);

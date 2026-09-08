@@ -1920,6 +1920,35 @@ function problemDocumentButton(label, tab) {
   }, "button");
 }
 
+function problemResearchSummary(item, kind) {
+  const literature = kind === "literature";
+  const card = reviewModel.summaryCards(item).find(value => value.key === kind);
+  const section = node("section", `section problem-research problem-${kind}`);
+  const heading = node("div", "section-title");
+  const label = node("div", "problem-section-label");
+  label.append(node("h2", "", literature ? "Literature" : "Triage"));
+  const tags = node("div", "badges");
+  if (literature) {
+    if (item.literatureStatus) tags.append(badge(reviewModel.humanize(item.literatureStatus), "neutral"));
+    if (item.literatureConfidence) tags.append(badge(`${item.literatureConfidence} confidence`, "neutral"));
+  } else {
+    if (item.triageClassification) tags.append(badge(reviewModel.humanize(item.triageClassification), "neutral"));
+    if ((card || item.triageClassification) && !item.triageCurrent) tags.append(badge("stale", "warn"));
+  }
+  label.append(tags);
+  const actions = node("div", "actions");
+  if (reviewModel.detailTabs(item).some(([key]) => key === kind)) {
+    actions.append(problemDocumentButton(literature ? "Read full literature review" : "Read full triage", kind));
+  }
+  const actionLabel = literature
+    ? item.literatureStatus ? "Search literature again" : "Search literature"
+    : item.triageCurrent ? "Triage again" : "Triage";
+  addAction(actions, actionLabel, kind, [problemTarget(item)]);
+  heading.append(label, actions);
+  section.append(heading, markdown(card?.value, literature ? "No literature summary available." : "No triage summary available."));
+  return section;
+}
+
 function renderReviewDetail(item) {
   const shell = node("div", "main-inner problem-detail");
   const selectedSummary = state.catalog.reviews.find(value => value.itemKey === item.itemKey);
@@ -1970,6 +1999,7 @@ function renderReviewDetail(item) {
     statement.append(background);
   }
   shell.append(statement);
+  shell.append(problemResearchSummary(item, "literature"));
 
   const attempts = reviewModel.attemptsForProblem(
     state.catalog.reviews,
@@ -2010,7 +2040,6 @@ function renderReviewDetail(item) {
     ));
   }
 
-  const summaries = reviewModel.summaryCards(item);
   if (attempt) {
     const directory = item.attemptDirectory.replace(/\\/g, "/");
     const claimEnv = {
@@ -2049,7 +2078,7 @@ function renderReviewDetail(item) {
     const heading = node("div", "section-title");
     const label = node("div", "problem-section-label");
     label.append(node("h2", "", "Review"), problemDetailBadges(item, ["priority", "correctness", "coverage", "importance", "confidence"]));
-    heading.append(label, problemDocumentButton("Read full critique", "critique"));
+    heading.append(label, problemDocumentButton("Read full review", "critique"));
     review.append(heading);
     review.append(markdown(item.criticSummary, "No review summary available."));
     // Keep legacy or unmatched assessments visible, without inventing claim text.
@@ -2065,19 +2094,7 @@ function renderReviewDetail(item) {
     shell.append(review);
   }
 
-  const background = node("section", "section problem-research");
-  const backgroundHeading = node("div", "section-title");
-  const backgroundActions = node("div", "actions");
-  addAction(backgroundActions, item.triageCurrent ? "Triage again" : "Triage", "triage", [problem]);
-  addAction(backgroundActions, item.literatureStatus ? "Search literature again" : "Search literature", "literature", [problem]);
-  backgroundHeading.append(node("h2", "", "Research background"), backgroundActions);
-  background.append(backgroundHeading);
-  const backgroundSummaries = node("div", "summary-grid");
-  summaries.filter(card => ["triage", "literature"].includes(card.key)).forEach(card => {
-    backgroundSummaries.append(summaryPanel(card.title, card.value, card.missing));
-  });
-  background.append(backgroundSummaries);
-  shell.append(background);
+  shell.append(problemResearchSummary(item, "triage"));
 
   const manuscriptPanel = problemManuscriptsPanel(item);
   if (manuscriptPanel) shell.append(manuscriptPanel);
@@ -2088,27 +2105,32 @@ function renderReviewDetail(item) {
 
   const tabs = reviewModel.detailTabs(item);
   if (!tabs.some(([key]) => key === state.detailTab)) state.detailTab = tabs[0][0];
+  const reports = node("section", "section problem-reports");
+  reports.id = "problem-documents";
+  reports.tabIndex = -1;
+  reports.setAttribute("aria-labelledby", "problem-reports-heading");
+  const reportsHeading = node("h2", "", "Full reports");
+  reportsHeading.id = "problem-reports-heading";
   const tabbar = node("div", "detail-tabs");
-  tabbar.id = "problem-documents";
-  tabbar.tabIndex = -1;
-  tabbar.setAttribute("aria-label", "Full documents");
+  tabbar.setAttribute("aria-label", "Full reports");
   tabs.forEach(([key, label]) => {
     tabbar.append(button(label, () => {
       state.detailTab = key;
       syncNavigation();
     }, `detail-tab${state.detailTab === key ? " active" : ""}`));
   });
-  shell.append(tabbar);
+  reports.append(reportsHeading, tabbar);
   const section = node("section", "section");
   if (state.detailTab === "attempt") section.append(markdown(item.solverAttempt, "Loading solver attempt…"));
-  else if (state.detailTab === "critique") section.append(markdown(item.critique, "No critique is installed."));
+  else if (state.detailTab === "critique") section.append(markdown(item.critique, "No review is installed."));
   else if (state.detailTab === "triage") section.append(markdown(item.triageReport, "Loading triage report…"));
   else if (state.detailTab === "literature") section.append(markdown(item.literatureReport, "No literature report is installed."));
   else {
     if (item.attemptDisplayPath) section.append(node("code", "attempt-path", item.attemptDisplayPath));
     section.append(fileGrid(item.files || []));
   }
-  shell.append(section);
+  reports.append(section);
+  shell.append(reports);
   main.replaceChildren(shell);
 }
 

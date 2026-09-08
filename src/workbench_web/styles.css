@@ -280,15 +280,16 @@ button { color: inherit; }
 .problem-background > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
 .problem-attempt-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin-top: 24px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
 .problem-attempt-heading .actions, .problem-research .actions { margin: 0; }
-.problem-solution > .markdown, .problem-review > .markdown, .solution-claim > .markdown, .claim-assessment > .markdown { border: 0; padding: 0; background: transparent; }
-.problem-solution > .markdown, .problem-review > .markdown { margin-top: 12px; }
+.problem-solution > .markdown, .problem-review > .markdown, .problem-research > .markdown, .solution-claim > .markdown, .claim-assessment > .markdown { border: 0; padding: 0; background: transparent; }
+.problem-solution > .markdown, .problem-review > .markdown, .problem-research > .markdown { margin-top: 12px; }
 .solution-claim { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
 .solution-claim h3 { margin: 0 0 8px; color: var(--heading); font-size: 14px; }
 .solution-claim h4 { margin: 12px 0 4px; color: var(--muted); font-size: 12px; }
 .claim-assessment { margin-top: 12px; padding: 10px 12px; border-left: 3px solid var(--accent-border); background: var(--panel); }
 .claim-assessment > .markdown { margin-top: 6px; }
 .claim-unreviewed { color: var(--muted); font-size: 12px; }
-.problem-review, .problem-research { margin-top: 26px; padding-top: 20px; border-top: 1px solid var(--line); }
+.problem-review, .problem-research, .problem-reports { margin-top: 26px; padding-top: 20px; border-top: 1px solid var(--line); }
+.problem-reports .detail-tabs { margin-top: 8px; }
 .problem-review .panel { padding: 0; border: 0; background: transparent; box-shadow: none; }
 .problem-review .panel h2 { font-size: 14px; }
 .problem-detail .summary-grid .panel { box-shadow: none; }
