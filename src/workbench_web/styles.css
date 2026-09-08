@@ -117,16 +117,6 @@ button { color: inherit; }
 .progress-fill { height: 100%; border-radius: inherit; background: var(--accent); transition: width .2s ease; }
 .progress-fill.indeterminate { width: 35%; animation: progress-sweep 1.25s ease-in-out infinite; }
 @keyframes progress-sweep { from { transform: translateX(-120%); } to { transform: translateX(350%); } }
-.initial-loading { max-width: 700px; margin: 8vh auto; padding: clamp(30px, 5vw, 50px); }
-.initial-loading h1 { margin: 8px 0 10px; color: var(--heading); font: 760 clamp(29px, 4vw, 43px)/1.1 ui-serif, Georgia, serif; }
-.initial-loading p { color: var(--muted); }
-.catalog-progress.large { margin-top: 18px; }
-.catalog-progress.large .progress-track { height: 9px; }
-.catalog-progress.large .progress-line { font-size: 13px; }
-.loading-shell { display: grid; gap: 7px; padding-top: 24px; }
-.loading-pulse { height: 54px; border-radius: 11px; background: linear-gradient(90deg, var(--line) 25%, var(--surface) 50%, var(--line) 75%); background-size: 200% 100%; animation: loading-pulse 1.4s linear infinite; }
-.loading-pulse.short { width: 72%; }
-@keyframes loading-pulse { to { background-position: -200% 0; } }
 .workspace { min-height: calc(100vh - var(--topbar-height)); display: grid; grid-template-columns: 350px minmax(0, 1fr); }
 .sidebar {
   height: calc(100vh - var(--topbar-height));

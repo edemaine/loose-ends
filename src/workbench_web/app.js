@@ -573,9 +573,9 @@ function showNotice(message, error = false) {
   notice.className = `notice${error ? " error-box" : ""}`;
 }
 
-function catalogProgressNode(large = false) {
+function catalogProgressNode() {
   const progress = state.catalog.progress || {};
-  const wrapper = node("div", `catalog-progress${large ? " large" : ""}`);
+  const wrapper = node("div", "catalog-progress");
   const line = node("div", "progress-line");
   line.append(node("strong", "", progress.label || "Loading the research catalog…"));
   if (Number.isFinite(progress.current) && Number.isFinite(progress.total)) {
@@ -597,22 +597,6 @@ function renderCatalogLoading() {
   notice.hidden = false;
   notice.className = "notice loading-notice";
   notice.replaceChildren(catalogProgressNode());
-}
-
-function renderInitialLoading() {
-  sidebar.replaceChildren();
-  delete sidebar.dataset.controlsTab;
-  const side = node("div", "loading-shell");
-  side.append(node("div", "loading-pulse"), node("div", "loading-pulse short"));
-  sidebar.append(side);
-  const shell = node("section", "initial-loading panel");
-  shell.append(
-    node("div", "eyebrow", "Preparing workbench"),
-    node("h1", "", "Loading your research catalog"),
-    node("p", "", "The server is scanning papers, open problems, reviews, and manuscripts. You can leave this page open; it will update automatically."),
-    catalogProgressNode(true),
-  );
-  main.replaceChildren(shell);
 }
 
 function target(kind, path, label) {
@@ -933,11 +917,6 @@ function render() {
   if (state.catalog.error) showNotice(`Catalog update delayed: ${state.catalog.error}`, true);
   else if (state.catalog.loading) renderCatalogLoading();
   else showNotice("");
-  if (state.catalog.loading && !state.catalog.version) {
-    renderInitialLoading();
-    renderSelectionBar();
-    return;
-  }
   sidebar.classList.toggle("split-sidebar", ["research", "manuscripts"].includes(state.tab));
   if (state.tab === "research") renderResearch();
   else if (state.tab === "papers") renderPapers();
@@ -4458,7 +4437,7 @@ function connectEvents() {
         if (!state.catalog.version) {
           state.catalog.loading = true;
           state.catalog.progress = value;
-          render();
+          renderCatalogLoading();
         }
       } else if (["catalog.changed", "catalog.error"].includes(value.type)) {
         refreshCatalog().catch(error => showNotice(error.message, true));
