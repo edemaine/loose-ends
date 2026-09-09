@@ -2176,6 +2176,24 @@ class WorkbenchStoreTests(unittest.TestCase):
                     peer.wait(timeout=5)
                 controller.close()
 
+    def test_unsupported_host_runs_workers_without_memory_container(self):
+        with TemporaryDirectory() as temporary:
+            database = Path(temporary) / "workbench.sqlite3"
+            with patch.object(workbench_memory.sys, "platform", "darwin"), \
+                    patch.object(workbench_memory.os, "name", "posix"):
+                controller = workbench_memory.QueueMemoryController(database)
+                settings = {
+                    "workerLimit": 2,
+                    "memoryLimit": {"mode": "percent", "value": 50},
+                }
+                snapshot = controller.reconcile(settings, set())
+                container = controller.prepare_run("run-1", settings)
+
+        self.assertFalse(controller.available)
+        self.assertIn("requires Windows Job Objects", controller.error)
+        self.assertFalse(snapshot["pending"])
+        self.assertIsNone(container)
+
     def test_linux_cgroup_backend_reconciles_limits_and_membership(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -2506,6 +2524,41 @@ class WorkbenchStoreTests(unittest.TestCase):
             saved = store.get_run(run["id"])
             self.assertEqual(saved["outputs"], [str(first.resolve()), str(second.resolve())])
             self.assertEqual(saved["status"], "succeeded")
+
+    def test_stale_run_is_interrupted_when_no_worker_process_can_be_found(self):
+        with TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            store = WorkbenchStore(state / "workbench.sqlite3", state)
+            job = store.create_job(
+                {"action": "solve"},
+                fake_plan([sys.executable, "-c", "pass"]),
+            )
+            run = job["runs"][0]
+            store.mark_starting(run["id"])
+            store.update_run(run["id"], heartbeat_at=time.time() - 3600)
+            scheduler = workbench.Scheduler.__new__(workbench.Scheduler)
+            scheduler.store = store
+            scheduler.hub = Mock()
+            scheduler.memory = Mock()
+            scheduler.memory.available = False
+            scheduler.memory.run_has_processes.return_value = None
+            scheduler.memory_lock = threading.Lock()
+
+            with patch.object(
+                workbench.Scheduler, "_worker_process_exists", return_value=True
+            ):
+                self.assertEqual(scheduler._interrupt_terminated_workers(), [])
+            self.assertEqual(store.get_run(run["id"])["status"], "starting")
+            with patch.object(
+                workbench.Scheduler, "_worker_process_exists", return_value=False
+            ):
+                self.assertEqual(
+                    scheduler._interrupt_terminated_workers(), [run["id"]]
+                )
+            self.assertEqual(store.get_run(run["id"])["status"], "interrupted")
+            self.assertFalse(
+                workbench.Scheduler._worker_process_exists("no-such-run-id")
+            )
 
     def test_confirmed_terminated_worker_becomes_interrupted_and_can_retry(self):
         with TemporaryDirectory() as temporary:
