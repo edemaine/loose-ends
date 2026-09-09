@@ -30,6 +30,10 @@ const state = {
   sidebarScroll: { research: 0, papers: 0, manuscripts: 0, activity: 0 },
   sidebarSecondaryScroll: { research: 0, manuscripts: 0 },
   paperSort: "activity",
+  paperView: "details",
+  graphOptions: { stubs: "shared", inferred: true, labels: true, unconnected: true, cluster: "" },
+  graphSelectedStub: "",
+  citationGraph: { version: -1, data: null, loading: false, error: "" },
   manuscriptSort: "latest",
   manuscriptFilters: reviewModel.createDefaultManuscriptFilters(),
   manuscriptFiltersOpen: false,
@@ -172,6 +176,10 @@ function currentUrl() {
     reviewModel.paperFiltersToSearchParams(parameters, state.paperFilters);
     const paper = state.catalog.papers.find(value => value.key === state.selectedPaper);
     if (paper) parameters.set("paper", paper.urlKey || paper.path);
+    if (state.paperView === "graph") parameters.set("view", "graph");
+    if (state.paperView === "graph" && state.graphSelectedStub) {
+      parameters.set("stub", state.graphSelectedStub);
+    }
   } else if (state.tab === "manuscripts") {
     reviewModel.manuscriptFiltersToSearchParams(parameters, state.manuscriptFilters);
     const manuscript = state.catalog.manuscripts.find(value => value.key === state.selectedManuscript);
@@ -262,6 +270,8 @@ function applyLocation({ scrollY } = {}) {
     );
     state.selectedPaper = paper?.key || "";
     state.revealSidebarSelection = Boolean(paper);
+    state.paperView = parameters.get("view") === "graph" ? "graph" : "details";
+    state.graphSelectedStub = state.paperView === "graph" ? parameters.get("stub") || "" : "";
   } else if (state.tab === "manuscripts") {
     state.manuscriptFilters = reviewModel.manuscriptFiltersFromSearchParams(parameters);
     const requested = parameters.get("manuscript");
@@ -839,6 +849,26 @@ function appendMissingMetadataAction(values) {
   selectionBar.append(action);
 }
 
+function missingReferencesPaperTargets(values) {
+  const selectedPaths = new Set(
+    values.filter(value => value.kind === "paper").map(value => normalizedPath(value.path)),
+  );
+  return state.catalog.papers
+    .filter(paper => selectedPaths.has(normalizedPath(paper.path)) && !paper.referencesExtracted)
+    .map(paperTarget);
+}
+
+function appendMissingReferencesAction(values) {
+  const papers = missingReferencesPaperTargets(values);
+  if (!papers.length) return;
+  const action = button(
+    `Extract references (${papers.length.toLocaleString()})`,
+    () => openTask("references", papers),
+  );
+  action.title = `${papers.length.toLocaleString()} selected paper${papers.length === 1 ? "" : "s"} without an extracted reference list`;
+  selectionBar.append(action);
+}
+
 function renderSelectionBar() {
   selectionBar.replaceChildren();
   const values = [...state.selection.values()];
@@ -848,6 +878,7 @@ function renderSelectionBar() {
   const kinds = new Set(values.map(item => item.kind));
   if ([...kinds].every(kind => kind === "paper")) {
     appendMissingMetadataAction(values);
+    appendMissingReferencesAction(values);
     selectionBar.append(button("Analyze", () => openTask("analyze", values)));
     const problems = problemsForPapers(values);
     if (problems.length) {
@@ -920,6 +951,10 @@ function render() {
   else if (state.catalog.loading) renderCatalogLoading();
   else showNotice("");
   sidebar.classList.toggle("split-sidebar", ["research", "manuscripts"].includes(state.tab));
+  main.classList.toggle(
+    "graph-main",
+    state.tab === "papers" && state.paperView === "graph",
+  );
   if (state.tab === "research") renderResearch();
   else if (state.tab === "papers") renderPapers();
   else if (state.tab === "manuscripts") renderManuscripts();
@@ -2211,12 +2246,14 @@ function renderPapers() {
     addActions.append(addFromArxiv, addFromFiles);
     controls.append(
       sidebarSearch("Search source papers…"),
+      paperViewControl(),
       paperSortControl(),
       renderPaperFilters(),
       addActions,
     );
     return controls;
   });
+  ensureCitationGraph();
   const papers = reviewModel.sortPapers(
     filteredPapers(),
     state.paperSort,
@@ -2236,7 +2273,7 @@ function renderPapers() {
       paper.title,
       paper.publicationTimestamp,
     ),
-    meta: paper.analyzed ? `${paper.problemCount} open problems` : "Not analyzed",
+    meta: paperSideMeta(paper),
     active: state.selectedPaper === paper.key,
     selectedTarget: paperTarget(paper),
     relatedTask: {
@@ -2247,6 +2284,10 @@ function renderPapers() {
   }));
   sidebar.append(node("div", "sidebar-heading", `${papers.length} papers`), list);
   const paper = state.catalog.papers.find(value => value.key === state.selectedPaper);
+  if (state.paperView === "graph") {
+    renderCitationGraphView(paper, papers);
+    return;
+  }
   if (!paper) {
     main.replaceChildren(document.getElementById("empty-template").content.cloneNode(true));
     return;
@@ -2282,6 +2323,11 @@ function renderPapers() {
   const badges = node("div", "badges");
   badges.append(badge(paper.analyzed ? "analyzed" : "not analyzed", paper.analyzed ? "succeeded" : "warn"));
   if (paper.analyzed) badges.append(badge(`${paper.problemCount} problems`, "neutral"));
+  badges.append(
+    paper.referencesExtracted
+      ? badge(`${paper.referenceCount} references`, "neutral")
+      : badge("no references", "warn"),
+  );
   copy.append(badges);
   hero.append(copy);
   shell.append(hero);
@@ -2294,6 +2340,14 @@ function renderPapers() {
     !paper.metadataComplete,
   );
   actions.append(button("Edit metadata", () => openMetadataEditor(paper), "button"));
+  addAction(
+    actions,
+    paper.referencesExtracted ? "Extract references again" : "Extract references",
+    "references",
+    [paperTarget(paper)],
+    !paper.referencesExtracted && paper.metadataComplete,
+  );
+  actions.append(button("Show in graph", () => showPaperInGraph(paper), "button"));
   addAction(actions, paper.analyzed ? "Analyze again" : "Analyze", "analyze", [paperTarget(paper)], !paper.analyzed);
   const addProblem = button(
     "Add open problem",
@@ -2317,9 +2371,958 @@ function renderPapers() {
   }));
   const problemPanel = paperProblemsPanel(paper);
   if (problemPanel) shell.append(problemPanel);
+  shell.append(paperReferencesPanel(paper));
+  const citedByPanel = paperCitedByPanel(paper);
+  if (citedByPanel) shell.append(citedByPanel);
   shell.append(node("section", "section-title", "Files"));
   shell.append(fileGrid(paper.files));
   main.replaceChildren(shell);
+}
+
+
+// ---------------------------------------------------------------------------
+// Citation graph
+// ---------------------------------------------------------------------------
+
+const clusterPalette = [
+  "#7b5ea7", "#2a7fb8", "#3c9d6a", "#e07b39", "#d64550", "#2f9c9c",
+  "#b565c8", "#a0785a", "#c9a227", "#5b6fd1", "#8ba03a", "#d05a8a",
+];
+const graphStubOptions = [
+  ["shared", "Shared references only"],
+  ["all", "All references"],
+  ["none", "Papers only"],
+];
+const citationGraphView = {
+  canvas: null,
+  svg: null,
+  layers: null,
+  simulation: null,
+  zoom: null,
+  sceneKey: "",
+  nodes: [],
+  links: [],
+  positions: new Map(),
+  tooltip: null,
+  transform: null,
+};
+
+function clusterColor(clusterId) {
+  if (!clusterId || clusterId === "isolated") return "#8d8794";
+  const index = Number(String(clusterId).slice(1)) - 1;
+  if (!Number.isFinite(index) || index < 0) return "#8d8794";
+  return clusterPalette[index % clusterPalette.length];
+}
+
+function graphData() {
+  return state.citationGraph.data;
+}
+
+function graphNode(id) {
+  return graphData()?.nodesById.get(id) || null;
+}
+
+function graphNodeForPaper(paper) {
+  return paper ? graphNode(paper.key) : null;
+}
+
+function paperForGraphNode(value) {
+  if (!value || value.kind !== "paper") return null;
+  return state.catalog.papers.find(paper => paper.key === value.id) || null;
+}
+
+function graphNodeLabel(value) {
+  if (!value) return "";
+  const title = value.title || value.raw || "Untitled reference";
+  return value.year ? `${title} (${value.year})` : title;
+}
+
+function stubDisplayLine(stub) {
+  const authors = (stub.authors || []).join(", ");
+  return [graphNodeLabel(stub), authors].filter(Boolean).join(" — ");
+}
+
+async function ensureCitationGraph() {
+  const graph = state.citationGraph;
+  if (graph.loading || !state.catalog.version) return;
+  if (graph.version >= state.catalog.version) return;
+  graph.loading = true;
+  try {
+    const data = await api("/api/citation-graph");
+    data.nodesById = new Map(data.nodes.map(value => [value.id, value]));
+    data.clustersById = new Map(data.clusters.map(value => [value.id, value]));
+    graph.data = data;
+    graph.version = data.version;
+    graph.error = "";
+  } catch (error) {
+    graph.error = error.message;
+    graph.version = state.catalog.version;
+  } finally {
+    graph.loading = false;
+  }
+  if (state.tab === "papers") render();
+}
+
+function paperSideMeta(paper) {
+  const parts = [paper.analyzed ? `${paper.problemCount} open problems` : "Not analyzed"];
+  parts.push(paper.referencesExtracted ? `${paper.referenceCount} refs` : "no refs");
+  return parts.join(" · ");
+}
+
+function paperViewControl() {
+  const wrapper = node("div", "view-switch");
+  wrapper.setAttribute("role", "group");
+  wrapper.setAttribute("aria-label", "Papers view");
+  [["details", "Details"], ["graph", "Graph"]].forEach(([value, label]) => {
+    const control = node("button", "view-switch-button", label);
+    control.type = "button";
+    control.classList.toggle("active", state.paperView === value);
+    control.addEventListener("click", () => {
+      if (state.paperView === value) return;
+      state.paperView = value;
+      if (value !== "graph") state.graphSelectedStub = "";
+      syncNavigation({ replace: true });
+    });
+    wrapper.append(control);
+  });
+  return wrapper;
+}
+
+function showPaperInGraph(paper) {
+  state.selectedPaper = paper.key;
+  state.graphSelectedStub = "";
+  state.paperView = "graph";
+  syncNavigation();
+}
+
+function selectGraphNode(value) {
+  if (!value) return;
+  if (value.kind === "paper") {
+    state.selectedPaper = value.id;
+    state.graphSelectedStub = "";
+    state.revealSidebarSelection = true;
+  } else {
+    state.graphSelectedStub = value.id;
+  }
+  syncNavigation({ replace: true, preserveScroll: true });
+}
+
+function openGraphPaperDetails(value) {
+  const paper = paperForGraphNode(value);
+  if (!paper) return;
+  state.selectedPaper = paper.key;
+  state.graphSelectedStub = "";
+  state.paperView = "details";
+  syncNavigation();
+}
+
+function graphPaperChip(paperId, kind = "") {
+  const value = graphNode(paperId);
+  const paper = paperForGraphNode(value);
+  const chip = node("button", "reference-chip", "");
+  chip.type = "button";
+  chip.append(node("span", "", paper ? reviewModel.paperTitleWithYear(paper.title, paper.published) : paperId));
+  if (kind === "inferred") chip.append(inferredBadge());
+  chip.title = paper ? paper.title : paperId;
+  chip.addEventListener("click", () => {
+    state.selectedPaper = paperId;
+    state.graphSelectedStub = "";
+    syncNavigation();
+  });
+  return chip;
+}
+
+function inferredBadge() {
+  const value = badge("inferred", "inferred");
+  value.title = "Inferred equivalent: this reference cites another version (journal, conference, or preprint) of the paper in this collection.";
+  return value;
+}
+
+function referenceEntryNode(record) {
+  const item = node("div", "reference-item");
+  const label = node("span", "reference-label", record.key || String(record.index));
+  label.title = `Reference ${record.index}`;
+  const copy = node("div", "reference-copy");
+  const title = node("strong", "", record.title || record.raw || "Untitled reference");
+  copy.append(title);
+  const details = [
+    (record.authors || []).join(", "),
+    record.venue,
+    record.year,
+  ].filter(Boolean).join(" · ");
+  if (details) copy.append(node("small", "", details));
+  const links = node("span", "reference-links");
+  if (record.arxivId) {
+    const link = node("a", "", `arXiv:${record.arxivId}`);
+    link.href = `https://arxiv.org/abs/${record.arxivId}`;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    links.append(link);
+  }
+  if (record.doi) {
+    const link = node("a", "", "DOI");
+    link.href = `https://doi.org/${record.doi}`;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    links.append(link);
+  }
+  if (links.childNodes.length) copy.append(links);
+  const side = node("div", "reference-side");
+  if (record.kind === "exact" || record.kind === "inferred") {
+    side.append(graphPaperChip(record.target, record.kind));
+  } else if (record.target) {
+    const stub = graphNode(record.target);
+    const others = (stub?.citedByCount || 1) - 1;
+    if (others > 0) {
+      const chip = node("button", "reference-chip shared", "");
+      chip.type = "button";
+      chip.append(node("span", "", `Also cited by ${others} paper${others === 1 ? "" : "s"} here`));
+      chip.title = "Show this shared reference in the citation graph.";
+      chip.addEventListener("click", () => {
+        state.graphSelectedStub = record.target;
+        state.paperView = "graph";
+        syncNavigation();
+      });
+      side.append(chip);
+    }
+  }
+  item.append(label, copy, side);
+  return item;
+}
+
+function paperReferencesPanel(paper) {
+  const panel = node("section", "panel reference-panel");
+  const heading = node("div", "related-tasks-heading");
+  heading.append(node("h2", "", "References"));
+  if (paper.referencesExtracted) {
+    heading.append(badge(`${paper.referenceCount} entries`, "neutral"));
+    if (paper.referenceSourceKind) {
+      const source = badge(`from ${paper.referenceSourceKind}`, "neutral");
+      source.title = "Where the bibliography text came from.";
+      heading.append(source);
+    }
+  }
+  panel.append(heading);
+  if (!paper.referencesExtracted) {
+    panel.append(node("p", "muted", "No reference list has been extracted for this paper yet. Use Extract references to parse its bibliography and connect it to the rest of the collection."));
+    return panel;
+  }
+  const value = graphNodeForPaper(paper);
+  if (!value) {
+    panel.append(node("p", "muted", state.citationGraph.error
+      ? `Citation graph unavailable: ${state.citationGraph.error}`
+      : "Loading the citation graph…"));
+    return panel;
+  }
+  const resolved = value.references.filter(record => record.kind !== "stub");
+  const summary = node("p", "muted reference-summary");
+  const shared = value.references.filter(record => record.kind === "stub" && (graphNode(record.target)?.citedByCount || 0) > 1).length;
+  summary.textContent = `${resolved.length} reference${resolved.length === 1 ? "" : "s"} point${resolved.length === 1 ? "s" : ""} to papers in this collection, ${shared} shared with other papers here.`;
+  panel.append(summary);
+  const list = node("div", "reference-list");
+  [...value.references]
+    .sort((left, right) => left.index - right.index)
+    .forEach(record => list.append(referenceEntryNode(record)));
+  panel.append(list);
+  return panel;
+}
+
+function paperCitedByPanel(paper) {
+  const value = graphNodeForPaper(paper);
+  if (!value || !value.citedBy.length) return null;
+  const panel = node("section", "panel reference-panel");
+  const heading = node("div", "related-tasks-heading");
+  heading.append(
+    node("h2", "", "Cited by"),
+    badge(`${value.citedBy.length} paper${value.citedBy.length === 1 ? "" : "s"} here`, "neutral"),
+  );
+  const chips = node("div", "reference-chips");
+  value.citedBy.forEach(entry => chips.append(graphPaperChip(entry.paper, entry.kind)));
+  panel.append(heading, chips);
+  return panel;
+}
+
+function graphMissingReferenceTargets(papers) {
+  return papers.filter(paper => !paper.referencesExtracted).map(paperTarget);
+}
+
+function visibleGraphStubs(visiblePapers) {
+  const data = graphData();
+  if (state.graphOptions.stubs === "none") return [];
+  const minimum = state.graphOptions.stubs === "shared" ? 2 : 1;
+  return data.nodes.filter(value => {
+    if (value.kind !== "stub") return false;
+    const citers = value.citedBy.filter(entry => visiblePapers.has(entry.paper));
+    return citers.length >= minimum || value.id === state.graphSelectedStub;
+  });
+}
+
+function visibleGraphLinks(visibleIds) {
+  return graphData().edges.filter(edge =>
+    visibleIds.has(edge.source) &&
+    visibleIds.has(edge.target) &&
+    (state.graphOptions.inferred || edge.kind !== "inferred"));
+}
+
+function visibleGraphNodes(papers) {
+  const data = graphData();
+  const visiblePapers = new Set(papers.map(paper => paper.key));
+  const stubs = visibleGraphStubs(visiblePapers);
+  const candidateIds = new Set([...visiblePapers, ...stubs.map(value => value.id)]);
+  const connected = new Set();
+  visibleGraphLinks(candidateIds).forEach(edge => {
+    connected.add(edge.source);
+    connected.add(edge.target);
+  });
+  const nodes = data.nodes.filter(value =>
+    value.kind === "paper" &&
+    visiblePapers.has(value.id) &&
+    (state.graphOptions.unconnected || connected.has(value.id) || value.id === state.selectedPaper));
+  return nodes.concat(stubs);
+}
+
+function graphNodeRadius(value) {
+  if (value.kind === "paper") {
+    const degree = value.resolvedCount + value.citedByCount;
+    return Math.min(16, 6 + Math.sqrt(degree) * 1.8);
+  }
+  return Math.min(9, 2.6 + Math.sqrt(value.citedByCount) * 1.3);
+}
+
+function graphSceneKey(nodes) {
+  return [
+    state.citationGraph.version,
+    state.graphOptions.stubs,
+    state.graphOptions.inferred ? "i" : "",
+    state.graphOptions.unconnected ? "u" : "",
+    nodes.length,
+    nodes.map(value => value.id).join("|"),
+  ].join("#");
+}
+
+function ensureGraphCanvas() {
+  if (citationGraphView.canvas) return citationGraphView.canvas;
+  const canvas = node("div", "graph-canvas");
+  const svg = d3.select(canvas).append("svg").attr("class", "graph-svg");
+  const defs = svg.append("defs");
+  [["exact", "graph-arrow-exact"], ["inferred", "graph-arrow-inferred"]].forEach(([kind, id]) => {
+    defs.append("marker")
+      .attr("id", id)
+      .attr("class", `graph-arrow ${kind}`)
+      .attr("viewBox", "0 -4 8 8")
+      .attr("refX", 8)
+      .attr("refY", 0)
+      .attr("markerWidth", 7)
+      .attr("markerHeight", 7)
+      .attr("orient", "auto")
+      .append("path")
+      .attr("d", "M0,-4L8,0L0,4Z");
+  });
+  const viewport = svg.append("g").attr("class", "graph-viewport");
+  const layers = {
+    hulls: viewport.append("g").attr("class", "graph-hulls"),
+    links: viewport.append("g").attr("class", "graph-links"),
+    nodes: viewport.append("g").attr("class", "graph-nodes"),
+    labels: viewport.append("g").attr("class", "graph-labels"),
+  };
+  const zoom = d3.zoom()
+    .scaleExtent([0.15, 6])
+    .on("zoom", event => {
+      citationGraphView.transform = event.transform;
+      viewport.attr("transform", event.transform);
+      canvas.classList.toggle("zoomed-out", event.transform.k < 0.55);
+      canvas.classList.toggle("zoomed-in", event.transform.k > 1.15);
+    });
+  svg.call(zoom).on("dblclick.zoom", null);
+  svg.on("click", event => {
+    if (event.target === svg.node()) {
+      if (state.graphSelectedStub) {
+        state.graphSelectedStub = "";
+        syncNavigation({ replace: true, preserveScroll: true });
+      }
+    }
+  });
+  const tooltip = node("div", "graph-tooltip");
+  tooltip.hidden = true;
+  canvas.append(tooltip);
+  Object.assign(citationGraphView, { canvas, svg, layers, zoom, tooltip });
+  return canvas;
+}
+
+function graphCanvasSize() {
+  const canvas = citationGraphView.canvas;
+  const rect = canvas.getBoundingClientRect();
+  return {
+    width: Math.max(320, rect.width || canvas.clientWidth || 800),
+    height: Math.max(320, rect.height || canvas.clientHeight || 600),
+  };
+}
+
+function buildGraphScene(nodes, papers) {
+  const view = citationGraphView;
+  const data = graphData();
+  const visible = new Set(nodes.map(value => value.id));
+  view.nodes.forEach(value => view.positions.set(value.id, { x: value.x, y: value.y }));
+  const { width, height } = graphCanvasSize();
+  const clusterSeeds = new Map();
+  const clusterCount = Math.max(1, data.clusters.length);
+  data.clusters.forEach((cluster, index) => {
+    const angle = (index / clusterCount) * Math.PI * 2;
+    const spread = Math.min(width, height) * 0.32;
+    clusterSeeds.set(cluster.id, {
+      x: width / 2 + Math.cos(angle) * spread,
+      y: height / 2 + Math.sin(angle) * spread,
+    });
+  });
+  const visibleLinks = visibleGraphLinks(visible);
+  const linked = new Set();
+  visibleLinks.forEach(edge => {
+    linked.add(edge.source);
+    linked.add(edge.target);
+  });
+  const unconnected = nodes.filter(value => value.kind === "paper" && !linked.has(value.id));
+  const connectedCount = Math.max(1, nodes.length - unconnected.length);
+  const ringRadius = view.ringRadius || Math.max(160, 60 + 40 * Math.sqrt(connectedCount));
+  const ringIndex = new Map(unconnected.map((value, index) => [value.id, index]));
+  const placeOnRing = (entry, radius) => {
+    const angle = (ringIndex.get(entry.id) / unconnected.length) * Math.PI * 2 - Math.PI / 2;
+    entry.fx = width / 2 + Math.cos(angle) * radius;
+    entry.fy = height / 2 + Math.sin(angle) * radius;
+    entry.x = entry.fx;
+    entry.y = entry.fy;
+    entry.ring = true;
+  };
+  const simulationNodes = nodes.map(value => {
+    const previous = view.positions.get(value.id);
+    const seed = clusterSeeds.get(value.clusterId) || { x: width / 2, y: height / 2 };
+    const entry = {
+      id: value.id,
+      data: value,
+      radius: graphNodeRadius(value),
+      x: previous?.x ?? seed.x + (Math.random() - 0.5) * 80,
+      y: previous?.y ?? seed.y + (Math.random() - 0.5) * 80,
+    };
+    // Unconnected papers sit on a fixed outer ring so they frame, rather
+    // than crowd, the connected structure in the middle.
+    if (ringIndex.has(value.id)) placeOnRing(entry, ringRadius);
+    return entry;
+  });
+  const byId = new Map(simulationNodes.map(value => [value.id, value]));
+  const links = visibleLinks
+    .map(edge => ({
+      source: byId.get(edge.source),
+      target: byId.get(edge.target),
+      kind: edge.kind,
+      stub: byId.get(edge.target).data.kind === "stub",
+    }));
+  view.nodes = simulationNodes;
+  view.links = links;
+  if (view.simulation) view.simulation.stop();
+  const clusterPull = alpha => {
+    const centroids = new Map();
+    simulationNodes.forEach(value => {
+      if (value.data.kind !== "paper" || !value.data.clusterId || value.data.clusterId === "isolated") return;
+      const entry = centroids.get(value.data.clusterId) || { x: 0, y: 0, count: 0 };
+      entry.x += value.x;
+      entry.y += value.y;
+      entry.count += 1;
+      centroids.set(value.data.clusterId, entry);
+    });
+    simulationNodes.forEach(value => {
+      const entry = centroids.get(value.data.clusterId);
+      if (!entry || !value.data.clusterId || value.data.clusterId === "isolated") return;
+      const strength = value.data.kind === "paper" ? 0.08 : 0.03;
+      value.vx += ((entry.x / entry.count) - value.x) * strength * alpha;
+      value.vy += ((entry.y / entry.count) - value.y) * strength * alpha;
+    });
+  };
+  view.simulation = d3.forceSimulation(simulationNodes)
+    .force("link", d3.forceLink(links)
+      .distance(link => (link.stub ? 48 : 90))
+      .strength(link => (link.stub ? 0.4 : 0.6)))
+    .force("charge", d3.forceManyBody()
+      .strength(value => (value.ring ? 0 : value.data.kind === "paper" ? -260 : -70))
+      .distanceMax(500))
+    .force("collide", d3.forceCollide().radius(value => value.radius + 4).iterations(2))
+    .force("center", d3.forceCenter(width / 2, height / 2).strength(0.04))
+    .force("x", d3.forceX(width / 2).strength(0.015))
+    .force("y", d3.forceY(height / 2).strength(0.015))
+    .force("cluster", clusterPull)
+    .alpha(view.positions.size ? 0.6 : 1)
+    .alphaDecay(0.03);
+
+  const layers = view.layers;
+  const hull = layers.hulls.selectAll("path").data(
+    data.clusters.filter(cluster => cluster.id !== "isolated"),
+    cluster => cluster.id,
+  );
+  hull.exit().remove();
+  hull.enter().append("path").attr("class", "graph-hull").merge(hull)
+    .style("fill", cluster => clusterColor(cluster.id))
+    .style("stroke", cluster => clusterColor(cluster.id));
+
+  const link = layers.links.selectAll("line").data(links, link => `${link.source.id}>${link.target.id}`);
+  link.exit().remove();
+  link.enter().append("line").merge(link)
+    .attr("class", link => `graph-link ${link.kind}${link.stub ? " stub" : ""}`)
+    .attr("marker-end", link => (link.stub ? null : `url(#graph-arrow-${link.kind})`));
+
+  const nodeSelection = layers.nodes.selectAll("circle").data(simulationNodes, value => value.id);
+  nodeSelection.exit().remove();
+  const entered = nodeSelection.enter().append("circle");
+  entered.merge(nodeSelection)
+    .attr("class", value => `graph-node ${value.data.kind}`)
+    .attr("r", value => value.radius)
+    .style("fill", value => (value.data.kind === "paper" ? clusterColor(value.data.clusterId) : "var(--panel)"))
+    .style("stroke", value => clusterColor(value.data.clusterId))
+    .on("mouseenter", (event, value) => {
+      showGraphTooltip(event, value);
+      view.layers.labels.select(`text[data-id="${CSS.escape(value.id)}"]`).classed("hovered", true);
+    })
+    .on("mousemove", event => moveGraphTooltip(event))
+    .on("mouseleave", () => {
+      hideGraphTooltip();
+      view.layers.labels.selectAll("text.hovered").classed("hovered", false);
+    })
+    .on("click", (event, value) => {
+      event.stopPropagation();
+      selectGraphNode(value.data);
+    })
+    .on("dblclick", (event, value) => {
+      event.stopPropagation();
+      openGraphPaperDetails(value.data);
+    })
+    .call(d3.drag()
+      .on("start", (event, value) => {
+        if (!event.active) view.simulation.alphaTarget(0.3).restart();
+        value.fx = value.x;
+        value.fy = value.y;
+      })
+      .on("drag", (event, value) => {
+        value.fx = event.x;
+        value.fy = event.y;
+      })
+      .on("end", (event, value) => {
+        if (!event.active) view.simulation.alphaTarget(0);
+        if (value.ring) return;
+        value.fx = null;
+        value.fy = null;
+      }));
+
+  const label = layers.labels.selectAll("text").data(simulationNodes, value => value.id);
+  label.exit().remove();
+  label.enter().append("text").merge(label)
+    .attr("class", value => `graph-label ${value.data.kind}${value.ring ? " ring" : ""}`)
+    .attr("data-id", value => value.id)
+    .text(value => graphShortTitle(value.data));
+
+  view.simulation.on("tick", () => tickGraph());
+  view.sceneKey = graphSceneKey(nodes);
+  if (!view.positions.size) {
+    view.simulation.tick(160);
+    if (unconnected.length) {
+      // Size the ring to the laid-out connected structure, then settle again.
+      const inner = simulationNodes.filter(value => !value.ring);
+      const reach = inner.length
+        ? Math.max(...inner.map(value => Math.hypot(value.x - width / 2, value.y - height / 2) + value.radius))
+        : 0;
+      const radius = Math.max(110, reach + 50, unconnected.length * 2.1);
+      view.ringRadius = radius;
+      simulationNodes.forEach(value => {
+        if (value.ring) placeOnRing(value, radius);
+      });
+      view.simulation.alpha(0.3).tick(40);
+    }
+    tickGraph();
+    fitGraph(false);
+  }
+}
+
+function graphShortTitle(value) {
+  const title = value.title || value.raw || "Untitled";
+  return title.length > 34 ? `${title.slice(0, 32).trimEnd()}…` : title;
+}
+
+function tickGraph() {
+  const view = citationGraphView;
+  view.layers.links.selectAll("line")
+    .attr("x1", link => link.source.x)
+    .attr("y1", link => link.source.y)
+    .attr("x2", link => endpoint(link).x)
+    .attr("y2", link => endpoint(link).y);
+  view.layers.nodes.selectAll("circle")
+    .attr("cx", value => value.x)
+    .attr("cy", value => value.y);
+  view.layers.labels.selectAll("text")
+    .attr("x", value => value.x + value.radius + 3)
+    .attr("y", value => value.y + 3.5);
+  const members = new Map();
+  view.nodes.forEach(value => {
+    if (value.data.kind !== "paper" || !value.data.clusterId || value.data.clusterId === "isolated") return;
+    if (!members.has(value.data.clusterId)) members.set(value.data.clusterId, []);
+    const pad = value.radius + 14;
+    members.get(value.data.clusterId).push(
+      [value.x - pad, value.y - pad], [value.x + pad, value.y - pad],
+      [value.x - pad, value.y + pad], [value.x + pad, value.y + pad],
+    );
+  });
+  view.layers.hulls.selectAll("path").attr("d", cluster => {
+    const points = members.get(cluster.id);
+    if (!points || points.length < 3) return "";
+    const hull = d3.polygonHull(points);
+    if (!hull) return "";
+    return `M${hull.map(point => point.join(",")).join("L")}Z`;
+  });
+}
+
+function endpoint(link) {
+  const dx = link.target.x - link.source.x;
+  const dy = link.target.y - link.source.y;
+  const distance = Math.hypot(dx, dy) || 1;
+  const gap = link.target.radius + (link.stub ? 1 : 3);
+  return {
+    x: link.target.x - (dx / distance) * gap,
+    y: link.target.y - (dy / distance) * gap,
+  };
+}
+
+function fitGraph(animate = true) {
+  const view = citationGraphView;
+  if (!view.nodes.length) return;
+  const { width, height } = graphCanvasSize();
+  const xs = view.nodes.map(value => value.x);
+  const ys = view.nodes.map(value => value.y);
+  const minX = Math.min(...xs) - 40;
+  const maxX = Math.max(...xs) + 120;
+  const minY = Math.min(...ys) - 40;
+  const maxY = Math.max(...ys) + 40;
+  const scale = Math.min(4, 0.92 / Math.max((maxX - minX) / width, (maxY - minY) / height));
+  const transform = d3.zoomIdentity
+    .translate(width / 2 - scale * (minX + maxX) / 2, height / 2 - scale * (minY + maxY) / 2)
+    .scale(scale);
+  const target = animate ? view.svg.transition().duration(450) : view.svg;
+  target.call(view.zoom.transform, transform);
+}
+
+function focusGraphNode(id) {
+  const view = citationGraphView;
+  const value = view.nodes.find(entry => entry.id === id);
+  if (!value) return;
+  const { width, height } = graphCanvasSize();
+  const scale = Math.max(view.transform?.k || 1, 1);
+  const transform = d3.zoomIdentity
+    .translate(width / 2 - scale * value.x, height / 2 - scale * value.y)
+    .scale(scale);
+  view.svg.transition().duration(450).call(view.zoom.transform, transform);
+}
+
+function showGraphTooltip(event, value) {
+  const tooltip = citationGraphView.tooltip;
+  tooltip.replaceChildren();
+  const data = value.data;
+  tooltip.append(node("strong", "", graphNodeLabel(data)));
+  const authors = (data.authors || []).join(", ");
+  if (authors) tooltip.append(node("span", "", authors));
+  if (data.kind === "paper") {
+    tooltip.append(node("small", "", data.referencesExtracted
+      ? `${data.referenceCount} references · ${data.resolvedCount} to this collection · cited by ${data.citedByCount}`
+      : "References not extracted"));
+  } else {
+    tooltip.append(node("small", "", [
+      data.venue,
+      `cited by ${data.citedByCount} paper${data.citedByCount === 1 ? "" : "s"} here`,
+    ].filter(Boolean).join(" · ")));
+  }
+  tooltip.hidden = false;
+  moveGraphTooltip(event);
+}
+
+function moveGraphTooltip(event) {
+  const tooltip = citationGraphView.tooltip;
+  if (tooltip.hidden) return;
+  const rect = citationGraphView.canvas.getBoundingClientRect();
+  const x = event.clientX - rect.left + 14;
+  const y = event.clientY - rect.top + 14;
+  tooltip.style.left = `${Math.min(x, rect.width - tooltip.offsetWidth - 8)}px`;
+  tooltip.style.top = `${Math.min(y, rect.height - tooltip.offsetHeight - 8)}px`;
+}
+
+function hideGraphTooltip() {
+  citationGraphView.tooltip.hidden = true;
+}
+
+function updateGraphHighlights(selectedId) {
+  const view = citationGraphView;
+  const needle = state.search.trim().toLowerCase();
+  const cluster = state.graphOptions.cluster;
+  const neighbors = new Set();
+  if (selectedId) {
+    neighbors.add(selectedId);
+    view.links.forEach(link => {
+      if (link.source.id === selectedId) neighbors.add(link.target.id);
+      if (link.target.id === selectedId) neighbors.add(link.source.id);
+    });
+  }
+  const matches = value => {
+    if (cluster && value.data.clusterId !== cluster) return false;
+    if (!needle) return true;
+    return [value.data.title, ...(value.data.authors || []), value.data.year, value.data.venue]
+      .join(" ").toLowerCase().includes(needle);
+  };
+  const emphasis = value => {
+    if (!matches(value)) return "dimmed";
+    if (!selectedId) return "";
+    return neighbors.has(value.id) ? "emphasized" : "faded";
+  };
+  view.layers.nodes.selectAll("circle")
+    .attr("class", value => `graph-node ${value.data.kind} ${emphasis(value)}${value.id === selectedId ? " selected" : ""}`);
+  view.layers.labels.selectAll("text")
+    .attr("class", value => `graph-label ${value.data.kind}${value.ring ? " ring" : ""} ${emphasis(value)}${value.id === selectedId ? " selected" : ""}`);
+  view.layers.links.selectAll("line")
+    .attr("class", link => {
+      const base = `graph-link ${link.kind}${link.stub ? " stub" : ""}`;
+      const visible = matches(link.source) && matches(link.target);
+      if (!visible) return `${base} dimmed`;
+      if (!selectedId) return base;
+      return `${base} ${link.source.id === selectedId || link.target.id === selectedId ? "emphasized" : "faded"}`;
+    });
+  view.layers.hulls.selectAll("path")
+    .attr("class", value => `graph-hull${cluster && value.id !== cluster ? " dimmed" : ""}${cluster === value.id ? " focused" : ""}`);
+  view.canvas.classList.toggle("labels-hidden", !state.graphOptions.labels);
+}
+
+function graphToolbar(papers, nodes) {
+  const data = graphData();
+  const toolbar = node("div", "graph-toolbar");
+  const stats = node("div", "graph-stats");
+  const visibleStubs = nodes.filter(value => value.kind === "stub").length;
+  const extracted = papers.filter(paper => paper.referencesExtracted).length;
+  stats.append(
+    node("strong", "", `${papers.length} papers`),
+    node("span", "", `${extracted} with references · ${data.stats.paperEdges} citations between papers · ${visibleStubs} referenced works shown · ${data.stats.clusters} clusters`),
+  );
+  toolbar.append(stats);
+  const controls = node("div", "graph-controls");
+  const stubs = node("label", "graph-control");
+  stubs.append(node("span", "", "Show"));
+  const select = node("select");
+  graphStubOptions.forEach(([value, label]) => {
+    const option = node("option", "", label);
+    option.value = value;
+    option.selected = state.graphOptions.stubs === value;
+    select.append(option);
+  });
+  select.addEventListener("change", () => {
+    state.graphOptions.stubs = select.value;
+    render();
+  });
+  stubs.append(select);
+  controls.append(stubs);
+  const toggle = (key, label, title) => {
+    const wrapper = node("label", "graph-toggle");
+    const input = node("input");
+    input.type = "checkbox";
+    input.checked = Boolean(state.graphOptions[key]);
+    input.addEventListener("change", () => {
+      state.graphOptions[key] = input.checked;
+      render();
+    });
+    wrapper.append(input, node("span", "", label));
+    wrapper.title = title;
+    return wrapper;
+  };
+  controls.append(
+    toggle("inferred", "Inferred links", "Show citations of journal or conference versions of papers in this collection."),
+    toggle("unconnected", "Unconnected papers", "Show papers without any citation link on an outer ring."),
+    toggle("labels", "Labels", "Show paper titles next to nodes."),
+    button("Fit", () => fitGraph(true), "button"),
+  );
+  const missing = graphMissingReferenceTargets(papers);
+  if (missing.length) {
+    const extract = button(
+      `Extract references (${missing.length})`,
+      () => openTask("references", missing),
+      `button${extracted ? "" : " primary"}`,
+    );
+    extract.title = `Extract the reference lists of the ${missing.length} visible paper${missing.length === 1 ? "" : "s"} without one.`;
+    controls.append(extract);
+  }
+  toolbar.append(controls);
+  return toolbar;
+}
+
+function graphLegend(papers) {
+  const data = graphData();
+  const visiblePapers = new Set(papers.map(paper => paper.key));
+  const legend = node("aside", "graph-legend");
+  legend.append(node("div", "graph-panel-heading", "Clusters"));
+  const list = node("div", "graph-legend-list");
+  data.clusters.forEach(cluster => {
+    const count = cluster.papers.filter(id => visiblePapers.has(id)).length;
+    if (!count) return;
+    const row = node("button", `graph-legend-row${state.graphOptions.cluster === cluster.id ? " active" : ""}`);
+    row.type = "button";
+    const swatch = node("span", "graph-swatch");
+    swatch.style.background = clusterColor(cluster.id);
+    const copy = node("span", "graph-legend-copy");
+    copy.append(node("strong", "", cluster.label));
+    const meta = [`${count} paper${count === 1 ? "" : "s"}`];
+    if (cluster.topAuthors?.length) meta.push(cluster.topAuthors.join(", "));
+    copy.append(node("small", "", meta.join(" · ")));
+    row.append(swatch, copy);
+    row.title = cluster.id === "isolated"
+      ? "Papers without any citation link to the rest of the collection."
+      : `Keywords: ${cluster.keywords.join(", ") || "none"}`;
+    row.addEventListener("click", () => {
+      state.graphOptions.cluster = state.graphOptions.cluster === cluster.id ? "" : cluster.id;
+      render();
+    });
+    list.append(row);
+  });
+  legend.append(list);
+  return legend;
+}
+
+function graphDetailCard(selected) {
+  const card = node("aside", "graph-card");
+  if (!selected) {
+    card.append(
+      node("div", "graph-panel-heading", "Citation graph"),
+      node("p", "", "Click a node to inspect it. Filled circles are papers in this collection, colored by cluster. Hollow circles are referenced works that are not in the collection. Solid links are direct citations; dashed amber links are inferred equivalents such as journal versions."),
+    );
+    return card;
+  }
+  const isPaper = selected.kind === "paper";
+  const cluster = graphData().clustersById.get(selected.clusterId);
+  const eyebrow = node("div", "eyebrow", isPaper ? "Paper in collection" : "Referenced work · not in collection");
+  card.append(eyebrow);
+  const title = node("h2", "", selected.title || selected.raw || "Untitled reference");
+  card.append(title);
+  const authors = (selected.authors || []).join(", ");
+  if (authors) card.append(node("p", "graph-card-authors", authors));
+  const facts = [selected.venue, selected.year].filter(Boolean).join(" · ");
+  if (facts) card.append(node("p", "graph-card-facts", facts));
+  if (cluster) {
+    const chip = node("span", "graph-cluster-chip");
+    const swatch = node("span", "graph-swatch");
+    swatch.style.background = clusterColor(cluster.id);
+    chip.append(swatch, node("span", "", cluster.label));
+    card.append(chip);
+  }
+  const links = node("div", "graph-card-links");
+  if (selected.arxivId) {
+    const link = node("a", "", `arXiv:${selected.arxivId}`);
+    link.href = `https://arxiv.org/abs/${selected.arxivId}`;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    links.append(link);
+  }
+  if (selected.doi) {
+    const link = node("a", "", `doi:${selected.doi}`);
+    link.href = `https://doi.org/${selected.doi}`;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    links.append(link);
+  }
+  if (selected.url && !isPaper) {
+    const link = node("a", "", selected.url);
+    link.href = selected.url;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    links.append(link);
+  }
+  if (links.childNodes.length) card.append(links);
+  const actions = node("div", "graph-card-actions");
+  if (isPaper) {
+    const paper = paperForGraphNode(selected);
+    actions.append(button("Open details", () => openGraphPaperDetails(selected), "button primary"));
+    if (paper && !paper.referencesExtracted) {
+      actions.append(button("Extract references", () => openTask("references", [paperTarget(paper)]), "button"));
+    }
+  } else {
+    if (selected.arxivId) {
+      actions.append(button(
+        "Add from arXiv",
+        () => openTask("download", [], { acquisition: "ids", papers: selected.arxivId }),
+        "button primary",
+      ));
+    }
+    const fromFiles = button("Add from files", () => openFileImport(selected), "button");
+    fromFiles.title = "Import this work from a PDF or source archive so it becomes a paper in the collection.";
+    actions.append(fromFiles);
+  }
+  actions.append(button("Center", () => focusGraphNode(selected.id), "button"));
+  card.append(actions);
+  if (isPaper) {
+    const cites = selected.references.filter(record => record.kind !== "stub");
+    card.append(node("p", "graph-card-facts", selected.referencesExtracted
+      ? `${selected.referenceCount} references · ${cites.length} to papers here · cited by ${selected.citedByCount} here`
+      : "References not extracted yet."));
+    if (cites.length) {
+      card.append(node("div", "graph-panel-heading", "Cites"));
+      const chips = node("div", "reference-chips");
+      cites.forEach(record => chips.append(graphPaperChip(record.target, record.kind)));
+      card.append(chips);
+    }
+  }
+  if (selected.citedBy?.length) {
+    card.append(node("div", "graph-panel-heading", `Cited by ${selected.citedBy.length} paper${selected.citedBy.length === 1 ? "" : "s"} here`));
+    const chips = node("div", "reference-chips");
+    selected.citedBy.forEach(entry => chips.append(graphPaperChip(entry.paper, entry.kind)));
+    card.append(chips);
+  }
+  return card;
+}
+
+function renderCitationGraphView(paper, papers) {
+  const shell = node("div", "graph-view");
+  const data = graphData();
+  if (!data) {
+    const empty = node("section", "empty-state graph-empty");
+    empty.append(
+      node("div", "empty-mark", "∴"),
+      node("h1", "", state.citationGraph.error ? "Citation graph unavailable" : "Building the citation graph…"),
+      node("p", "", state.citationGraph.error || "References are being matched across the collection."),
+    );
+    shell.append(empty);
+    main.replaceChildren(shell);
+    return;
+  }
+  if (typeof d3 === "undefined") {
+    const empty = node("section", "empty-state graph-empty");
+    empty.append(
+      node("div", "empty-mark", "∴"),
+      node("h1", "", "Graph rendering unavailable"),
+      node("p", "", "The d3 library could not be loaded from the CDN. Check the network connection and reload."),
+    );
+    shell.append(empty);
+    main.replaceChildren(shell);
+    return;
+  }
+  const nodes = visibleGraphNodes(papers);
+  shell.append(graphToolbar(papers, nodes));
+  const stage = node("div", "graph-stage");
+  const canvas = ensureGraphCanvas();
+  stage.append(canvas);
+  if (!papers.some(item => item.referencesExtracted)) {
+    const overlay = node("div", "graph-overlay");
+    overlay.append(
+      node("strong", "", "No references extracted yet"),
+      node("span", "", "Extract references for the papers in this collection to reveal citations, shared references, and clusters."),
+    );
+    stage.append(overlay);
+  }
+  const selected = state.graphSelectedStub
+    ? graphNode(state.graphSelectedStub)
+    : graphNodeForPaper(paper);
+  const side = node("div", "graph-side");
+  side.append(graphDetailCard(selected), graphLegend(papers));
+  stage.append(side);
+  shell.append(stage);
+  main.replaceChildren(shell);
+  const sceneKey = graphSceneKey(nodes);
+  if (sceneKey !== citationGraphView.sceneKey) buildGraphScene(nodes, papers);
+  updateGraphHighlights(selected?.id || "");
 }
 
 function paperProblemReviews(paperPath) {
@@ -2480,11 +3483,12 @@ function appendPaperImportItems(items) {
   }
 }
 
-function openFileImport() {
+function openFileImport(stub = null) {
   state.dialog = {
     kind: "fileImport",
     items: [],
     outputDirectory: (state.settings.paperRoots || [])[0] || "",
+    stub,
   };
   renderFileImport();
   dialog.showModal();
@@ -2497,6 +3501,15 @@ function renderFileImport(errorMessage = "") {
   dialogTitle.textContent = "Add from files";
   dialogBody.replaceChildren();
   if (errorMessage) dialogBody.append(node("div", "error-box", errorMessage));
+  if (task.stub) {
+    const hint = node("div", "stub-import-hint");
+    hint.append(
+      node("strong", "", "Adding a referenced work"),
+      node("span", "", stubDisplayLine(task.stub)),
+      node("small", "", "After the import finishes, extract the paper's metadata. References with a matching title and authors then link to it automatically in the citation graph."),
+    );
+    dialogBody.append(hint);
+  }
 
   const dropzone = node("div", "paper-dropzone");
   dropzone.tabIndex = 0;
@@ -3874,6 +4887,7 @@ function openOutput(path) {
 const actionNames = {
   download: "Download from arXiv",
   metadata: "Extract paper metadata",
+  references: "Extract paper references",
   analyze: "Analyze papers", triage: "Triage problems", literature: "Search literature",
   solve: "Solve problems", review: "Review attempts", write: "Write paper", revise: "Revise manuscript",
 };
@@ -3881,6 +4895,7 @@ const actionNames = {
 const taskActionTitles = {
   download: "arXiv download",
   metadata: "Paper metadata",
+  references: "Paper references",
   analyze: "Paper analysis",
   triage: "Problem triage",
   literature: "Literature review",
@@ -4043,6 +5058,7 @@ function checkbox(name, label, help = "", checked = false) {
 function promptLabel(action) {
   return {
     metadata: "Metadata-extractor direction",
+    references: "Reference-extractor direction",
     analyze: "Analyzer direction", triage: "Triage direction", literature: "Search direction",
     solve: "Solver direction", review: "Critic direction", write: "Writer direction", revise: "Revision direction",
   }[action];
@@ -4052,10 +5068,11 @@ function dialogStorageKey(action, targets) {
   return `loose-ends-task-draft:${action}:${targets.map(value => value.path).sort().join("|")}`;
 }
 
-function openTask(action, targets) {
+function openTask(action, targets, initialOptions = {}) {
   const storageKey = dialogStorageKey(action, targets);
   let saved = {};
   try { saved = JSON.parse(sessionStorage.getItem(storageKey) || "{}"); } catch (_) { saved = {}; }
+  saved = { ...saved, ...initialOptions };
   if (action === "write" && targets.length > 1 && !saved.writeMode) {
     saved.writeMode = "separate";
   }
@@ -4308,7 +5325,7 @@ function renderTaskConfiguration(errorMessage = "") {
     }));
     grid.append(field("timeoutMinutes", "Timeout (minutes)", { type: "number", value: options.timeoutMinutes || 120 }));
   }
-  if (["metadata", "analyze", "triage", "literature", "review"].includes(task.action)) {
+  if (["metadata", "references", "analyze", "triage", "literature", "review"].includes(task.action)) {
     grid.append(checkbox("force", "Force replacement", "Run even if matching current output exists.", options.force));
   }
   if (task.action === "analyze") {

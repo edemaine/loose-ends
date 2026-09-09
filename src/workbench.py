@@ -29,6 +29,7 @@ import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import analyze_papers
+import citation_graph
 import codex_cli
 import download_arxiv
 import download_arxiv_author
@@ -78,7 +79,7 @@ IGNORED_PREFIXES = (
     ".triage-install-",
 )
 DRAFT_RE = re.compile(r"^draft-([0-9]{3,})$")
-CATALOG_CACHE_SCHEMA_VERSION = 5
+CATALOG_CACHE_SCHEMA_VERSION = 6
 ROOT_CACHE_DIRECTORY = ".loose-ends"
 PAPER_CACHE_FILENAME = "workbench-papers.json"
 MANUSCRIPT_CACHE_FILENAME = "workbench-manuscripts.json"
@@ -90,6 +91,7 @@ WORKER_HEARTBEAT_STALE_SECONDS = 5 * 60
 CATALOG_FILE_NAMES = {
     "metadata.json",
     "paper.pdf",
+    "references.json",
     *common.ANALYSIS_FILES,
     common.TRIAGE_MARKDOWN,
     common.TRIAGE_RESULT,
@@ -186,6 +188,11 @@ def _paper_inventory(paths: Iterable[Path]) -> list[dict]:
         )
         timeline = human_review.paper_timeline(paper, metadata=metadata)
         resolved = paper.resolve()
+        references_manifest = _read_json(paper / "references" / "references.json")
+        references = references_manifest.get("references", [])
+        if not isinstance(references, list):
+            references = []
+        references = [item for item in references if isinstance(item, dict)]
         records.append(
             {
                 "key": str(resolved),
@@ -211,6 +218,12 @@ def _paper_inventory(paths: Iterable[Path]) -> list[dict]:
                     and isinstance(metadata.get("authors"), list)
                     and metadata["authors"]
                 ),
+                "referencesExtracted": bool(references_manifest),
+                "referenceCount": len(references),
+                "referenceSourceKind": str(
+                    references_manifest.get("source_kind", "") or ""
+                ),
+                "references": references,
                 "files": [
                     str(path)
                     for path in (
@@ -219,6 +232,7 @@ def _paper_inventory(paths: Iterable[Path]) -> list[dict]:
                         paper / "analysis" / "summary.md",
                         paper / "analysis" / "results.md",
                         paper / "analysis" / "open-problems.md",
+                        paper / "references" / "references.json",
                     )
                     if path.is_file()
                 ],
@@ -691,6 +705,7 @@ class CatalogManager:
             "loading": True,
         }
         self.fingerprint = ""
+        self.graph_cache: tuple[int, dict] | None = None
         self.paper_caches: dict[str, dict] = {}
         self.manuscript_cache: dict | None = None
         self._load_caches()
@@ -1099,6 +1114,8 @@ class CatalogManager:
         with self.lock:
             value = json.loads(json.dumps(self.catalog, ensure_ascii=False))
             value["error"] = self.error
+            for item in value.get("papers", []):
+                item.pop("references", None)
             for item in value.get("reviews", []):
                 for field in (
                     "externalSources",
@@ -1111,6 +1128,17 @@ class CatalogManager:
                 ):
                     item.pop(field, None)
             return value
+
+    def citation_graph(self) -> dict:
+        """Return the citation graph for the current catalog, cached by version."""
+        with self.lock:
+            version = self.version
+            if self.graph_cache is not None and self.graph_cache[0] == version:
+                return self.graph_cache[1]
+            graph = citation_graph.build_graph(self.catalog.get("papers", []))
+            graph["version"] = version
+            self.graph_cache = (version, graph)
+            return graph
 
     def review_detail(self, key: str) -> dict:
         with self.lock:
@@ -2124,6 +2152,8 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                 )
             elif path == "/api/catalog":
                 self.send_json(self.app.catalog.snapshot())
+            elif path == "/api/citation-graph":
+                self.send_json(self.app.catalog.citation_graph())
             elif path == "/api/review-detail":
                 key = parse_qs(parsed.query).get("key", [""])[0]
                 self.send_json(self.app.catalog.review_detail(key))

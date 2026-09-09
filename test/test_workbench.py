@@ -2931,5 +2931,103 @@ class WorkbenchWatchTests(unittest.TestCase):
             self.assertGreater(manager.version, initial)
 
 
+class CitationGraphWorkbenchTests(unittest.TestCase):
+    def test_references_extraction_plan_uses_managed_codex_script(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = make_paper(root)
+            plan = build_plan(
+                {
+                    "action": "references",
+                    "targets": [{"kind": "paper", "path": str(paper)}],
+                    "options": {"force": True, "prompt": "Keep venue names."},
+                },
+                project_root=PROJECT_ROOT,
+                allowed_roots=[root],
+                manuscripts=root / "manuscripts",
+                catalog_version=1,
+            )
+
+        unit = plan["units"][0]
+        self.assertTrue(unit["argv"][2].endswith("extract_paper_references.py"))
+        self.assertIn("--force", unit["argv"])
+        self.assertIn("Keep venue names.", unit["argv"])
+        self.assertEqual(unit["targets"][0]["kind"], "paper")
+        self.assertTrue(plan["warnings"])
+        self.assertEqual(task_cli_defaults()["references"]["reasoningEffort"], "medium")
+
+    def test_paper_inventory_summarizes_installed_references(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = make_paper(root)
+            (paper / "references").mkdir()
+            common.write_json(
+                paper / "references" / "references.json",
+                {
+                    "schema_version": 1,
+                    "source_kind": "bbl",
+                    "references": [
+                        {
+                            "index": 1, "key": "k", "title": "Cited Work Title",
+                            "authors": ["Ada Lovelace"], "year": "1843", "venue": "",
+                            "arxiv_id": "", "doi": "", "url": "", "raw": "",
+                        },
+                        "not an object",
+                    ],
+                },
+            )
+
+            records = workbench._paper_inventory([root])
+            graph = workbench.citation_graph.build_graph(records)
+
+        record = records[0]
+        self.assertTrue(record["referencesExtracted"])
+        self.assertEqual(record["referenceCount"], 1)
+        self.assertEqual(record["referenceSourceKind"], "bbl")
+        self.assertEqual(record["references"][0]["title"], "Cited Work Title")
+        self.assertTrue(any(path.endswith("references.json") for path in record["files"]))
+        node = next(item for item in graph["nodes"] if item["kind"] == "paper")
+        self.assertEqual(node["referenceCount"], 1)
+        self.assertEqual(graph["stats"]["stubs"], 1)
+
+    def test_reference_manifests_trigger_catalog_updates(self):
+        self.assertIn("references.json", workbench.CATALOG_FILE_NAMES)
+        self.assertTrue(
+            ChangeHandler.relevant_file("/papers/arXiv-1/references/references.json")
+        )
+        with TemporaryDirectory() as temporary:
+            paper = Path(temporary) / "paper"
+            (paper / "references").mkdir(parents=True)
+            manifest = paper / "references" / "references.json"
+            manifest.write_text("{}", encoding="utf-8")
+            os.utime(paper, (1_000, 1_000))
+            os.utime(manifest, (5_000, 5_000))
+            timeline = human_review.paper_timeline(paper, metadata={})
+        self.assertEqual(timeline["activityTimestamp"], 5_000)
+
+    def test_web_assets_expose_the_citation_graph(self):
+        web = PROJECT_ROOT / "src" / "workbench_web"
+        app = (web / "app.js").read_text(encoding="utf-8")
+        self.assertIn('api("/api/citation-graph")', app)
+        self.assertIn("function renderCitationGraphView(paper, papers)", app)
+        self.assertIn("function paperReferencesPanel(paper)", app)
+        self.assertIn("function paperCitedByPanel(paper)", app)
+        self.assertIn('paper.referencesExtracted ? "Extract references again"', app)
+        self.assertIn('() => openTask("references", papers)', app)
+        self.assertIn('parameters.set("view", "graph")', app)
+        self.assertIn('references: "Extract paper references"', app)
+        self.assertIn('openTask("download", [], { acquisition: "ids", papers: selected.arxivId })', app)
+        self.assertIn("openFileImport(selected)", app)
+        model = (web / "review_model.js").read_text(encoding="utf-8")
+        self.assertIn('["missing", "Needs reference extraction"]', model)
+        self.assertIn('filters.references === "missing" && paper.referencesExtracted', model)
+        styles = (web / "styles.css").read_text(encoding="utf-8")
+        self.assertIn(".graph-canvas {", styles)
+        self.assertIn(".graph-link.inferred {", styles)
+        self.assertIn(".reference-item {", styles)
+        index = (web / "index.html").read_text(encoding="utf-8")
+        self.assertIn("cdn.jsdelivr.net/npm/d3@7", index)
+
+
 if __name__ == "__main__":
     unittest.main()
