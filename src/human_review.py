@@ -464,13 +464,13 @@ def problem_statement_parts(value: str) -> dict[str, str]:
     lines = value.splitlines()
     fields = []
     label = r"(?P<label>precise statement|problem statement|statement|source location)"
-    bullet = re.compile(
-        rf"^(?P<indent> *)(?:[-+*] )\*\*{label}(?::\*\*|\*\*:)\s*(?P<body>.*)$",
+    labeled = re.compile(
+        rf"^(?P<indent> *)(?P<bullet>[-+*] )?\*\*{label}(?:[.:]\*\*|\*\*[.:])\s*(?P<body>.*)$",
         re.IGNORECASE,
     )
     heading = re.compile(rf"^(?P<marks>#{{2,6}}) +{label}:?\s*$", re.IGNORECASE)
     for index, line in enumerate(lines):
-        match = bullet.match(line) or heading.match(line)
+        match = labeled.match(line) or heading.match(line)
         if not match:
             continue
         end = index + 1
@@ -478,7 +478,11 @@ def problem_statement_parts(value: str) -> dict[str, str]:
             indent = len(match["indent"])
             while end < len(lines):
                 following = lines[end]
-                if re.match(rf"^ {{0,{indent}}}(?:[-+*] |\d+[.)] |#{{1,6}} )", following):
+                if re.match(rf"^ {{0,{indent}}}#{{1,6}} ", following):
+                    break
+                if match["bullet"] and re.match(rf"^ {{0,{indent}}}(?:[-+*] |\d+[.)] )", following):
+                    break
+                if re.match(rf"^ {{0,{indent}}}\*\*[^*]+(?:[.:]\*\*|\*\*[.:])(?:\s|$)", following):
                     break
                 end += 1
             body = "\n".join([
