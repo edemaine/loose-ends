@@ -1744,7 +1744,11 @@ function renderResearch() {
     );
   }
   const attemptSwitcher = node("div", "attempt-switcher");
-  attemptSwitcher.append(node("div", "sidebar-heading", `Attempts${attempts.length ? ` · ${attempts.length}` : ""}`));
+  const totalAttempts = reviewModel.attemptsForProblem(state.catalog.reviews, state.selectedProblem).length;
+  const attemptCount = attempts.length < totalAttempts
+    ? `${attempts.length} of ${totalAttempts} · filtered`
+    : String(attempts.length);
+  attemptSwitcher.append(node("div", "sidebar-heading", `Attempts${totalAttempts ? ` · ${attemptCount}` : ""}`));
   const attemptList = node("div", "attempt-list");
   attempts.forEach(item => {
     appendSideCard(attemptList, {
@@ -1860,7 +1864,7 @@ function addAction(parent, label, action, targets, primary = false) {
   parent.append(button(label, () => openTask(action, targets), `button${primary ? " primary" : ""}`));
 }
 
-function olderVersionWarning(kind, currentName, latestName, route, selectLatest) {
+function olderVersionWarning(kind, currentName, latestName, route, selectLatest, { note = "", linkLabel = "" } = {}) {
   const warning = node("aside", "version-warning");
   warning.setAttribute("aria-label", `Older ${kind}`);
   const mark = node("span", "version-warning-mark", "!");
@@ -1870,7 +1874,8 @@ function olderVersionWarning(kind, currentName, latestName, route, selectLatest)
     node("strong", "", `You’re viewing an older ${kind}.`),
     node("small", "", `${currentName} is selected; the latest is ${latestName}.`),
   );
-  const link = node("a", "button version-warning-link", `View latest ${kind}`);
+  if (note) copy.append(node("small", "", note));
+  const link = node("a", "button version-warning-link", linkLabel || `View latest ${kind}`);
   link.href = routeHref(route);
   link.addEventListener("click", event => {
     if (
@@ -1882,6 +1887,29 @@ function olderVersionWarning(kind, currentName, latestName, route, selectLatest)
   });
   warning.append(mark, copy, link);
   return warning;
+}
+
+function olderAttemptWarning(item, latestAttempt) {
+  const hidden = !reviewModel.filterItems([latestAttempt], state.researchFilters, state.search).length;
+  const route = { tab: "research", review: latestAttempt, detail: state.detailTab };
+  return olderVersionWarning(
+    "attempt", item.attemptName || "This attempt", latestAttempt.attemptName || "the latest attempt",
+    route,
+    () => {
+      if (hidden) {
+        openRoute(route);
+        return;
+      }
+      state.selectedReview = latestAttempt.itemKey;
+      state.selectedProblem = latestAttempt.problemKey;
+      state.revealSidebarSecondarySelection = true;
+      syncNavigation();
+    },
+    hidden ? {
+      note: "The latest attempt is hidden by the current filters or search.",
+      linkLabel: "Clear filters and view latest attempt",
+    } : {},
+  );
 }
 
 function manuscriptsForProblem(item) {
@@ -2085,18 +2113,7 @@ function renderReviewDetail(item) {
   }), solutionActions);
   shell.append(attemptHeading);
   if (latestAttempt && latestAttempt.itemKey !== item.itemKey) {
-    shell.append(olderVersionWarning(
-      "attempt",
-      item.attemptName || "This attempt",
-      latestAttempt.attemptName || "the latest attempt",
-      { tab: "research", review: latestAttempt, detail: state.detailTab },
-      () => {
-        state.selectedReview = latestAttempt.itemKey;
-        state.selectedProblem = latestAttempt.problemKey;
-        state.revealSidebarSecondarySelection = true;
-        syncNavigation();
-      },
-    ));
+    shell.append(olderAttemptWarning(item, latestAttempt));
   }
 
   if (attempt) {

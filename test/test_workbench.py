@@ -129,6 +129,27 @@ class ProblemDetailTests(unittest.TestCase):
                 self.assertEqual(parts["problemStatementShort"], value)
                 self.assertEqual(parts["problemBackground"], "")
 
+    def test_paragraph_statement_labels_preserve_lists_and_math(self):
+        for label in ("**Precise statement.**", "**Precise statement:**", "**Precise statement**:"):
+            with self.subTest(label=label):
+                statement = (
+                    "Given a triangulation T, minimize the flips to a Hamiltonian triangulation.\n\n"
+                    "Consider both variants:\n\n- Sequential flips.\n- Simultaneous flips.\n\n"
+                    "\\[ f(T) \\le n \\]"
+                )
+                parts = human_review.problem_statement_parts(
+                    f"**Explicitness:** `uncertain`\n\n{label} {statement}\n\n"
+                    "**Source location.** Section 1, PDF p. 3.\n\n"
+                    "**Context.** The Hamiltonian target remains unresolved.\n\n"
+                    "**Ambiguity.** Status at publication is uncertain."
+                )
+                self.assertEqual(parts["problemStatementShort"], statement)
+                self.assertEqual(parts["problemSource"], "Section 1, PDF p. 3.")
+                self.assertIn("**Explicitness:** `uncertain`", parts["problemBackground"])
+                self.assertIn("**Context.** The Hamiltonian target remains unresolved.", parts["problemBackground"])
+                self.assertIn("**Ambiguity.** Status at publication is uncertain.", parts["problemBackground"])
+                self.assertNotIn("Given a triangulation", parts["problemBackground"])
+
     def test_lazy_detail_includes_claims_and_current_statement(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
