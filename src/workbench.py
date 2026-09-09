@@ -87,7 +87,7 @@ IGNORED_PREFIXES = (
     ".triage-install-",
 )
 DRAFT_RE = re.compile(r"^draft-([0-9]{3,})$")
-CATALOG_CACHE_SCHEMA_VERSION = 4
+CATALOG_CACHE_SCHEMA_VERSION = 5
 ROOT_CACHE_DIRECTORY = ".loose-ends"
 PAPER_CACHE_FILENAME = "workbench-papers.json"
 MANUSCRIPT_CACHE_FILENAME = "workbench-manuscripts.json"
@@ -1127,6 +1127,7 @@ class CatalogManager:
             for item in value.get("reviews", []):
                 for field in (
                     "externalSources",
+                    "checkableClaims",
                     "claimReviews",
                     "blockingGaps",
                     "recommendedNextSteps",
@@ -2453,6 +2454,10 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                     match.group(1), **changes
                 )
                 self.send_json(job)
+                self.app.scheduler.schedule()
+                self.app.hub.publish("tasks.changed")
+            elif match := re.fullmatch(r"/api/jobs/([0-9a-f-]+)/retry", parsed.path):
+                self.send_json(self.app.store.retry_job(match.group(1)), 201)
                 self.app.scheduler.schedule()
                 self.app.hub.publish("tasks.changed")
             elif match := re.fullmatch(r"/api/runs/([0-9a-f-]+)/cancel", parsed.path):

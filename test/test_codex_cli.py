@@ -1,4 +1,6 @@
 import argparse
+import json
+import os
 from contextlib import redirect_stderr
 from io import StringIO
 from pathlib import Path
@@ -14,6 +16,58 @@ import codex_cli
 
 
 class CodexCliTests(unittest.TestCase):
+    def test_credit_exhaustion_pauses_queue_and_preserves_pending_work(self):
+        from workbench_store import WorkbenchStore
+
+        message = "You've hit your usage limit. Purchase more credits or try again later."
+        with TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            store = WorkbenchStore(workspace / "workbench.sqlite3")
+
+            def fail_codex(*args, **kwargs):
+                kwargs["stdout"].write(json.dumps({"type": "turn.failed", "error": {"message": message}}) + "\n")
+                return subprocess.CompletedProcess(args[0], 1)
+
+            with (
+                patch.dict(os.environ, {codex_cli.WORKBENCH_DATABASE_ENV: str(store.database)}),
+                patch.object(codex_cli, "grant_workspace_owner_inheritance"),
+                patch.object(codex_cli, "require_secure_windows_sandbox"),
+                patch.object(codex_cli, "normalize_workspace_access"),
+                patch.object(codex_cli, "build_exec_command", return_value=["codex"]),
+                patch.object(codex_cli, "wait_for_codex_launch_slot"),
+                patch.object(subprocess, "run", side_effect=fail_codex) as run,
+            ):
+                with self.assertRaisesRegex(codex_cli.CodexError, "credits exhausted"):
+                    codex_cli.run_structured_codex(
+                        codex="codex", workspace=workspace, prompt="test",
+                        schema_path=workspace / "schema.json",
+                    )
+            run.assert_called_once()
+            reopened = WorkbenchStore(store.database)
+            self.assertEqual(reopened.scheduler_settings()["queuePauseReason"], "codex_credits")
+            self.assertTrue(reopened.scheduler_settings()["queuePaused"])
+            self.assertEqual(reopened.scheduler_settings()["codexCreditError"], message)
+            self.assertIsNone(reopened.claim_next_run(set()))
+            reopened.update_scheduler_settings(queue_paused=False)
+            self.assertFalse(reopened.scheduler_settings()["queuePaused"])
+            self.assertIsNone(reopened.scheduler_settings()["codexCreditError"])
+
+    def test_credit_detection_ignores_agent_content_and_unrelated_errors(self):
+        with TemporaryDirectory() as temporary:
+            events = Path(temporary) / "events.jsonl"
+            for event, expected in (
+                ({"type": "error", "message": "You've hit your usage limit."}, True),
+                ({"type": "turn.failed", "error": {"code": "insufficient_quota"}}, True),
+                ({"type": "error", "message": "Out of credits"}, True),
+                ({"type": "error", "message": "Rate limit exceeded; retry shortly"}, False),
+                ({"type": "item.completed", "message": "out of credits"}, False),
+                ({"type": "turn.failed", "error": None}, False),
+                ([], False),
+            ):
+                with self.subTest(event=event):
+                    events.write_text("not json\n" + json.dumps(event) + "\n", encoding="utf-8")
+                    self.assertEqual(codex_cli.codex_credit_error(events) is not None, expected)
+
     @unittest.skipUnless(sys.platform == "win32", "Windows process flags")
     def test_windowless_process_group_hides_console(self):
         options = codex_cli.windowless_popen_options()

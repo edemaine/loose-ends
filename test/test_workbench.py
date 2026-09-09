@@ -91,7 +91,97 @@ def fake_plan(
     }
 
 
+class ProblemDetailTests(unittest.TestCase):
+    def test_statement_parts_preserve_math_and_nested_support(self):
+        value = (
+            "### A conjecture\n\n"
+            "- **Precise statement:** Show that\n"
+            "  \\[\n  f(n) \\le n^2.\n  \\]\n"
+            "  Under these assumptions:\n"
+            "  - The input is finite.\n"
+            "  - All weights are positive.\n"
+            "- **Source location:** Section 3, [paper][source].\n"
+            "- **Context:** An earlier result.\n\n"
+            "[source]: https://example.org/paper\n"
+        )
+        parts = human_review.problem_statement_parts(value)
+        self.assertEqual(parts["problemStatementShort"],
+            "Show that\n\\[\nf(n) \\le n^2.\n\\]\nUnder these assumptions:\n"
+            "- The input is finite.\n- All weights are positive.")
+        self.assertEqual(parts["problemSource"], "Section 3, [paper][source].")
+        self.assertIn("**Context:** An earlier result.", parts["problemBackground"])
+        self.assertIn("[source]: https://example.org/paper", parts["problemBackground"])
+        self.assertNotIn("Precise statement", parts["problemBackground"])
+
+    def test_heading_statement_and_unfamiliar_formats(self):
+        parts = human_review.problem_statement_parts(
+            "### Statement\n\nProve it.\n\n### Context\n\nBackground."
+        )
+        self.assertEqual(parts["problemStatementShort"], "Prove it.")
+        self.assertEqual(parts["problemBackground"], "### Context\n\nBackground.")
+        for value in (
+            "Unlabeled statement.\n\nMore context.",
+            "- **Statement:** First.\n- **Statement:** Second.",
+            "### Statement\n\n### Context\nOnly background.",
+        ):
+            with self.subTest(value=value):
+                parts = human_review.problem_statement_parts(value)
+                self.assertEqual(parts["problemStatementShort"], value)
+                self.assertEqual(parts["problemBackground"], "")
+
+    def test_lazy_detail_includes_claims_and_current_statement(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = make_paper(root)
+            attempt = paper / "OP-001" / "attempt-001"
+            attempt.mkdir(parents=True)
+            claims = [{"id": "C-001", "type": "lemma", "statement": "Claim.",
+                       "support": "Proof.", "remaining_gap": ""}]
+            common.write_json(attempt / "solver-result.json", {
+                "claimed_result_type": "partial_result", "summary": "Partial progress.",
+                "checkable_claims": claims,
+            })
+            (attempt / "attempt.md").write_text("# Full solution", encoding="utf-8")
+            manager = CatalogManager([root], root / "manuscripts", EventHub())
+            self.addCleanup(manager.close)
+            self.assertTrue(manager.wait_until_ready(8))
+            summary = manager.snapshot()["reviews"][0]
+            self.assertNotIn("checkableClaims", summary)
+            detail = manager.review_detail(summary["itemKey"])
+            self.assertEqual(detail["checkableClaims"], claims)
+            self.assertEqual(detail["solverAttempt"], "# Full solution")
+            (paper / "analysis" / "open-problems.md").write_text(
+                "## OP-001\n\n- **Statement:** Updated.\n- **Context:** Background.",
+                encoding="utf-8",
+            )
+            detail = manager.review_detail(summary["itemKey"])
+            self.assertEqual(detail["problemStatementShort"], "Updated.")
+            self.assertEqual(detail["problemBackground"], "- **Context:** Background.")
+
+
 class WorkbenchPlanningTests(unittest.TestCase):
+    def test_codex_home_expands_home_and_preserves_request(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = make_paper(root)
+            for value in ("~", "~/.codex custom", "", "   "):
+                with self.subTest(value=value), patch.dict(os.environ, {"HOME": str(root)}):
+                    request = {
+                        "action": "analyze",
+                        "targets": [{"kind": "paper", "path": str(paper)}],
+                        "options": {"codexHome": value},
+                    }
+                    plan = build_plan(
+                        request, project_root=PROJECT_ROOT, allowed_roots=[root],
+                        manuscripts=root / "manuscripts", catalog_version=1,
+                    )
+                    if value.strip():
+                        expected = root if value == "~" else root / ".codex custom"
+                        self.assertEqual(plan["options"]["codexHome"], str(expected.resolve()))
+                    else:
+                        self.assertNotIn("codexHome", plan["options"])
+                    self.assertEqual(request["options"]["codexHome"], value)
+
     def test_write_dialog_job_flow(self):
         result = subprocess.run(
             ["node", "--test", "test_workbench_tasks.cjs"],
@@ -1585,7 +1675,7 @@ class WorkbenchPlanningTests(unittest.TestCase):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
             paper = make_paper(root)
-            manuscripts = root / "manuscripts"
+            manuscripts = root / "JCDCGGG-manuscripts"
             plan = build_plan(
                 {
                     "action": "write",
@@ -1600,6 +1690,11 @@ class WorkbenchPlanningTests(unittest.TestCase):
             self.assertIn(
                 f"manuscript:{manuscripts.resolve()}",
                 plan["units"][0]["resources"],
+            )
+            argv = plan["units"][0]["argv"]
+            self.assertIn("--output-dir", argv)
+            self.assertEqual(
+                argv[argv.index("--output-dir") + 1], str(manuscripts.resolve())
             )
 
     def test_planner_rejects_targets_outside_configured_roots(self):
@@ -1627,10 +1722,12 @@ class WorkbenchPlanningTests(unittest.TestCase):
             stderr="",
         )
         plan = fake_plan([sys.executable, "tool.py", "OP-001"])
+        plan["options"] = {"codexHome": str(PROJECT_ROOT / "custom home")}
 
         returned = populate_dry_run_previews(plan)
 
         self.assertIs(returned, plan)
+        self.assertEqual(run.call_args.kwargs["env"]["CODEX_HOME"], plan["options"]["codexHome"])
         self.assertEqual(
             run.call_args.args[0],
             [sys.executable, "tool.py", "OP-001", "--dry-run"],
@@ -1799,6 +1896,69 @@ class WorkbenchStoreTests(unittest.TestCase):
 
             store.update_job_scheduling(job["id"], paused=False)
             self.assertIsNotNone(store.claim_next_run(set()))
+
+    def test_credit_pause_blocks_pending_runs_until_resumed(self):
+        with TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            store = WorkbenchStore(state / "workbench.sqlite3", state)
+            job = store.create_job(
+                {"action": "solve"},
+                fake_plan([sys.executable, "-c", "pass"], unit_count=2),
+            )
+            first, second = job["runs"]
+            store.mark_starting(first["id"])
+            store.pause_for_codex_credits("You've hit your usage limit.")
+
+            self.assertIsNone(store.claim_next_run(set()))
+            self.assertEqual(store.get_run(first["id"])["status"], "starting")
+            self.assertEqual(store.get_run(second["id"])["status"], "queued")
+            store.update_scheduler_settings(queue_paused=False)
+            self.assertEqual(store.claim_next_run(set())["id"], second["id"])
+
+    def test_retry_job_creates_separate_task_for_latest_failed_and_partial(self):
+        with TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            store = WorkbenchStore(state / "workbench.sqlite3", state)
+            plan = fake_plan([sys.executable, "-c", "pass"], unit_count=8, priority_level=2)
+            for index, unit in enumerate(plan["units"]):
+                unit["targets"] = [{"kind": "problem", "path": f"/paper/OP-{index}"}]
+                unit["resources"] = [f"problem:/paper/OP-{index}"]
+                unit["probe"] = {"index": index}
+            original = store.create_job({"action": "solve", "options": {"fast": True}}, plan)
+            statuses = ["failed", "partial", "succeeded", "running", "queued", "canceled", "interrupted", "failed"]
+            for run, status in zip(original["runs"], statuses):
+                store.update_run(run["id"], status=status)
+            store.update_run(original["runs"][1]["id"], outputs_json=["saved-output.json"])
+            recovered = store.retry_run(original["runs"][-1]["id"])
+            store.update_run(recovered["id"], status="succeeded")
+            before = store.get_job(original["id"])
+            store.pause_for_codex_credits("Out of credits")
+
+            retried = store.retry_job(original["id"])
+
+            self.assertNotEqual(retried["id"], original["id"])
+            self.assertEqual(store.get_job(original["id"]), before)
+            self.assertEqual(retried["priority_level"], 2)
+            self.assertEqual(retried["request"]["options"], {"fast": True})
+            self.assertEqual(retried["plan"]["retryOf"], original["id"])
+            self.assertEqual(retried["plan"]["targets"], [unit["targets"][0] for unit in plan["units"][:2]])
+            self.assertEqual(len(retried["runs"]), 2)
+            for new, old in zip(retried["runs"], before["runs"]):
+                self.assertEqual(new["status"], "queued")
+                self.assertEqual(new["outputs"], [])
+                self.assertEqual(new["retry_of"], old["id"])
+                for key in ("argv", "cwd", "targets", "resources", "probe"):
+                    self.assertEqual(new[key], old[key])
+            self.assertTrue(store.scheduler_settings()["queuePaused"])
+
+    def test_retry_job_rejects_no_failed_or_partial_runs(self):
+        with TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            store = WorkbenchStore(state / "workbench.sqlite3", state)
+            job = store.create_job({"action": "solve"}, fake_plan(["unused"]))
+            with self.assertRaisesRegex(ValueError, "no failed or partial"):
+                store.retry_job(job["id"])
+            self.assertEqual(len(store.list_jobs()), 1)
 
     def test_scheduler_settings_persist(self):
         with TemporaryDirectory() as temporary:
@@ -2309,6 +2469,28 @@ class WorkbenchStoreTests(unittest.TestCase):
                 Path(saved["log_path"]).read_text(encoding="utf-8"),
             )
             self.assertEqual(store.get_job(job["id"])["status"], "succeeded")
+
+    def test_worker_codex_home_is_isolated_and_preserved_on_retry(self):
+        with TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            store = WorkbenchStore(state / "workbench.sqlite3", state)
+            for custom in (None, str(state / "custom home")):
+                with self.subTest(custom=custom), patch.dict(os.environ, {"CODEX_HOME": "inherited"}):
+                    plan = fake_plan([
+                        sys.executable, "-c",
+                        "import os; print('codex home: ' + os.environ['CODEX_HOME'])",
+                    ])
+                    plan["options"] = {"codexHome": custom} if custom else {}
+                    job = store.create_job({"action": "solve"}, plan)
+                    run = job["runs"][0]
+                    store.mark_starting(run["id"])
+                    self.assertEqual(workbench_worker.run_worker(store.database, run["id"]), 0)
+                    log = Path(run["log_path"]).read_text(encoding="utf-8")
+                    self.assertIn("codex home: " + (custom or "inherited"), log)
+                    self.assertEqual(os.environ["CODEX_HOME"], "inherited")
+                    store.update_run(run["id"], status="failed")
+                    retry = store.retry_job(job["id"])
+                    self.assertEqual(retry["plan"]["options"], plan["options"])
 
     def test_reported_artifact_makes_failed_run_partial_and_not_retryable(self):
         with TemporaryDirectory() as temporary:

@@ -5,9 +5,55 @@ const vm = require("node:vm");
 
 const source = readFileSync(`${__dirname}/../src/workbench_web/app.js`, "utf8");
 const functions = [
+  "latestJobRuns", "retryJob",
   "separateWriteTasks", "taskRequests", "taskRequestOptions", "taskTargetsForRequest",
   "targetKey", "targetCountLabel", "reviewTask", "confirmTask", "collectDialogOptions",
 ].map(name => source.match(new RegExp(`^(?:async )?function ${name}\\([^]*?^}`, "m"))[0]).join("\n");
+
+test("bulk retry confirms latest failed/partial runs and selects the new task", async () => {
+  const control = { disabled: false };
+  const requests = [];
+  let confirmation;
+  let refreshed = false;
+  const context = vm.createContext({
+    state: { selectedJob: "original" },
+    window: { confirm(message) { confirmation = message; return true; } },
+    api: async (path, options) => {
+      assert.equal(control.disabled, true);
+      requests.push({ path, options });
+      return { id: "retried" };
+    },
+    refreshJobs: async () => { refreshed = true; },
+    showNotice: message => assert.fail(message),
+  });
+  vm.runInContext(functions, context);
+  await context.retryJob({ id: "original", runs: [
+    { id: "old", unit_index: 0, created_at: 1, status: "failed" },
+    { id: "recovered", unit_index: 0, created_at: 2, status: "succeeded" },
+    { id: "failed", unit_index: 1, created_at: 1, status: "failed" },
+    { id: "partial", unit_index: 2, created_at: 1, status: "partial" },
+    { id: "canceled", unit_index: 3, created_at: 1, status: "canceled" },
+  ] }, control);
+  assert.match(confirmation, /2 failed\/partial runs/);
+  assert.match(confirmation, /may repeat completed work/);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].path, "/api/jobs/original/retry");
+  assert.equal(requests[0].options.method, "POST");
+  assert.equal(context.state.selectedJob, "retried");
+  assert.equal(refreshed, true);
+  assert.equal(control.disabled, false);
+});
+
+test("bulk retry cancellation makes no request", async () => {
+  const context = vm.createContext({
+    window: { confirm: () => false },
+    api: () => assert.fail("canceled retry must not submit"),
+  });
+  vm.runInContext(functions, context);
+  const control = { disabled: false };
+  await context.retryJob({ id: "original", runs: [] }, control);
+  assert.equal(control.disabled, false);
+});
 
 function harness(options = {}, targets = [
   { kind: "problem", path: "/paper/OP-001" },

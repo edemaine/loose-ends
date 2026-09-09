@@ -1630,8 +1630,8 @@ class OpenProblemPipelineTests(unittest.TestCase):
             self.assertNotIn("renderMathInElement", dashboard)
             self.assertNotIn("auto-render.min.js", dashboard)
             self.assertLess(
-                dashboard.index('["attempt", "Solution attempt"]'),
-                dashboard.index('["critique", "Critique"]'),
+                dashboard.index('["attempt", "Solution"]'),
+                dashboard.index('["critique", "Review"]'),
             )
 
             empty_paper = make_analyzed_paper(Path(temporary) / "empty")

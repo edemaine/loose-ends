@@ -162,6 +162,14 @@ percentage of installed RAM, a fixed number of GB, or infinity. That allocation
 is divided by the maximum worker count to produce an independent limit for each
 worker. The default is 50% of installed RAM.
 
+To use multiple Codex accounts, set **CODEX_HOME** at the bottom of a task's
+**Model and web-search settings** to the directory authenticated for the desired
+account, such as `~/.codex_personal`. A leading `~` expands to the server's
+`$HOME`; leaving the field blank preserves the inherited default. The setting
+applies to that task, including retries. See
+[T3 Code's multiple-account guide](https://github.com/pingdotgg/t3code/blob/main/docs/user/providers-codex.md#use-multiple-accounts)
+for account setup instructions.
+
 ## Download arXiv papers
 
 `src/download_arxiv.py` downloads both the rendered PDF and the authors' submitted
@@ -1204,7 +1212,12 @@ installed output before a later phase failed is marked partial so the next
 action can operate on that output without accidentally duplicating it.
 
 Use the worker control in the top bar to change concurrent CLI invocations or
-pause new starts. On Windows, each worker process tree gets a separate Job
+pause new starts. Codex credit exhaustion automatically pauses the queue;
+replenish credits and use **Resume queue** to restart pending work. Active runs
+continue. A task's **Retry all failed/partial** button creates a new task with
+its latest failed and partial runs, using the same commands and settings.
+Partial runs restart their commands and may repeat completed work.
+On Windows, each worker process tree gets a separate Job
 Object committed-memory limit. On Linux, each worker gets a separate cgroups v2
 `memory.max` limit, with `memory.swap.max` set to zero so the worker cannot evade
 its ceiling by moving allocations into swap; infinity restores both controls to

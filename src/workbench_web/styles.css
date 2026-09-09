@@ -117,16 +117,6 @@ button { color: inherit; }
 .progress-fill { height: 100%; border-radius: inherit; background: var(--accent); transition: width .2s ease; }
 .progress-fill.indeterminate { width: 35%; animation: progress-sweep 1.25s ease-in-out infinite; }
 @keyframes progress-sweep { from { transform: translateX(-120%); } to { transform: translateX(350%); } }
-.initial-loading { max-width: 700px; margin: 8vh auto; padding: clamp(30px, 5vw, 50px); }
-.initial-loading h1 { margin: 8px 0 10px; color: var(--heading); font: 760 clamp(29px, 4vw, 43px)/1.1 ui-serif, Georgia, serif; }
-.initial-loading p { color: var(--muted); }
-.catalog-progress.large { margin-top: 18px; }
-.catalog-progress.large .progress-track { height: 9px; }
-.catalog-progress.large .progress-line { font-size: 13px; }
-.loading-shell { display: grid; gap: 7px; padding-top: 24px; }
-.loading-pulse { height: 54px; border-radius: 11px; background: linear-gradient(90deg, var(--line) 25%, var(--surface) 50%, var(--line) 75%); background-size: 200% 100%; animation: loading-pulse 1.4s linear infinite; }
-.loading-pulse.short { width: 72%; }
-@keyframes loading-pulse { to { background-position: -200% 0; } }
 .workspace { min-height: calc(100vh - var(--topbar-height)); display: grid; grid-template-columns: 350px minmax(0, 1fr); }
 .sidebar {
   height: calc(100vh - var(--topbar-height));
@@ -285,6 +275,37 @@ button { color: inherit; }
 .panel p { margin: 0; }
 .panel > .markdown { border: 0; background: transparent; padding: 0; }
 .problem-statement { margin-top: 16px; box-shadow: none; }
+.problem-detail { max-width: 980px; }
+.problem-detail .section-title { flex-wrap: wrap; }
+.problem-detail .problem-statement h2 { font-size: 16px; }
+.problem-section-label { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; color: var(--heading); font-weight: 750; }
+.problem-section-label .badges { margin-top: 0; }
+.problem-attempt-label { color: var(--muted); font-weight: 500; }
+.problem-source { display: flex; align-items: baseline; gap: 9px; margin-top: 12px; color: var(--muted); font-size: 12px; }
+.problem-source > .markdown, .problem-background > .markdown { border: 0; background: transparent; padding: 0; }
+.problem-source > .markdown { min-width: 0; }
+.problem-background { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+.problem-background > summary { color: var(--accent); font-weight: 700; cursor: pointer; }
+.problem-background > .markdown { margin-top: 12px; }
+.problem-background > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+.problem-attempt-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin-top: 24px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
+.problem-attempt-heading .actions, .problem-research .actions { margin: 0; }
+.problem-solution > .markdown, .problem-review > .markdown, .problem-research > .markdown, .solution-claim > .markdown, .claim-assessment > .markdown { border: 0; padding: 0; background: transparent; }
+.problem-solution > .markdown, .problem-review > .markdown, .problem-research > .markdown { margin-top: 12px; }
+.solution-claim { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
+.solution-claim h3 { margin: 0 0 8px; color: var(--heading); font-size: 14px; }
+.solution-claim h4 { margin: 12px 0 4px; color: var(--muted); font-size: 12px; }
+.claim-assessment { margin-top: 12px; padding: 10px 12px; border-left: 3px solid var(--accent-border); background: var(--panel); }
+.claim-assessment > .markdown { margin-top: 6px; }
+.claim-unreviewed { color: var(--muted); font-size: 12px; }
+.problem-review, .problem-research, .problem-reports { margin-top: 26px; padding-top: 20px; border-top: 1px solid var(--line); }
+.problem-reports .detail-tabs { margin-top: 8px; }
+.problem-review .panel { padding: 0; border: 0; background: transparent; box-shadow: none; }
+.problem-review .panel h2 { font-size: 14px; }
+.problem-detail .summary-grid .panel { box-shadow: none; }
+.problem-detail .problem-manuscripts { margin-top: 22px; }
+.problem-detail .related-tasks { margin-top: 18px; }
+#problem-documents { scroll-margin-top: calc(var(--topbar-height) + 12px); }
 .related-tasks { margin: -6px 0 16px; padding: 10px; box-shadow: none; }
 .related-tasks[hidden] { display: none; }
 .problem-manuscripts { margin: 0 0 16px; box-shadow: none; }

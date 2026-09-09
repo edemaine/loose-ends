@@ -26,6 +26,7 @@ const state = {
   paperFiltersOpen: false,
   revealSidebarSelection: false,
   revealSidebarSecondarySelection: false,
+  keepSidebarSelectionVisible: false,
   sidebarScroll: { research: 0, papers: 0, manuscripts: 0, activity: 0 },
   sidebarSecondaryScroll: { research: 0, manuscripts: 0 },
   paperSort: "activity",
@@ -47,6 +48,7 @@ const state = {
   runLogLoads: new Map(),
   expandedRuns: new Set(),
   expandedJobScopes: new Set(),
+  expandedProblemBackgrounds: new Set(),
   dialog: null,
 };
 
@@ -573,9 +575,9 @@ function showNotice(message, error = false) {
   notice.className = `notice${error ? " error-box" : ""}`;
 }
 
-function catalogProgressNode(large = false) {
+function catalogProgressNode() {
   const progress = state.catalog.progress || {};
-  const wrapper = node("div", `catalog-progress${large ? " large" : ""}`);
+  const wrapper = node("div", "catalog-progress");
   const line = node("div", "progress-line");
   line.append(node("strong", "", progress.label || "Loading the research catalog…"));
   if (Number.isFinite(progress.current) && Number.isFinite(progress.total)) {
@@ -597,22 +599,6 @@ function renderCatalogLoading() {
   notice.hidden = false;
   notice.className = "notice loading-notice";
   notice.replaceChildren(catalogProgressNode());
-}
-
-function renderInitialLoading() {
-  sidebar.replaceChildren();
-  delete sidebar.dataset.controlsTab;
-  const side = node("div", "loading-shell");
-  side.append(node("div", "loading-pulse"), node("div", "loading-pulse short"));
-  sidebar.append(side);
-  const shell = node("section", "initial-loading panel");
-  shell.append(
-    node("div", "eyebrow", "Preparing workbench"),
-    node("h1", "", "Loading your research catalog"),
-    node("p", "", "The server is scanning papers, open problems, reviews, and manuscripts. You can leave this page open; it will update automatically."),
-    catalogProgressNode(true),
-  );
-  main.replaceChildren(shell);
 }
 
 function target(kind, path, label) {
@@ -933,11 +919,6 @@ function render() {
   if (state.catalog.error) showNotice(`Catalog update delayed: ${state.catalog.error}`, true);
   else if (state.catalog.loading) renderCatalogLoading();
   else showNotice("");
-  if (state.catalog.loading && !state.catalog.version) {
-    renderInitialLoading();
-    renderSelectionBar();
-    return;
-  }
   sidebar.classList.toggle("split-sidebar", ["research", "manuscripts"].includes(state.tab));
   if (state.tab === "research") renderResearch();
   else if (state.tab === "papers") renderPapers();
@@ -1064,7 +1045,9 @@ function renderSchedulerControl() {
     : state.settings.memoryLimitPending
       ? "Pause manually"
       : "Pause queue";
-  if (state.settings.memoryLimitPending && state.settings.memory?.error) {
+  if (state.settings.queuePauseReason === "codex_credits") {
+    workerStatus.textContent = `${counts.active} active; ${counts.queued} waiting. Codex credits exhausted. Replenish credits, then resume the queue. Active runs continue.`;
+  } else if (state.settings.memoryLimitPending && state.settings.memory?.error) {
     workerStatus.textContent = `${counts.active} active; ${counts.queued} waiting. Queue paused because memory enforcement failed.`;
   } else if (state.settings.memoryLimitPending) {
     workerStatus.textContent = `${counts.active} active; ${counts.queued} waiting. Queue paused until the lower memory limit can be applied.`;
@@ -1227,7 +1210,24 @@ function revealCentered(scrollingElement) {
   scrollingElement.scrollTop = Math.max(0, Math.min(maximum, centered));
 }
 
+function revealIfHidden(scrollingElement) {
+  const selected = scrollingElement?.querySelector(".side-card.active");
+  if (!selected) return;
+  const viewport = scrollingElement.getBoundingClientRect();
+  const card = selected.getBoundingClientRect();
+  if (card.top >= viewport.top && card.bottom <= viewport.bottom) return;
+  // A card taller than the viewport is already visible if it spans the viewport.
+  if (card.top <= viewport.top && card.bottom >= viewport.bottom) return;
+  const offset = card.top < viewport.top
+    ? card.top - viewport.top
+    : Math.min(card.top - viewport.top, card.bottom - viewport.bottom);
+  const maximum = scrollingElement.scrollHeight - scrollingElement.clientHeight;
+  scrollingElement.scrollTop = Math.max(0, Math.min(maximum, scrollingElement.scrollTop + offset));
+}
+
 function restoreSidebarScroll(tab) {
+  const keepSelectionVisible = state.keepSidebarSelectionVisible;
+  state.keepSidebarSelectionVisible = false;
   sidebar.dataset.tab = tab;
   const primarySelector = {
     research: ".problem-scroll",
@@ -1238,6 +1238,7 @@ function restoreSidebarScroll(tab) {
   if (!scrollingElement) return;
   scrollingElement.scrollTop = state.sidebarScroll[tab] || 0;
   if (state.revealSidebarSelection) revealCentered(scrollingElement);
+  else if (keepSelectionVisible) revealIfHidden(scrollingElement);
   state.revealSidebarSelection = false;
   state.sidebarScroll[tab] = scrollingElement.scrollTop;
 
@@ -1249,8 +1250,14 @@ function restoreSidebarScroll(tab) {
   if (!secondary) return;
   secondary.scrollTop = state.sidebarSecondaryScroll[tab] || 0;
   if (state.revealSidebarSecondarySelection) revealCentered(secondary);
+  else if (keepSelectionVisible) revealIfHidden(secondary);
   state.revealSidebarSecondarySelection = false;
   state.sidebarSecondaryScroll[tab] = secondary.scrollTop;
+}
+
+function syncListNavigation() {
+  state.keepSidebarSelectionVisible = true;
+  syncNavigation({ replace: true, preserveScroll: true });
 }
 
 function sidebarSearch(placeholder) {
@@ -1260,7 +1267,7 @@ function sidebarSearch(placeholder) {
   input.value = state.search;
   input.addEventListener("input", () => {
     state.search = input.value;
-    syncNavigation({ replace: true, preserveScroll: true });
+    syncListNavigation();
   });
   return input;
 }
@@ -1279,7 +1286,7 @@ function paperSortControl() {
   });
   select.addEventListener("change", () => {
     state.paperSort = reviewModel.normalizePaperSort(select.value);
-    syncNavigation({ replace: true, preserveScroll: true });
+    syncListNavigation();
   });
   wrapper.append(select);
   return wrapper;
@@ -1304,7 +1311,7 @@ function manuscriptSortControl() {
   });
   select.addEventListener("change", () => {
     state.manuscriptSort = normalizeManuscriptSort(select.value);
-    syncNavigation({ replace: true, preserveScroll: true });
+    syncListNavigation();
   });
   wrapper.append(select);
   return wrapper;
@@ -1395,9 +1402,7 @@ function filterControl(label, key, options) {
   });
   select.addEventListener("change", () => {
     state.researchFilters[key] = select.value;
-    state.selectedProblem = "";
-    state.selectedReview = "";
-    syncNavigation({ replace: true });
+    syncListNavigation();
   });
   wrapper.append(select);
   return wrapper;
@@ -1412,9 +1417,7 @@ function filterToggle(label, checked, handler, { priority = "", availability = "
   input.checked = checked;
   input.addEventListener("change", () => {
     handler(input.checked);
-    state.selectedProblem = "";
-    state.selectedReview = "";
-    syncNavigation({ replace: true });
+    syncListNavigation();
   });
   wrapper.append(input, document.createTextNode(label));
   return wrapper;
@@ -1458,9 +1461,7 @@ function renderResearchFilters() {
   footer.append(node("span", "", "Human priority and review freshness"));
   footer.append(button("Reset", () => {
     state.researchFilters = reviewModel.createDefaultFilters();
-    state.selectedProblem = "";
-    state.selectedReview = "";
-    syncNavigation({ replace: true });
+    syncListNavigation();
   }, "filter-reset"));
   controls.append(toggles, footer);
   details.append(controls);
@@ -1480,8 +1481,7 @@ function paperFilterControl(label, key, options) {
   });
   select.addEventListener("change", () => {
     state.paperFilters[key] = select.value;
-    state.selectedPaper = "";
-    syncNavigation({ replace: true });
+    syncListNavigation();
   });
   wrapper.append(select);
   return wrapper;
@@ -1507,8 +1507,7 @@ function renderPaperFilters() {
   footer.append(node("span", "", "Paper processing status"));
   footer.append(button("Reset", () => {
     state.paperFilters = reviewModel.createDefaultPaperFilters();
-    state.selectedPaper = "";
-    syncNavigation({ replace: true });
+    syncListNavigation();
   }, "filter-reset"));
   controls.append(footer);
   details.append(controls);
@@ -1528,9 +1527,7 @@ function manuscriptFilterControl(label, key, options) {
   });
   select.addEventListener("change", () => {
     state.manuscriptFilters[key] = select.value;
-    state.selectedManuscript = "";
-    state.selectedDraft = "";
-    syncNavigation({ replace: true });
+    syncListNavigation();
   });
   wrapper.append(select);
   return wrapper;
@@ -1556,9 +1553,7 @@ function renderManuscriptFilters() {
   footer.append(node("span", "", "Latest draft status and inputs"));
   footer.append(button("Reset", () => {
     state.manuscriptFilters = reviewModel.createDefaultManuscriptFilters();
-    state.selectedManuscript = "";
-    state.selectedDraft = "";
-    syncNavigation({ replace: true });
+    syncListNavigation();
   }, "filter-reset"));
   controls.append(footer);
   details.append(controls);
@@ -1659,7 +1654,12 @@ function renderResearch() {
   const requested = state.catalog.reviews.find(item => item.itemKey === state.selectedReview);
   if (requested) state.selectedProblem = requested.problemKey;
   if (!problems.some(item => item.problemKey === state.selectedProblem)) {
-    state.selectedProblem = problems[0]?.problemKey || "";
+    state.selectedProblem = reviewModel.nearestMatchingKey(
+      state.selectedProblem,
+      problems.map(item => item.problemKey),
+      reviewModel.groupProblemsByPaper(state.catalog.reviews, state.paperSort)
+        .flatMap(group => group.problems.map(item => item.problemKey)),
+    );
   }
   const listScroll = node("div", "problem-scroll");
   listScroll.append(node("div", "sidebar-heading queue-summary", reviewModel.queueSummary(reviews, state.researchFilters)));
@@ -1701,7 +1701,12 @@ function renderResearch() {
 
   const attempts = reviewModel.attemptsForProblem(reviews, state.selectedProblem);
   if (!attempts.some(item => item.itemKey === state.selectedReview)) {
-    state.selectedReview = attempts[0]?.itemKey || "";
+    state.selectedReview = reviewModel.nearestMatchingKey(
+      state.selectedReview,
+      attempts.map(item => item.itemKey),
+      reviewModel.attemptsForProblem(state.catalog.reviews, state.selectedProblem)
+        .map(item => item.itemKey),
+    );
   }
   const attemptSwitcher = node("div", "attempt-switcher");
   attemptSwitcher.append(node("div", "sidebar-heading", `Attempts${attempts.length ? ` · ${attempts.length}` : ""}`));
@@ -1793,6 +1798,22 @@ function markdown(value, missing = "No content available.", env = {}) {
     body.append(node("p", "", missing));
   } else if (markdownRenderer) {
     body.innerHTML = markdownRenderer.render(value, env);
+    if (env.artifactDirectory) {
+      const directory = env.artifactDirectory.replace(/\\/g, "/");
+      const base = `https://artifact.invalid/${directory.replace(/^\/+/, "").split("/").map(encodeURIComponent).join("/")}/`;
+      body.querySelectorAll("a[href]").forEach(link => {
+        let href = link.getAttribute("href");
+        // Linkify mistakes filenames with a real TLD (e.g. attempt.md) for websites.
+        if (env.artifactFiles?.has(link.textContent) && href === `http://${link.textContent}`) href = link.textContent;
+        if (!href || /^(?:[a-z][a-z\d+.-]*:|\/|#)/i.test(href)) return;
+        try {
+          const resolved = new URL(href, base);
+          let path = decodeURIComponent(resolved.pathname);
+          if (/^[a-z]:/i.test(directory)) path = path.slice(1);
+          link.href = artifactViewUrl(path) + resolved.hash;
+        } catch { /* Leave malformed links as written. */ }
+      });
+    }
   } else {
     const pre = node("pre", "", value);
     body.append(pre);
@@ -1887,35 +1908,147 @@ function sourcePaperForProblem(item) {
   );
 }
 
-function renderReviewDetail(item) {
-  const shell = node("div", "main-inner");
-  const selectedSummary = state.catalog.reviews.find(value => value.itemKey === item.itemKey);
-  if (selectedSummary && item !== selectedSummary) {
-    item = { ...selectedSummary, ...item };
-  }
-  const hero = node("section", "hero");
-  const copy = node("div");
-  copy.append(node("div", "eyebrow", `${item.paperTitle} · ${item.problemId}`));
-  copy.append(node("h1", "", item.problemTitle));
-  copy.append(node("p", "", item.paperAuthors?.join(", ") || "Authors unavailable"));
+function problemDetailBadges(item, dimensions) {
   const badges = node("div", "badges");
-  badges.append(badge(item.explicitness, "neutral"));
-  reviewModel.detailBadges(item).forEach(value => {
+  reviewModel.detailBadges(item).filter(value => dimensions.includes(value.dimension)).forEach(value => {
     let className = value.value;
     if (value.dimension === "priority") className = value.value === "high" ? "error" : value.value === "medium" ? "warn" : "neutral";
     else if (value.dimension === "warning") className = "error";
     else if (["coverage", "importance", "confidence", "literature"].includes(value.dimension)) className = "neutral";
     badges.append(node("span", `badge ${className || "neutral"}`, value.label));
   });
-  copy.append(badges);
+  return badges;
+}
+
+function claimAssessment(assessment, env = {}) {
+  const section = node("div", "claim-assessment");
+  const status = assessment.assessment || "unknown";
+  section.append(
+    badge(`Reviewer: ${reviewModel.humanize(status)}`, status === "supported" ? "succeeded" : status === "incorrect" ? "error" : "warn"),
+    markdown(assessment.explanation, "No explanation available.", env),
+  );
+  return section;
+}
+
+function problemDocumentButton(label, tab) {
+  return button(label, () => {
+    state.detailTab = tab;
+    syncNavigation({ preserveScroll: true });
+    requestAnimationFrame(() => {
+      const documents = document.getElementById("problem-documents");
+      documents?.scrollIntoView({ block: "start" });
+      documents?.focus({ preventScroll: true });
+      rememberCurrentScroll();
+    });
+  }, "button");
+}
+
+function problemResearchSummary(item, kind) {
+  const literature = kind === "literature";
+  const card = reviewModel.summaryCards(item).find(value => value.key === kind);
+  const section = node("section", `section problem-research problem-${kind}`);
+  const heading = node("div", "section-title");
+  const label = node("div", "problem-section-label");
+  label.append(node("h2", "", literature ? "Literature" : "Triage"));
+  const tags = node("div", "badges");
+  if (literature) {
+    if (item.literatureStatus) tags.append(badge(reviewModel.humanize(item.literatureStatus), "neutral"));
+    if (item.literatureConfidence) tags.append(badge(`${item.literatureConfidence} confidence`, "neutral"));
+  } else {
+    if (item.triageClassification) tags.append(badge(reviewModel.humanize(item.triageClassification), "neutral"));
+    if ((card || item.triageClassification) && !item.triageCurrent) tags.append(badge("stale", "warn"));
+  }
+  label.append(tags);
+  const actions = node("div", "actions");
+  if (reviewModel.detailTabs(item).some(([key]) => key === kind)) {
+    actions.append(problemDocumentButton(literature ? "Read full literature review" : "Read full triage", kind));
+  }
+  const actionLabel = literature
+    ? item.literatureStatus ? "Search literature again" : "Search literature"
+    : item.triageCurrent ? "Triage again" : "Triage";
+  addAction(actions, actionLabel, kind, [problemTarget(item)]);
+  heading.append(label, actions);
+  section.append(heading, markdown(card?.value, literature ? "No literature summary available." : "No triage summary available."));
+  return section;
+}
+
+function renderReviewDetail(item) {
+  const shell = node("div", "main-inner problem-detail");
+  const selectedSummary = state.catalog.reviews.find(value => value.itemKey === item.itemKey);
+  if (selectedSummary && item !== selectedSummary) {
+    item = { ...selectedSummary, ...item };
+  }
+  const hero = node("section", "hero");
+  const copy = node("div");
+  const paperTitle = reviewModel.paperTitleWithYear(item.paperTitle, item.paperPublished);
+  copy.append(node("div", "eyebrow", `${paperTitle} · ${item.problemId}`));
+  copy.append(node("h1", "", item.problemTitle));
+  copy.append(node("p", "", item.paperAuthors?.join(", ") || "Authors unavailable"));
   hero.append(copy);
   shell.append(hero);
+
+  const problem = problemTarget(item);
+  const attempt = item.attemptDirectory ? attemptTarget(item) : null;
+  const sourcePaper = sourcePaperForProblem(item);
+  const statement = node("section", "problem-statement panel");
+  const statementHeading = node("div", "section-title");
+  const statementLabel = node("div", "problem-section-label");
+  statementLabel.append(node("h2", "", "Problem"), badge(item.explicitness, "neutral"));
+  statementHeading.append(statementLabel);
+  if (sourcePaper) statementHeading.append(routeLink(
+    { tab: "papers", paper: sourcePaper }, "View source paper", "button",
+  ));
+  // Parse the complete entry first so split sections share reference definitions.
+  const statementEnv = {};
+  if (markdownRenderer && item.problemStatement) markdownRenderer.parse(item.problemStatement, statementEnv);
+  statement.append(statementHeading, markdown(
+    item.problemStatementShort ?? item.problemStatement,
+    state.detailCache.has(item.itemKey) ? "No problem statement available." : "Loading problem statement…",
+    statementEnv,
+  ));
+  if (item.problemSource) {
+    const source = node("div", "problem-source");
+    source.append(node("strong", "", "Source"), markdown(item.problemSource, "", statementEnv));
+    statement.append(source);
+  }
+  if (item.problemBackground) {
+    const background = node("details", "problem-background");
+    background.open = state.expandedProblemBackgrounds.has(item.problemKey);
+    background.append(node("summary", "", "Context and background"), markdown(item.problemBackground, "", statementEnv));
+    background.addEventListener("toggle", () => {
+      if (!background.isConnected) return;
+      if (background.open) state.expandedProblemBackgrounds.add(item.problemKey);
+      else state.expandedProblemBackgrounds.delete(item.problemKey);
+    });
+    statement.append(background);
+  }
+  shell.append(statement);
+  shell.append(problemResearchSummary(item, "literature"));
 
   const attempts = reviewModel.attemptsForProblem(
     state.catalog.reviews,
     item.problemKey,
   );
   const latestAttempt = attempts[0];
+  const attemptHeading = node("div", "problem-attempt-heading");
+  const attemptLabel = node("div", "problem-section-label");
+  attemptLabel.append(node("span", "", "Solution"));
+  if (attempt) {
+    attemptLabel.append(node("span", "problem-attempt-label",
+      `${item.attemptName}${latestAttempt?.itemKey === item.itemKey ? " · latest" : ""}`,
+    ));
+  } else attemptLabel.append(node("span", "muted", "No attempts yet"));
+  const solutionActions = node("div", "actions");
+  addAction(solutionActions, attempt ? "Solve again" : "Solve", "solve", [problem], true);
+  if (attempt) {
+    addAction(solutionActions, item.attemptStatus === "reviewed" ? "Review again" : "Review", "review", [attempt]);
+    addAction(solutionActions, "Write this result", "write", [attempt]);
+  }
+  attemptHeading.append(attemptLabel, relatedTaskHost({
+    paperPath: item.paperDirectory,
+    problemPath: `${item.paperDirectory}/${item.problemId}`,
+  }), solutionActions);
+  shell.append(attemptHeading);
   if (latestAttempt && latestAttempt.itemKey !== item.itemKey) {
     shell.append(olderVersionWarning(
       "attempt",
@@ -1931,84 +2064,97 @@ function renderReviewDetail(item) {
     ));
   }
 
-  if (item.attemptDisplayPath) shell.append(node("code", "attempt-path", item.attemptDisplayPath));
-
-  const actions = node("div", "actions");
-  const problem = problemTarget(item);
-  const attempt = item.attemptDirectory ? attemptTarget(item) : null;
-  const sourcePaper = sourcePaperForProblem(item);
-  if (sourcePaper) {
-    actions.append(routeLink(
-      { tab: "papers", paper: sourcePaper },
-      "View source paper",
-      "button",
-    ));
-  }
-  addAction(actions, item.triageCurrent ? "Triage again" : "Triage", "triage", [problem]);
-  addAction(actions, item.literatureStatus ? "Search literature again" : "Search literature", "literature", [problem]);
-  addAction(actions, attempt ? "Solve again" : "Solve", "solve", [problem], true);
   if (attempt) {
-    addAction(actions, item.attemptStatus === "reviewed" ? "Review again" : "Review", "review", [attempt]);
-    addAction(actions, "Write this result", "write", [attempt]);
+    const directory = item.attemptDirectory.replace(/\\/g, "/");
+    const claimEnv = {
+      artifactDirectory: directory,
+      artifactFiles: new Set((item.files || []).map(file =>
+        (typeof file === "string" ? file : file.path).replace(/\\/g, "/"),
+      ).filter(path => path.startsWith(`${directory}/`)).map(path => path.slice(directory.length + 1))),
+    };
+    const solution = node("section", "section problem-solution");
+    const heading = node("div", "section-title");
+    const label = node("div", "problem-section-label");
+    label.append(node("h2", "", "Solution claims"), problemDetailBadges(item, ["status", "claim", "warning"]));
+    heading.append(label, problemDocumentButton("Read full solution", "attempt"));
+    solution.append(heading);
+    solution.append(markdown(item.solverSummary, "No solver summary available."));
+    const claims = Array.isArray(item.checkableClaims) ? item.checkableClaims : [];
+    claims.forEach(claim => {
+      const article = node("article", "solution-claim");
+      article.append(node("h3", "", `${claim.id} · ${reviewModel.humanize(claim.type || "claim")}`));
+      article.append(markdown(claim.statement, "No claim statement available.", claimEnv));
+      if (claim.support) article.append(node("h4", "", "Supporting argument"), markdown(claim.support, "", claimEnv));
+      if (claim.remaining_gap) article.append(node("h4", "", "Solver’s remaining gap"), markdown(claim.remaining_gap, "", claimEnv));
+      const assessments = (item.claimReviews || []).filter(value => value.claim_id === claim.id);
+      assessments.forEach(value => article.append(claimAssessment(value, claimEnv)));
+      if (!assessments.length) article.append(node("p", "claim-unreviewed", "No assessment for this claim."));
+      solution.append(article);
+    });
+    if (!claims.length) solution.append(node("p", "claim-unreviewed", state.detailCache.has(item.itemKey)
+      ? "No structured claims recorded. See the full solution for details."
+      : "Loading claims…"));
+    shell.append(solution);
   }
-  shell.append(actions);
 
+  if (item.attemptStatus === "reviewed") {
+    const review = node("section", "section problem-review");
+    const heading = node("div", "section-title");
+    const label = node("div", "problem-section-label");
+    label.append(node("h2", "", "Review"), problemDetailBadges(item, ["priority", "correctness", "coverage", "importance", "confidence"]));
+    heading.append(label, problemDocumentButton("Read full review", "critique"));
+    review.append(heading);
+    review.append(markdown(item.criticSummary, "No review summary available."));
+    // Keep legacy or unmatched assessments visible, without inventing claim text.
+    const claimIds = new Set((item.checkableClaims || []).map(claim => claim.id));
+    (item.claimReviews || []).filter(value => !claimIds.has(value.claim_id)).forEach(value => {
+      const unmatched = node("div", "solution-claim");
+      unmatched.append(node("h3", "", `${value.claim_id || "Unknown claim"} · statement unavailable`), claimAssessment(value));
+      review.append(unmatched);
+    });
+    appendStringList(review, "Blocking gaps", item.blockingGaps);
+    appendStringList(review, "Recommended next steps", item.recommendedNextSteps);
+    appendStringList(review, "Warnings", item.warnings);
+    shell.append(review);
+  }
+
+  shell.append(problemResearchSummary(item, "triage"));
+
+  const manuscriptPanel = problemManuscriptsPanel(item);
+  if (manuscriptPanel) shell.append(manuscriptPanel);
   shell.append(relatedTasksPanel({
     paperPath: item.paperDirectory,
     problemPath: `${item.paperDirectory}/${item.problemId}`,
   }));
-  const manuscriptPanel = problemManuscriptsPanel(item);
-  if (manuscriptPanel) shell.append(manuscriptPanel);
-
-  const problemStatement = node("section", "problem-statement panel");
-  problemStatement.append(
-    node("h2", "", "Open problem statement"),
-    markdown(item.problemStatement, "Loading problem statement…"),
-  );
-  shell.append(problemStatement);
-
-  const summaries = node("div", "summary-grid");
-  reviewModel.summaryCards(item).forEach(card => {
-    summaries.append(summaryPanel(card.title, card.value, card.missing));
-  });
-  if (summaries.children.length) shell.append(summaries);
-
-  if (item.claimReviews?.length) {
-    const section = node("section", "section panel");
-    section.append(node("h2", "", "Claim assessments"));
-    const list = node("ul", "claim-list");
-    item.claimReviews.forEach(claim => {
-      const row = node("li");
-      row.append(
-        node("strong", "", `${claim.claim_id || "?"} — ${claim.assessment || "unknown"}: `),
-        document.createTextNode(claim.explanation || ""),
-      );
-      list.append(row);
-    });
-    section.append(list);
-    shell.append(section);
-  }
-  appendStringList(shell, "Blocking gaps", item.blockingGaps);
-  appendStringList(shell, "Recommended next steps", item.recommendedNextSteps);
-  appendStringList(shell, "Warnings", item.warnings);
 
   const tabs = reviewModel.detailTabs(item);
   if (!tabs.some(([key]) => key === state.detailTab)) state.detailTab = tabs[0][0];
+  const reports = node("section", "section problem-reports");
+  reports.id = "problem-documents";
+  reports.tabIndex = -1;
+  reports.setAttribute("aria-labelledby", "problem-reports-heading");
+  const reportsHeading = node("h2", "", "Full reports");
+  reportsHeading.id = "problem-reports-heading";
   const tabbar = node("div", "detail-tabs");
+  tabbar.setAttribute("aria-label", "Full reports");
   tabs.forEach(([key, label]) => {
     tabbar.append(button(label, () => {
       state.detailTab = key;
       syncNavigation();
     }, `detail-tab${state.detailTab === key ? " active" : ""}`));
   });
-  shell.append(tabbar);
+  reports.append(reportsHeading, tabbar);
   const section = node("section", "section");
   if (state.detailTab === "attempt") section.append(markdown(item.solverAttempt, "Loading solver attempt…"));
-  else if (state.detailTab === "critique") section.append(markdown(item.critique, "No critique is installed."));
+  else if (state.detailTab === "critique") section.append(markdown(item.critique, "No review is installed."));
   else if (state.detailTab === "triage") section.append(markdown(item.triageReport, "Loading triage report…"));
   else if (state.detailTab === "literature") section.append(markdown(item.literatureReport, "No literature report is installed."));
-  else section.append(fileGrid(item.files || []));
-  shell.append(section);
+  else {
+    if (item.attemptDisplayPath) section.append(node("code", "attempt-path", item.attemptDisplayPath));
+    section.append(fileGrid(item.files || []));
+  }
+  reports.append(section);
+  shell.append(reports);
   main.replaceChildren(shell);
 }
 
@@ -2076,6 +2222,14 @@ function renderPapers() {
     state.paperSort,
     state.catalog.reviews,
   );
+  if (!papers.some(paper => paper.key === state.selectedPaper)) {
+    state.selectedPaper = reviewModel.nearestMatchingKey(
+      state.selectedPaper,
+      papers.map(paper => paper.key),
+      reviewModel.sortPapers(state.catalog.papers, state.paperSort, state.catalog.reviews)
+        .map(paper => paper.key),
+    );
+  }
   const list = node("div", "side-list");
   papers.forEach(paper => appendSideCard(list, {
     title: reviewModel.paperTitleWithYear(
@@ -2092,7 +2246,6 @@ function renderPapers() {
     onClick: () => { state.selectedPaper = paper.key; syncNavigation(); },
   }));
   sidebar.append(node("div", "sidebar-heading", `${papers.length} papers`), list);
-  if (!state.selectedPaper || !papers.some(paper => paper.key === state.selectedPaper)) state.selectedPaper = papers[0]?.key || "";
   const paper = state.catalog.papers.find(value => value.key === state.selectedPaper);
   if (!paper) {
     main.replaceChildren(document.getElementById("empty-template").content.cloneNode(true));
@@ -2682,19 +2835,14 @@ function renderManuscripts() {
     );
     return controls;
   });
-  const manuscripts = filteredManuscripts()
-    .sort((left, right) => {
-      const alphabetical = String(left.latest.title).localeCompare(
-        String(right.latest.title),
-        undefined,
-        { sensitivity: "base", numeric: true },
-      ) || left.name.localeCompare(right.name, undefined, { sensitivity: "base", numeric: true });
-      if (state.manuscriptSort === "alphabetical") return alphabetical;
-      return (Number(right.latest.createdTimestamp) || 0) -
-        (Number(left.latest.createdTimestamp) || 0) || alphabetical;
-    });
-  if (!state.selectedManuscript || !manuscripts.some(value => value.key === state.selectedManuscript)) {
-    state.selectedManuscript = manuscripts[0]?.key || "";
+  const manuscripts = reviewModel.sortManuscripts(filteredManuscripts(), state.manuscriptSort);
+  if (!manuscripts.some(value => value.key === state.selectedManuscript)) {
+    state.selectedManuscript = reviewModel.nearestMatchingKey(
+      state.selectedManuscript,
+      manuscripts.map(value => value.key),
+      reviewModel.sortManuscripts(state.catalog.manuscripts, state.manuscriptSort)
+        .map(value => value.key),
+    );
   }
   const manuscriptScroll = node("div", "manuscript-scroll");
   const list = node("div", "side-list");
@@ -2720,6 +2868,7 @@ function renderManuscripts() {
   sidebar.append(manuscriptScroll);
   const manuscript = state.catalog.manuscripts.find(value => value.key === state.selectedManuscript);
   if (!manuscript) {
+    state.selectedDraft = "";
     main.replaceChildren(document.getElementById("empty-template").content.cloneNode(true));
     return;
   }
@@ -3047,6 +3196,11 @@ function renderActivity({ preserveDetail = false } = {}) {
   });
   const query = state.search.trim().toLowerCase();
   const jobs = state.jobs.filter(job => !query || `${job.title} ${job.action} ${job.status}`.toLowerCase().includes(query));
+  state.selectedJob = reviewModel.nearestMatchingKey(
+    state.selectedJob,
+    jobs.map(job => job.id),
+    state.jobs.map(job => job.id),
+  );
   const list = node("div", "side-list");
   jobs.forEach(job => appendSideCard(list, {
     title: taskSidebarTitle(job),
@@ -3059,7 +3213,6 @@ function renderActivity({ preserveDetail = false } = {}) {
     },
   }));
   sidebar.append(node("div", "sidebar-heading", `${jobs.length} tasks`), list);
-  if (!state.selectedJob || !jobs.some(job => job.id === state.selectedJob)) state.selectedJob = jobs[0]?.id || "";
   if (!state.selectedJob) {
     main.replaceChildren(document.getElementById("empty-template").content.cloneNode(true));
     return;
@@ -3163,6 +3316,9 @@ function runAttentionPanel(job) {
     node("h2", "", "Needs attention"),
     badge(`${runs.length} run${runs.length === 1 ? "" : "s"}`, "failed"),
   );
+  if (runs.some(run => ["failed", "partial"].includes(run.status))) {
+    heading.append(button("Retry all failed/partial", event => retryJob(job, event.currentTarget), "button primary"));
+  }
   panel.append(heading);
   const list = node("div", "run-attention-list");
   runs.forEach(run => {
@@ -3443,6 +3599,24 @@ function refreshVisibleRunElapsed(job) {
   });
 }
 
+async function retryJob(job, control) {
+  const runs = latestJobRuns(job).filter(run => ["failed", "partial"].includes(run.status));
+  const partial = runs.some(run => run.status === "partial");
+  const message = `Create a new task with ${runs.length} failed/partial run${runs.length === 1 ? "" : "s"}, using the same commands and settings?`
+    + (partial ? " Partial runs restart their commands and may repeat completed work." : "");
+  if (!window.confirm(message)) return;
+  control.disabled = true;
+  try {
+    const retried = await api(`/api/jobs/${job.id}/retry`, { method: "POST", body: {} });
+    state.selectedJob = retried.id;
+    await refreshJobs();
+  } catch (error) {
+    showNotice(error.message, true);
+  } finally {
+    control.disabled = false;
+  }
+}
+
 async function mutateRun(runId, action) {
   const message = action === "retry"
     ? "Queue a retry of this exact run?"
@@ -3706,6 +3880,7 @@ function relatedTasksPanel({
 function syncRelatedTasks() {
   if (!["research", "papers", "manuscripts"].includes(state.tab)) return;
   sidebar.querySelectorAll(".sidebar-related-tasks").forEach(fillRelatedTaskHost);
+  main.querySelectorAll(".sidebar-related-tasks").forEach(fillRelatedTaskHost);
   main.querySelectorAll(".related-tasks").forEach(fillRelatedTasksPanel);
 }
 
@@ -3981,7 +4156,7 @@ function taskSidebarMeta(job) {
   return pieces.join(" · ");
 }
 
-function field(name, label, { type = "text", value = "", help = "", full = false, options = [], min, max } = {}) {
+function field(name, label, { type = "text", value = "", placeholder = "", help = "", full = false, options = [], min, max } = {}) {
   const wrapper = node("label", `field${full ? " full" : ""}`);
   wrapper.append(node("span", "", label));
   let input;
@@ -4001,6 +4176,7 @@ function field(name, label, { type = "text", value = "", help = "", full = false
   }
   input.name = name;
   input.value = value ?? "";
+  if (placeholder) input.placeholder = placeholder;
   wrapper.append(input);
   if (help) wrapper.append(node("small", "", help));
   return wrapper;
@@ -4385,6 +4561,10 @@ function renderTaskConfiguration(errorMessage = "") {
       options: [["", "Inherit"], ["live", "Live"], ["indexed", "Indexed"], ["disabled", "Disabled"]],
     }));
   }
+  advancedGrid.append(field("codexHome", "CODEX_HOME", {
+    value: options.codexHome || "", placeholder: "~/.codex", full: true,
+    help: "Leave blank to inherit the default. ~ expands to the server's HOME directory.",
+  }));
   modelSettings.append(advancedGrid);
   grid.append(modelSettings);
   dialogBody.append(grid);
@@ -4489,6 +4669,13 @@ function renderTaskConfirmation() {
   const intro = node("p", "", `This will queue ${scope} with a ${priorityMultiplier(plan.priorityLevel)} scheduling weight. Nothing has started yet.`);
   dialogBody.append(intro);
   if (plan.warnings.length) plan.warnings.forEach(value => dialogBody.append(node("div", "warning", value)));
+  if (plan.options?.codexHome) {
+    const block = node("section", "confirm-block");
+    block.append(node("h3", "", "Environment"));
+    block.append(node("p", "", "Applies to all dry-run previews and runs in this task."));
+    block.append(node("pre", "command", `CODEX_HOME=${plan.options.codexHome}`));
+    dialogBody.append(block);
+  }
   if (Object.keys(plan.prompts).length) {
     const block = node("section", "confirm-block");
     block.append(node("h3", "", "Prompt messages"));
@@ -4621,7 +4808,7 @@ function connectEvents() {
         if (!state.catalog.version) {
           state.catalog.loading = true;
           state.catalog.progress = value;
-          render();
+          renderCatalogLoading();
         }
       } else if (["catalog.changed", "catalog.error"].includes(value.type)) {
         refreshCatalog().catch(error => showNotice(error.message, true));
