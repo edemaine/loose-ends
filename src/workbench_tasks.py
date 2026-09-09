@@ -108,8 +108,11 @@ def _limit_preview_output(output: str) -> tuple[str, bool]:
     )
 
 
-def _dry_run_preview(unit: dict) -> dict:
+def _dry_run_preview(unit: dict, options: dict) -> dict:
     argv = [*unit["argv"], "--dry-run"]
+    environment = os.environ.copy()
+    if options.get("codexHome"):
+        environment["CODEX_HOME"] = options["codexHome"]
     preview = {
         "command": command_display(argv),
         "status": "ok",
@@ -121,6 +124,7 @@ def _dry_run_preview(unit: dict) -> dict:
         completed = subprocess.run(
             argv,
             cwd=unit["cwd"],
+            env=environment,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -174,7 +178,7 @@ def populate_dry_run_previews(plan: dict) -> dict:
         max_workers=min(MAX_DRY_RUN_WORKERS, len(units))
     ) as executor:
         futures = {
-            executor.submit(_dry_run_preview, unit): index
+            executor.submit(_dry_run_preview, unit, plan.get("options", {})): index
             for index, unit in enumerate(units)
         }
         for future in as_completed(futures):
@@ -435,6 +439,17 @@ def build_plan(
     options = request.get("options", {})
     if not isinstance(options, dict):
         raise PlanError("task options must be an object")
+    options = dict(options)
+    codex_home = _text(options, "codexHome")
+    if codex_home:
+        if "\0" in codex_home:
+            raise PlanError("codexHome must not contain null characters")
+        if codex_home == "~" or codex_home.startswith(("~/", "~\\")):
+            home = os.environ.get("HOME") or str(Path.home())
+            codex_home = home + codex_home[1:]
+        options["codexHome"] = str(Path(codex_home).expanduser().resolve())
+    else:
+        options.pop("codexHome", None)
     allowed_roots = list(allowed_roots)
     configured_paper_roots = list(
         allowed_roots if paper_roots is None else paper_roots

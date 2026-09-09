@@ -160,6 +160,28 @@ class ProblemDetailTests(unittest.TestCase):
 
 
 class WorkbenchPlanningTests(unittest.TestCase):
+    def test_codex_home_expands_home_and_preserves_request(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = make_paper(root)
+            for value in ("~", "~/.codex custom", "", "   "):
+                with self.subTest(value=value), patch.dict(os.environ, {"HOME": str(root)}):
+                    request = {
+                        "action": "analyze",
+                        "targets": [{"kind": "paper", "path": str(paper)}],
+                        "options": {"codexHome": value},
+                    }
+                    plan = build_plan(
+                        request, project_root=PROJECT_ROOT, allowed_roots=[root],
+                        manuscripts=root / "manuscripts", catalog_version=1,
+                    )
+                    if value.strip():
+                        expected = root if value == "~" else root / ".codex custom"
+                        self.assertEqual(plan["options"]["codexHome"], str(expected.resolve()))
+                    else:
+                        self.assertNotIn("codexHome", plan["options"])
+                    self.assertEqual(request["options"]["codexHome"], value)
+
     def test_write_dialog_job_flow(self):
         result = subprocess.run(
             ["node", "--test", "test_workbench_tasks.cjs"],
@@ -1644,10 +1666,12 @@ class WorkbenchPlanningTests(unittest.TestCase):
             stderr="",
         )
         plan = fake_plan([sys.executable, "tool.py", "OP-001"])
+        plan["options"] = {"codexHome": str(PROJECT_ROOT / "custom home")}
 
         returned = populate_dry_run_previews(plan)
 
         self.assertIs(returned, plan)
+        self.assertEqual(run.call_args.kwargs["env"]["CODEX_HOME"], plan["options"]["codexHome"])
         self.assertEqual(
             run.call_args.args[0],
             [sys.executable, "tool.py", "OP-001", "--dry-run"],
@@ -2389,6 +2413,28 @@ class WorkbenchStoreTests(unittest.TestCase):
                 Path(saved["log_path"]).read_text(encoding="utf-8"),
             )
             self.assertEqual(store.get_job(job["id"])["status"], "succeeded")
+
+    def test_worker_codex_home_is_isolated_and_preserved_on_retry(self):
+        with TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            store = WorkbenchStore(state / "workbench.sqlite3", state)
+            for custom in (None, str(state / "custom home")):
+                with self.subTest(custom=custom), patch.dict(os.environ, {"CODEX_HOME": "inherited"}):
+                    plan = fake_plan([
+                        sys.executable, "-c",
+                        "import os; print('codex home: ' + os.environ['CODEX_HOME'])",
+                    ])
+                    plan["options"] = {"codexHome": custom} if custom else {}
+                    job = store.create_job({"action": "solve"}, plan)
+                    run = job["runs"][0]
+                    store.mark_starting(run["id"])
+                    self.assertEqual(workbench_worker.run_worker(store.database, run["id"]), 0)
+                    log = Path(run["log_path"]).read_text(encoding="utf-8")
+                    self.assertIn("codex home: " + (custom or "inherited"), log)
+                    self.assertEqual(os.environ["CODEX_HOME"], "inherited")
+                    store.update_run(run["id"], status="failed")
+                    retry = store.retry_job(job["id"])
+                    self.assertEqual(retry["plan"]["options"], plan["options"])
 
     def test_reported_artifact_makes_failed_run_partial_and_not_retryable(self):
         with TemporaryDirectory() as temporary:

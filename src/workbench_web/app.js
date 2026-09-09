@@ -3990,7 +3990,7 @@ function taskSidebarMeta(job) {
   return pieces.join(" · ");
 }
 
-function field(name, label, { type = "text", value = "", help = "", full = false, options = [] } = {}) {
+function field(name, label, { type = "text", value = "", placeholder = "", help = "", full = false, options = [] } = {}) {
   const wrapper = node("label", `field${full ? " full" : ""}`);
   wrapper.append(node("span", "", label));
   let input;
@@ -4008,6 +4008,7 @@ function field(name, label, { type = "text", value = "", help = "", full = false
   }
   input.name = name;
   input.value = value ?? "";
+  if (placeholder) input.placeholder = placeholder;
   wrapper.append(input);
   if (help) wrapper.append(node("small", "", help));
   return wrapper;
@@ -4374,6 +4375,10 @@ function renderTaskConfiguration(errorMessage = "") {
       options: [["", "Inherit"], ["live", "Live"], ["indexed", "Indexed"], ["disabled", "Disabled"]],
     }));
   }
+  advancedGrid.append(field("codexHome", "CODEX_HOME", {
+    value: options.codexHome || "", placeholder: "~/.codex", full: true,
+    help: "Leave blank to inherit the default. ~ expands to the server's HOME directory.",
+  }));
   modelSettings.append(advancedGrid);
   grid.append(modelSettings);
   dialogBody.append(grid);
@@ -4478,6 +4483,13 @@ function renderTaskConfirmation() {
   const intro = node("p", "", `This will queue ${scope} with a ${priorityMultiplier(plan.priorityLevel)} scheduling weight. Nothing has started yet.`);
   dialogBody.append(intro);
   if (plan.warnings.length) plan.warnings.forEach(value => dialogBody.append(node("div", "warning", value)));
+  if (plan.options?.codexHome) {
+    const block = node("section", "confirm-block");
+    block.append(node("h3", "", "Environment"));
+    block.append(node("p", "", "Applies to all dry-run previews and runs in this task."));
+    block.append(node("pre", "command", `CODEX_HOME=${plan.options.codexHome}`));
+    dialogBody.append(block);
+  }
   if (Object.keys(plan.prompts).length) {
     const block = node("section", "confirm-block");
     block.append(node("h3", "", "Prompt messages"));

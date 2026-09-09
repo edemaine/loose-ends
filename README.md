@@ -150,6 +150,14 @@ percentage of installed RAM, a fixed number of GB, or infinity. That allocation
 is divided by the maximum worker count to produce an independent limit for each
 worker. The default is 50% of installed RAM.
 
+To use multiple Codex accounts, set **CODEX_HOME** at the bottom of a task's
+**Model and web-search settings** to the directory authenticated for the desired
+account, such as `~/.codex_personal`. A leading `~` expands to the server's
+`$HOME`; leaving the field blank preserves the inherited default. The setting
+applies to that task, including retries. See
+[T3 Code's multiple-account guide](https://github.com/pingdotgg/t3code/blob/main/docs/user/providers-codex.md#use-multiple-accounts)
+for account setup instructions.
+
 ## Download arXiv papers
 
 `src/download_arxiv.py` downloads both the rendered PDF and the authors' submitted

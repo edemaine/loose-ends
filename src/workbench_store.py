@@ -846,6 +846,7 @@ class WorkbenchStore:
         plan = {
             "action": original["action"],
             "title": f"Retry: {original['title']}",
+            "options": original["plan"].get("options", {}),
             "priorityLevel": original["priority_level"],
             "targets": targets,
             "units": units,

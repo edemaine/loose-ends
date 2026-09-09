@@ -157,6 +157,9 @@ def run_worker(database: Path, run_id: str) -> int:
         worker_pid=os.getpid(),
     )
     environment = os.environ.copy()
+    options = store.get_job(run["job_id"])["plan"].get("options", {})
+    if options.get("codexHome"):
+        environment["CODEX_HOME"] = options["codexHome"]
     environment["PYTHONUNBUFFERED"] = "1"
     environment[codex_cli.WORKBENCH_DATABASE_ENV] = str(store.database)
     artifact_log = log_path.parent / "artifacts.txt"
