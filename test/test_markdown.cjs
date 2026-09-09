@@ -18,6 +18,16 @@ test("converts LaTeX prose, including nested formatting and accents", () => {
     '<p>A <em>concise <strong>nested</strong></em> abstract by Gourvès, Erdős, François, and a naïve coauthor. æ\u00a0ø “quoted”.</p>\n');
 });
 
+test("converts LaTeX dashes only in abstract prose", () => {
+  const source = String.raw`Well-known---see pages 1--3 and \emph{element--triple}.`;
+  assert.equal(abstract(source), '<p>Well-known—see pages 1–3 and <em>element–triple</em>.</p>\n');
+  assert.equal(renderer.render("A---B--C-D"), '<p>A---B--C-D</p>\n');
+  for (const literal of [String.raw`$a---b--c$`, "`--- --`", "~~~\n--- --\n~~~"]) {
+    assert.equal(abstract(literal), renderer.render(literal));
+  }
+  assert.match(abstract('[A--B](https://example.org/a---b--c)'), /href="https:\/\/example.org\/a---b--c"/);
+});
+
 test("leaves math contents identical to the ordinary renderer", () => {
   for (const math of [
     String.raw`\(\#\mathrm P\)`, String.raw`$\textbf{A}~\text{\%\&\_\#} + \hat{x}$`,
