@@ -26,6 +26,7 @@ const state = {
   paperFiltersOpen: false,
   revealSidebarSelection: false,
   revealSidebarSecondarySelection: false,
+  keepSidebarSelectionVisible: false,
   sidebarScroll: { research: 0, papers: 0, manuscripts: 0, activity: 0 },
   sidebarSecondaryScroll: { research: 0, manuscripts: 0 },
   paperSort: "activity",
@@ -1209,7 +1210,24 @@ function revealCentered(scrollingElement) {
   scrollingElement.scrollTop = Math.max(0, Math.min(maximum, centered));
 }
 
+function revealIfHidden(scrollingElement) {
+  const selected = scrollingElement?.querySelector(".side-card.active");
+  if (!selected) return;
+  const viewport = scrollingElement.getBoundingClientRect();
+  const card = selected.getBoundingClientRect();
+  if (card.top >= viewport.top && card.bottom <= viewport.bottom) return;
+  // A card taller than the viewport is already visible if it spans the viewport.
+  if (card.top <= viewport.top && card.bottom >= viewport.bottom) return;
+  const offset = card.top < viewport.top
+    ? card.top - viewport.top
+    : Math.min(card.top - viewport.top, card.bottom - viewport.bottom);
+  const maximum = scrollingElement.scrollHeight - scrollingElement.clientHeight;
+  scrollingElement.scrollTop = Math.max(0, Math.min(maximum, scrollingElement.scrollTop + offset));
+}
+
 function restoreSidebarScroll(tab) {
+  const keepSelectionVisible = state.keepSidebarSelectionVisible;
+  state.keepSidebarSelectionVisible = false;
   sidebar.dataset.tab = tab;
   const primarySelector = {
     research: ".problem-scroll",
@@ -1220,6 +1238,7 @@ function restoreSidebarScroll(tab) {
   if (!scrollingElement) return;
   scrollingElement.scrollTop = state.sidebarScroll[tab] || 0;
   if (state.revealSidebarSelection) revealCentered(scrollingElement);
+  else if (keepSelectionVisible) revealIfHidden(scrollingElement);
   state.revealSidebarSelection = false;
   state.sidebarScroll[tab] = scrollingElement.scrollTop;
 
@@ -1231,8 +1250,14 @@ function restoreSidebarScroll(tab) {
   if (!secondary) return;
   secondary.scrollTop = state.sidebarSecondaryScroll[tab] || 0;
   if (state.revealSidebarSecondarySelection) revealCentered(secondary);
+  else if (keepSelectionVisible) revealIfHidden(secondary);
   state.revealSidebarSecondarySelection = false;
   state.sidebarSecondaryScroll[tab] = secondary.scrollTop;
+}
+
+function syncListNavigation() {
+  state.keepSidebarSelectionVisible = true;
+  syncNavigation({ replace: true, preserveScroll: true });
 }
 
 function sidebarSearch(placeholder) {
@@ -1242,7 +1267,7 @@ function sidebarSearch(placeholder) {
   input.value = state.search;
   input.addEventListener("input", () => {
     state.search = input.value;
-    syncNavigation({ replace: true, preserveScroll: true });
+    syncListNavigation();
   });
   return input;
 }
@@ -1261,7 +1286,7 @@ function paperSortControl() {
   });
   select.addEventListener("change", () => {
     state.paperSort = reviewModel.normalizePaperSort(select.value);
-    syncNavigation({ replace: true, preserveScroll: true });
+    syncListNavigation();
   });
   wrapper.append(select);
   return wrapper;
@@ -1286,7 +1311,7 @@ function manuscriptSortControl() {
   });
   select.addEventListener("change", () => {
     state.manuscriptSort = normalizeManuscriptSort(select.value);
-    syncNavigation({ replace: true, preserveScroll: true });
+    syncListNavigation();
   });
   wrapper.append(select);
   return wrapper;
@@ -1377,9 +1402,7 @@ function filterControl(label, key, options) {
   });
   select.addEventListener("change", () => {
     state.researchFilters[key] = select.value;
-    state.selectedProblem = "";
-    state.selectedReview = "";
-    syncNavigation({ replace: true });
+    syncListNavigation();
   });
   wrapper.append(select);
   return wrapper;
@@ -1394,9 +1417,7 @@ function filterToggle(label, checked, handler, { priority = "", availability = "
   input.checked = checked;
   input.addEventListener("change", () => {
     handler(input.checked);
-    state.selectedProblem = "";
-    state.selectedReview = "";
-    syncNavigation({ replace: true });
+    syncListNavigation();
   });
   wrapper.append(input, document.createTextNode(label));
   return wrapper;
@@ -1440,9 +1461,7 @@ function renderResearchFilters() {
   footer.append(node("span", "", "Human priority and review freshness"));
   footer.append(button("Reset", () => {
     state.researchFilters = reviewModel.createDefaultFilters();
-    state.selectedProblem = "";
-    state.selectedReview = "";
-    syncNavigation({ replace: true });
+    syncListNavigation();
   }, "filter-reset"));
   controls.append(toggles, footer);
   details.append(controls);
@@ -1462,8 +1481,7 @@ function paperFilterControl(label, key, options) {
   });
   select.addEventListener("change", () => {
     state.paperFilters[key] = select.value;
-    state.selectedPaper = "";
-    syncNavigation({ replace: true });
+    syncListNavigation();
   });
   wrapper.append(select);
   return wrapper;
@@ -1489,8 +1507,7 @@ function renderPaperFilters() {
   footer.append(node("span", "", "Paper processing status"));
   footer.append(button("Reset", () => {
     state.paperFilters = reviewModel.createDefaultPaperFilters();
-    state.selectedPaper = "";
-    syncNavigation({ replace: true });
+    syncListNavigation();
   }, "filter-reset"));
   controls.append(footer);
   details.append(controls);
@@ -1510,9 +1527,7 @@ function manuscriptFilterControl(label, key, options) {
   });
   select.addEventListener("change", () => {
     state.manuscriptFilters[key] = select.value;
-    state.selectedManuscript = "";
-    state.selectedDraft = "";
-    syncNavigation({ replace: true });
+    syncListNavigation();
   });
   wrapper.append(select);
   return wrapper;
@@ -1538,9 +1553,7 @@ function renderManuscriptFilters() {
   footer.append(node("span", "", "Latest draft status and inputs"));
   footer.append(button("Reset", () => {
     state.manuscriptFilters = reviewModel.createDefaultManuscriptFilters();
-    state.selectedManuscript = "";
-    state.selectedDraft = "";
-    syncNavigation({ replace: true });
+    syncListNavigation();
   }, "filter-reset"));
   controls.append(footer);
   details.append(controls);
@@ -1641,7 +1654,12 @@ function renderResearch() {
   const requested = state.catalog.reviews.find(item => item.itemKey === state.selectedReview);
   if (requested) state.selectedProblem = requested.problemKey;
   if (!problems.some(item => item.problemKey === state.selectedProblem)) {
-    state.selectedProblem = problems[0]?.problemKey || "";
+    state.selectedProblem = reviewModel.nearestMatchingKey(
+      state.selectedProblem,
+      problems.map(item => item.problemKey),
+      reviewModel.groupProblemsByPaper(state.catalog.reviews, state.paperSort)
+        .flatMap(group => group.problems.map(item => item.problemKey)),
+    );
   }
   const listScroll = node("div", "problem-scroll");
   listScroll.append(node("div", "sidebar-heading queue-summary", reviewModel.queueSummary(reviews, state.researchFilters)));
@@ -1683,7 +1701,12 @@ function renderResearch() {
 
   const attempts = reviewModel.attemptsForProblem(reviews, state.selectedProblem);
   if (!attempts.some(item => item.itemKey === state.selectedReview)) {
-    state.selectedReview = attempts[0]?.itemKey || "";
+    state.selectedReview = reviewModel.nearestMatchingKey(
+      state.selectedReview,
+      attempts.map(item => item.itemKey),
+      reviewModel.attemptsForProblem(state.catalog.reviews, state.selectedProblem)
+        .map(item => item.itemKey),
+    );
   }
   const attemptSwitcher = node("div", "attempt-switcher");
   attemptSwitcher.append(node("div", "sidebar-heading", `Attempts${attempts.length ? ` · ${attempts.length}` : ""}`));
@@ -1957,7 +1980,8 @@ function renderReviewDetail(item) {
   }
   const hero = node("section", "hero");
   const copy = node("div");
-  copy.append(node("div", "eyebrow", `${item.paperTitle} · ${item.problemId}`));
+  const paperTitle = reviewModel.paperTitleWithYear(item.paperTitle, item.paperPublished);
+  copy.append(node("div", "eyebrow", `${paperTitle} · ${item.problemId}`));
   copy.append(node("h1", "", item.problemTitle));
   copy.append(node("p", "", item.paperAuthors?.join(", ") || "Authors unavailable"));
   hero.append(copy);
@@ -2198,6 +2222,14 @@ function renderPapers() {
     state.paperSort,
     state.catalog.reviews,
   );
+  if (!papers.some(paper => paper.key === state.selectedPaper)) {
+    state.selectedPaper = reviewModel.nearestMatchingKey(
+      state.selectedPaper,
+      papers.map(paper => paper.key),
+      reviewModel.sortPapers(state.catalog.papers, state.paperSort, state.catalog.reviews)
+        .map(paper => paper.key),
+    );
+  }
   const list = node("div", "side-list");
   papers.forEach(paper => appendSideCard(list, {
     title: reviewModel.paperTitleWithYear(
@@ -2214,7 +2246,6 @@ function renderPapers() {
     onClick: () => { state.selectedPaper = paper.key; syncNavigation(); },
   }));
   sidebar.append(node("div", "sidebar-heading", `${papers.length} papers`), list);
-  if (!state.selectedPaper || !papers.some(paper => paper.key === state.selectedPaper)) state.selectedPaper = papers[0]?.key || "";
   const paper = state.catalog.papers.find(value => value.key === state.selectedPaper);
   if (!paper) {
     main.replaceChildren(document.getElementById("empty-template").content.cloneNode(true));
@@ -2794,19 +2825,14 @@ function renderManuscripts() {
     );
     return controls;
   });
-  const manuscripts = filteredManuscripts()
-    .sort((left, right) => {
-      const alphabetical = String(left.latest.title).localeCompare(
-        String(right.latest.title),
-        undefined,
-        { sensitivity: "base", numeric: true },
-      ) || left.name.localeCompare(right.name, undefined, { sensitivity: "base", numeric: true });
-      if (state.manuscriptSort === "alphabetical") return alphabetical;
-      return (Number(right.latest.createdTimestamp) || 0) -
-        (Number(left.latest.createdTimestamp) || 0) || alphabetical;
-    });
-  if (!state.selectedManuscript || !manuscripts.some(value => value.key === state.selectedManuscript)) {
-    state.selectedManuscript = manuscripts[0]?.key || "";
+  const manuscripts = reviewModel.sortManuscripts(filteredManuscripts(), state.manuscriptSort);
+  if (!manuscripts.some(value => value.key === state.selectedManuscript)) {
+    state.selectedManuscript = reviewModel.nearestMatchingKey(
+      state.selectedManuscript,
+      manuscripts.map(value => value.key),
+      reviewModel.sortManuscripts(state.catalog.manuscripts, state.manuscriptSort)
+        .map(value => value.key),
+    );
   }
   const manuscriptScroll = node("div", "manuscript-scroll");
   const list = node("div", "side-list");
@@ -2832,6 +2858,7 @@ function renderManuscripts() {
   sidebar.append(manuscriptScroll);
   const manuscript = state.catalog.manuscripts.find(value => value.key === state.selectedManuscript);
   if (!manuscript) {
+    state.selectedDraft = "";
     main.replaceChildren(document.getElementById("empty-template").content.cloneNode(true));
     return;
   }
@@ -3005,6 +3032,11 @@ function renderActivity({ preserveDetail = false } = {}) {
   });
   const query = state.search.trim().toLowerCase();
   const jobs = state.jobs.filter(job => !query || `${job.title} ${job.action} ${job.status}`.toLowerCase().includes(query));
+  state.selectedJob = reviewModel.nearestMatchingKey(
+    state.selectedJob,
+    jobs.map(job => job.id),
+    state.jobs.map(job => job.id),
+  );
   const list = node("div", "side-list");
   jobs.forEach(job => appendSideCard(list, {
     title: taskSidebarTitle(job),
@@ -3017,7 +3049,6 @@ function renderActivity({ preserveDetail = false } = {}) {
     },
   }));
   sidebar.append(node("div", "sidebar-heading", `${jobs.length} tasks`), list);
-  if (!state.selectedJob || !jobs.some(job => job.id === state.selectedJob)) state.selectedJob = jobs[0]?.id || "";
   if (!state.selectedJob) {
     main.replaceChildren(document.getElementById("empty-template").content.cloneNode(true));
     return;

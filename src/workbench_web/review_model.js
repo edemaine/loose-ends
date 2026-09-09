@@ -363,6 +363,33 @@
     );
   }
 
+  function nearestMatchingKey(selectedKey, matchingKeys, orderedKeys) {
+    const matches = new Set(matchingKeys);
+    if (matches.has(selectedKey)) return selectedKey;
+    const index = orderedKeys.indexOf(selectedKey);
+    if (index !== -1) {
+      // Prefer the following item when both neighbors are equally close.
+      for (let distance = 1; distance < orderedKeys.length; distance++) {
+        if (matches.has(orderedKeys[index + distance])) return orderedKeys[index + distance];
+        if (matches.has(orderedKeys[index - distance])) return orderedKeys[index - distance];
+      }
+    }
+    return matchingKeys[0] || "";
+  }
+
+  function sortManuscripts(manuscripts, sort = "latest") {
+    return [...manuscripts].sort((left, right) => {
+      const alphabetical = String(left.latest.title).localeCompare(
+        String(right.latest.title),
+        undefined,
+        { sensitivity: "base", numeric: true },
+      ) || left.name.localeCompare(right.name, undefined, { sensitivity: "base", numeric: true });
+      if (sort === "alphabetical") return alphabetical;
+      return (Number(right.latest.createdTimestamp) || 0) -
+        (Number(left.latest.createdTimestamp) || 0) || alphabetical;
+    });
+  }
+
   function normalizePaperSort(value) {
     return paperSortOptions.some(([key]) => key === value)
       ? value
@@ -838,6 +865,8 @@
     compareProblems,
     latestProblems,
     attemptsForProblem,
+    nearestMatchingKey,
+    sortManuscripts,
     normalizePaperSort,
     paperTitleWithYear,
     paperResultWeight,
