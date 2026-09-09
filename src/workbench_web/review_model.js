@@ -363,6 +363,33 @@
     );
   }
 
+  function nearestMatchingKey(selectedKey, matchingKeys, orderedKeys) {
+    const matches = new Set(matchingKeys);
+    if (matches.has(selectedKey)) return selectedKey;
+    const index = orderedKeys.indexOf(selectedKey);
+    if (index !== -1) {
+      // Prefer the following item when both neighbors are equally close.
+      for (let distance = 1; distance < orderedKeys.length; distance++) {
+        if (matches.has(orderedKeys[index + distance])) return orderedKeys[index + distance];
+        if (matches.has(orderedKeys[index - distance])) return orderedKeys[index - distance];
+      }
+    }
+    return matchingKeys[0] || "";
+  }
+
+  function sortManuscripts(manuscripts, sort = "latest") {
+    return [...manuscripts].sort((left, right) => {
+      const alphabetical = String(left.latest.title).localeCompare(
+        String(right.latest.title),
+        undefined,
+        { sensitivity: "base", numeric: true },
+      ) || left.name.localeCompare(right.name, undefined, { sensitivity: "base", numeric: true });
+      if (sort === "alphabetical") return alphabetical;
+      return (Number(right.latest.createdTimestamp) || 0) -
+        (Number(left.latest.createdTimestamp) || 0) || alphabetical;
+    });
+  }
+
   function normalizePaperSort(value) {
     return paperSortOptions.some(([key]) => key === value)
       ? value
@@ -573,8 +600,8 @@
       cards.push({
         key: "critic",
         title: item.reviewSchema === "legacy"
-          ? `Critic · legacy ${humanize(item.legacyVerdict)}`
-          : `Critic · ${humanize(item.correctness)} · ${humanize(item.reviewedCoverage)}`,
+          ? `Review · legacy ${humanize(item.legacyVerdict)}`
+          : `Review · ${humanize(item.correctness)} · ${humanize(item.reviewedCoverage)}`,
         value: item.criticSummary,
         missing: "No critic summary.",
       });
@@ -584,8 +611,8 @@
 
   function detailTabs(item) {
     const tabs = [];
-    if (item.attemptStatus !== "unattempted") tabs.push(["attempt", "Solution attempt"]);
-    if (item.attemptStatus === "reviewed") tabs.push(["critique", "Critique"]);
+    if (item.attemptStatus !== "unattempted") tabs.push(["attempt", "Solution"]);
+    if (item.attemptStatus === "reviewed") tabs.push(["critique", "Review"]);
     if (item.triageReport || item.hasTriageReport) tabs.push(["triage", "Triage"]);
     if (item.literatureReport || item.hasLiteratureReport) tabs.push(["literature", "Literature"]);
     tabs.push(["files", `Files (${item.fileCount ?? (item.files || []).length})`]);
@@ -838,6 +865,8 @@
     compareProblems,
     latestProblems,
     attemptsForProblem,
+    nearestMatchingKey,
+    sortManuscripts,
     normalizePaperSort,
     paperTitleWithYear,
     paperResultWeight,

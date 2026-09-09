@@ -2,7 +2,7 @@
   "private": true,
   "packageManager": "pnpm@10.34.3",
   "scripts": {
-    "test": "node --test test_markdown.cjs test_workbench_tasks.cjs"
+    "test": "node --test test_markdown.cjs test_workbench_tasks.cjs test_workbench_selection.cjs"
   },
   "devDependencies": {
     "@mdit/plugin-katex": "1.0.1",

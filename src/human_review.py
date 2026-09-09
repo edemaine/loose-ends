@@ -15,6 +15,7 @@ import pydoc
 import re
 import subprocess
 import sys
+import textwrap
 from typing import Callable, Iterable, Sequence
 import webbrowser
 
@@ -458,6 +459,51 @@ def _extract_open_problem_markdown(path: Path, problem_id: str) -> str:
     return "\n".join(lines[start:end]).strip()
 
 
+def problem_statement_parts(value: str) -> dict[str, str]:
+    """Separate explicitly labeled statements; preserve unfamiliar entries whole."""
+    lines = value.splitlines()
+    fields = []
+    label = r"(?P<label>precise statement|problem statement|statement|source location)"
+    bullet = re.compile(
+        rf"^(?P<indent> *)(?:[-+*] )\*\*{label}(?::\*\*|\*\*:)\s*(?P<body>.*)$",
+        re.IGNORECASE,
+    )
+    heading = re.compile(rf"^(?P<marks>#{{2,6}}) +{label}:?\s*$", re.IGNORECASE)
+    for index, line in enumerate(lines):
+        match = bullet.match(line) or heading.match(line)
+        if not match:
+            continue
+        end = index + 1
+        if "indent" in match.groupdict():
+            indent = len(match["indent"])
+            while end < len(lines):
+                following = lines[end]
+                if re.match(rf"^ {{0,{indent}}}(?:[-+*] |\d+[.)] |#{{1,6}} )", following):
+                    break
+                end += 1
+            body = "\n".join([
+                match["body"], textwrap.dedent("\n".join(lines[index + 1:end])),
+            ]).strip()
+        else:
+            level = len(match["marks"])
+            while end < len(lines) and not re.match(rf"^#{{1,{level}}} ", lines[end]):
+                end += 1
+            body = "\n".join(lines[index + 1:end]).strip()
+        fields.append((match["label"].lower(), index, end, body))
+    statements = [field for field in fields if field[0] != "source location"]
+    if len(statements) != 1 or not statements[0][3]:
+        return {"problemStatementShort": value, "problemSource": "", "problemBackground": ""}
+    statement = statements[0]
+    sources = [field for field in fields if field[0] == "source location"]
+    extracted = [statement] + (sources if len(sources) == 1 else [])
+    removed = {index for _, start, end, _ in extracted for index in range(start, end)}
+    return {
+        "problemStatementShort": statement[3],
+        "problemSource": sources[0][3] if len(sources) == 1 else "",
+        "problemBackground": "\n".join(line for index, line in enumerate(lines) if index not in removed).strip(),
+    }
+
+
 def build_review_catalog(
     items: Sequence[HumanReviewItem],
     *,
@@ -798,6 +844,7 @@ def build_review_catalog(
                     else ""
                 ),
                 "solverSummary": solver_result.get("summary", ""),
+                "checkableClaims": solver_result.get("checkable_claims", []),
                 "externalSources": solver_result.get(
                     "external_sources", []
                 ),
@@ -895,11 +942,12 @@ def load_review_contents(item: dict) -> dict[str, str]:
     attempt_value = item.get("attemptDirectory")
     attempt = Path(attempt_value) if attempt_value else None
     problem = paper / problem_id
+    statement = _extract_open_problem_markdown(
+        paper / "analysis" / "open-problems.md", problem_id,
+    )
     return {
-        "problemStatement": _extract_open_problem_markdown(
-            paper / "analysis" / "open-problems.md",
-            problem_id,
-        ),
+        "problemStatement": statement,
+        **problem_statement_parts(statement),
         "triageReport": _read_optional_text(
             problem / common.TRIAGE_MARKDOWN
         ),

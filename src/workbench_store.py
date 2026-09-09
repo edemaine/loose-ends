@@ -209,6 +209,7 @@ class WorkbenchStore:
                 for row in connection.execute("PRAGMA table_info(scheduler_settings)")
             }
             scheduler_migrations = {
+                "codex_credit_error": "TEXT",
                 "memory_limit_mode": "TEXT NOT NULL DEFAULT 'percent'",
                 "memory_limit_value": "REAL NOT NULL DEFAULT 50",
                 "memory_limit_pending": "INTEGER NOT NULL DEFAULT 0",
@@ -301,8 +302,8 @@ class WorkbenchStore:
                     INSERT INTO runs (
                         id, job_id, unit_index, label, status, argv_json, cwd,
                         targets_json, resources_json, probe_json, log_path,
-                        created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?)
+                        created_at, updated_at, retry_of
+                    ) VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         run_id,
@@ -317,6 +318,7 @@ class WorkbenchStore:
                         str(log_path),
                         now,
                         now,
+                        unit.get("retryOf"),
                     ),
                 )
         return self.get_job(job_id)
@@ -441,12 +443,15 @@ class WorkbenchStore:
             "queuePaused": bool(row["queue_paused"] or row["memory_limit_pending"]),
             "queueManuallyPaused": bool(row["queue_paused"]),
             "queuePauseReason": (
-                "manual"
+                "codex_credits"
+                if row["queue_paused"] and row["codex_credit_error"]
+                else "manual"
                 if row["queue_paused"]
                 else "memory_limit_pending"
                 if row["memory_limit_pending"]
                 else None
             ),
+            "codexCreditError": row["codex_credit_error"],
             "memoryLimit": {
                 "mode": row["memory_limit_mode"],
                 "value": (
@@ -459,6 +464,15 @@ class WorkbenchStore:
             "appliedMemoryLimitBytes": row["memory_limit_applied_bytes"],
             "updatedAt": float(row["updated_at"]),
         }
+
+    def pause_for_codex_credits(self, message: str) -> None:
+        """Stop new starts until the user resumes after replenishing credits."""
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE scheduler_settings SET queue_paused = 1, "
+                "codex_credit_error = ?, updated_at = ? WHERE id = 1",
+                (message, time.time()),
+            )
 
     def update_scheduler_settings(
         self,
@@ -487,6 +501,7 @@ class WorkbenchStore:
                 raise ValueError("queuePaused must be true or false")
             assignments.append("queue_paused = ?")
             parameters.append(int(queue_paused))
+            assignments.append("codex_credit_error = NULL")
         if memory_limit is not None:
             if not isinstance(memory_limit, dict):
                 raise ValueError("memoryLimit must be an object")
@@ -603,6 +618,13 @@ class WorkbenchStore:
         now = time.time()
         selected_row: sqlite3.Row | None = None
         with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            settings = connection.execute(
+                "SELECT queue_paused, memory_limit_pending "
+                "FROM scheduler_settings WHERE id = 1"
+            ).fetchone()
+            if settings["queue_paused"] or settings["memory_limit_pending"]:
+                return None
             rows = connection.execute(
                 """
                 SELECT runs.*, jobs.priority_level, jobs.scheduler_credit,
@@ -795,6 +817,42 @@ class WorkbenchStore:
                 cancel_requested=1,
             )
         return self.get_run(run_id)
+
+    def retry_job(self, job_id: str) -> dict:
+        """Create a separate task for the latest failed and partial runs."""
+        original = self.get_job(job_id)
+        latest = {run["unit_index"]: run for run in original["runs"]}
+        runs = [
+            run for run in latest.values()
+            if run["status"] in {"failed", "partial"}
+        ]
+        if not runs:
+            raise ValueError("this task has no failed or partial runs to retry")
+        units = [
+            {
+                **{key: run[key] for key in (
+                    "label", "argv", "cwd", "targets", "resources", "probe",
+                )},
+                "retryOf": run["id"],
+            }
+            for run in runs
+        ]
+        targets = []
+        for unit in units:
+            for target in unit["targets"]:
+                if target not in targets:
+                    targets.append(target)
+        request = {**original["request"], "targets": targets}
+        plan = {
+            "action": original["action"],
+            "title": f"Retry: {original['title']}",
+            "options": original["plan"].get("options", {}),
+            "priorityLevel": original["priority_level"],
+            "targets": targets,
+            "units": units,
+            "retryOf": job_id,
+        }
+        return self.create_job(request, plan)
 
     def retry_run(self, run_id: str) -> dict:
         original = self.get_run(run_id)
