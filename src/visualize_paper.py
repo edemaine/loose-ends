@@ -1,0 +1,743 @@
+#!/usr/bin/env python3
+"""Build reading aids for a paper: converted document, annotations, widgets.
+
+Usage examples:
+
+    python src/visualize_paper.py manuscripts/NAME/draft-002
+        Convert the draft (if needed), then ask Codex for the default aids:
+        definition popovers, the main-result widget, and proof outlines.
+
+    python src/visualize_paper.py manuscripts/NAME/draft-002 \\
+        --anchor lem:tiling-completion --anchor proof-2
+        Add a statement widget and a step-by-step proof widget.
+
+    python src/visualize_paper.py manuscripts/NAME/draft-002 --document-only
+        Only (re)build the converted document; no Codex run.
+
+    python src/visualize_paper.py manuscripts/NAME/draft-002 \\
+        --install-workspace manuscripts/NAME/draft-002/.visualize-run-XXXX \\
+        --review-workspace manuscripts/NAME/draft-002/.visualization-review-run-YYYY
+        Install a finished run whose installation failed (the error names
+        both directories); nothing is generated again.
+"""
+
+from __future__ import annotations
+
+import argparse
+from dataclasses import dataclass
+import json
+from pathlib import Path
+import shlex
+import shutil
+import tempfile
+
+import codex_cli
+import open_problem_common as common
+import paper_document
+import visualization_contract
+from validation import common as validation_common
+from validation import visualization as visualization_validation
+from validation import visualization_review as review_validation
+import visualizations
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_PROMPT_PATH = PROJECT_ROOT / "prompts" / "visualize-paper.md"
+DEFAULT_SCHEMA_PATH = PROJECT_ROOT / "schemas" / "visualization-result.schema.json"
+DEFAULT_REVIEW_PROMPT_PATH = PROJECT_ROOT / "prompts" / "review-visualization.md"
+DEFAULT_REVIEW_SCHEMA_PATH = PROJECT_ROOT / "schemas" / "visualization-review.schema.json"
+WIDGET_API_PATH = PROJECT_ROOT / "prompts" / "visualization-widget-api.md"
+READER_DIRECTORY = PROJECT_ROOT / "src" / "workbench_web" / "reader"
+VALIDATION_DEPENDENCIES = (Path(visualization_contract.__file__).resolve(),)
+DEFAULT_ANCHOR = visualizations.DEFAULT_ANCHOR
+NOTES_ANCHOR = visualizations.NOTES_ANCHOR
+PSEUDO_ANCHORS = {DEFAULT_ANCHOR, NOTES_ANCHOR}
+TRANSIENT_FAILURE_MARKERS = ("at capacity", "rate limit", "overloaded", "temporarily unavailable")
+MAX_TRANSIENT_RETRIES = 2
+DEFAULT_REPAIR_ROUNDS = 1
+NOTES_ONLY_REASONING_EFFORT = "medium"
+
+
+@dataclass(frozen=True)
+class RunOutcome:
+    source: visualizations.SourceRef
+    run_directory: Path
+    widgets: list[str]
+    annotations_updated: bool
+    review_summary: str
+
+
+def resolve_anchors(document: dict, anchors: list[str]) -> list[str]:
+    described = visualizations.anchor_descriptions(document)
+    resolved: list[str] = []
+    for anchor in anchors:
+        if anchor in PSEUDO_ANCHORS:
+            resolved.append(anchor)
+            continue
+        if anchor not in described:
+            raise common.CodexError(
+                f"anchor {anchor!r} is not a statement or proof of the document; "
+                f"see document.json for valid ids (or use `{NOTES_ANCHOR}` to address reader notes)"
+            )
+        resolved.append(anchor)
+    return list(dict.fromkeys(resolved)) or [DEFAULT_ANCHOR]
+
+
+def _stage_common_inputs(workspace: Path, source: visualizations.SourceRef, document: dict) -> Path:
+    inputs = workspace / "inputs"
+    inputs.mkdir(parents=True, exist_ok=False)
+    package = source.package
+    document_input = inputs / "document"
+    document_input.mkdir()
+    for name in (paper_document.DOCUMENT_HTML, paper_document.DOCUMENT_JSON):
+        shutil.copyfile(package / name, document_input / name)
+    figures = package / paper_document.FIGURES_DIRECTORY
+    if figures.is_dir():
+        shutil.copytree(figures, document_input / paper_document.FIGURES_DIRECTORY)
+    source_input = inputs / "source"
+    source_input.mkdir()
+    for path in source.latex_directory.iterdir():
+        if path.name.startswith(".") or path.name == visualizations.DIRECTORY_NAME:
+            continue
+        if path.is_dir():
+            if path.name in {"figures", "code"} or source.kind == "paper":
+                shutil.copytree(path, source_input / path.name)
+        elif path.suffix.lower() in {".tex", ".bib", ".bbl", ".sty", ".cls", ".pdf"} or path.name == "main.pdf":
+            shutil.copyfile(path, source_input / path.name)
+    reader_input = inputs / "reader"
+    reader_input.mkdir()
+    for name in sorted(visualizations.READER_FILES):
+        shutil.copyfile(READER_DIRECTORY / name, reader_input / name)
+    shutil.copyfile(WIDGET_API_PATH, reader_input / "WIDGET-API.md")
+    return inputs
+
+
+def _stage_existing(inputs: Path, source: visualizations.SourceRef, manifest: dict) -> None:
+    package = source.package
+    existing = inputs / "existing"
+    annotations = package / visualizations.ANNOTATIONS_NAME
+    widgets = package / visualizations.WIDGETS_DIRECTORY
+    if not annotations.is_file() and not widgets.is_dir():
+        return
+    existing.mkdir()
+    if annotations.is_file():
+        shutil.copyfile(annotations, existing / visualizations.ANNOTATIONS_NAME)
+    if widgets.is_dir():
+        shutil.copytree(widgets, existing / visualizations.WIDGETS_DIRECTORY)
+    common.write_json(existing / visualizations.MANIFEST_NAME, manifest)
+
+
+def _reader_notes(source: visualizations.SourceRef, document: dict) -> list[dict]:
+    """Open reader notes with the text of the paragraph they point at."""
+    text = {paragraph["id"]: paragraph.get("text", "") for paragraph in document.get("paragraphs", [])}
+    described = visualizations.anchor_descriptions(document)
+    notes = []
+    for note in visualizations.open_notes(source.package):
+        anchor = note.get("anchor", "")
+        container = ""
+        for proof in document.get("proofs", []):
+            if anchor in proof.get("paragraphs", []):
+                container = proof["id"]
+        for statement in document.get("statements", []):
+            if anchor in statement.get("paragraphs", []) or anchor == statement["id"]:
+                container = statement["id"]
+        if note.get("widget"):
+            container = anchor
+        previous = None
+        if note.get("revises"):
+            previous = next((entry for entry in visualizations.load_explanations(source.package) if isinstance(entry, dict) and entry.get("id") == note["revises"]), None)
+        notes.append({
+            "id": note["id"],
+            "anchor": anchor,
+            "container": container,
+            "container_label": described.get(container, {}).get("label", ""),
+            "quote": note.get("quote", ""),
+            "latex": note.get("latex", ""),
+            "message": note.get("message", ""),
+            "revises": note.get("revises", ""),
+            "widget": note.get("widget", ""),
+            "example": note.get("example", ""),
+            "widget_state": note.get("widget_state"),
+            "widget_state_error": note.get("widget_state_error", ""),
+            "step": note.get("step"),
+            "step_title": note.get("step_title", ""),
+            "follows": note.get("follows", ""),
+            "previous_answer": {"title": previous.get("title", ""), "text": previous.get("text", "")} if previous else None,
+            "paragraph_text": text.get(anchor, ""),
+        })
+    return notes
+
+
+def _request(document: dict, anchors: list[str], manifest: dict, notes: list[dict] | None = None) -> dict:
+    described = visualizations.anchor_descriptions(document)
+    wants_default = DEFAULT_ANCHOR in anchors
+    wants_notes = NOTES_ANCHOR in anchors
+    return {
+        "reader_notes": notes or [],
+        "notes_only": wants_notes and not wants_default and not [a for a in anchors if a not in PSEUDO_ANCHORS],
+        "anchors": anchors,
+        "annotations": wants_default,
+        "main_result_widget": wants_default,
+        "proof_outlines": wants_default,
+        "widgets": [
+            {**described[anchor], "widget_id": visualizations.widget_id(anchor)}
+            for anchor in anchors if anchor not in PSEUDO_ANCHORS
+        ],
+        "existing_widgets": [
+            {"id": widget.get("id"), "anchor": widget.get("anchor"), "kind": widget.get("kind"), "title": widget.get("title")}
+            for widget in manifest.get("widgets", []) if isinstance(widget, dict)
+        ],
+        "existing_annotations": manifest.get("annotations") is not None,
+    }
+
+
+def _render_prompt(template: str, document: dict, request: dict) -> str:
+    lines = [template.rstrip(), "", "# This run", ""]
+    if request["annotations"]:
+        lines.append(
+            "- Write `output/annotations.json`: the glossary, `main_result`, and "
+            "proof outlines (2 to 5 steps) for the proof of the main result and "
+            "for the proofs of the statements that proof directly cites."
+        )
+        lines.append(
+            "- Write the main-result widget: a statement widget anchored to the "
+            "main result you choose, with a playground when the mathematics allows."
+        )
+    for widget in request["widgets"]:
+        if widget["kind"] == "proof":
+            lines.append(
+                f"- Write a proof widget for `{widget['id']}` ({widget['label']}, "
+                f"proof of `{widget.get('of')}`), directory `output/widgets/{widget['widget_id']}/`, "
+                f"with steps over paragraphs {', '.join(widget['paragraphs'])}."
+            )
+        else:
+            lines.append(
+                f"- Write a statement widget for `{widget['id']}` ({widget['label']}"
+                f"{': ' + widget['title'] if widget.get('title') else ''}), "
+                f"directory `output/widgets/{widget['widget_id']}/`."
+            )
+    if request.get("reader_notes"):
+        lines.append("")
+        lines.append(
+            "The reader marked these passages as unclear (also in "
+            "`inputs/reader-notes.json`). Address every one: add a "
+            "phrase-level proof step whose picture explains the passage, a "
+            "glossary entry, or a short clarifying note in the widget, and "
+            "list the ids you addressed in `notes_addressed`. A note inside a "
+            "proof that has no widget yet asks for a proof widget on that proof."
+        )
+        for note in request["reader_notes"]:
+            where = f" in {note['container_label']} (`{note['container']}`)" if note.get("container") else ""
+            message = f' Reader says: "{note["message"]}"' if note.get("message") else ""
+            follow_up = ""
+            if note.get("previous_answer"):
+                follow_up = f" This follows up an earlier explanation (`{note['revises']}`, \"{note['previous_answer']['title']}\") that did not satisfy the reader; replace it."
+            if note.get("widget"):
+                step = f" at step {note['step'] + 1} (\"{note.get('step_title', '')}\")" if isinstance(note.get("step"), int) else ""
+                lines.append(f"- `{note['id']}` about widget `{note['widget']}`{step} (anchored at `{note['anchor']}`): \"{note['message'] or note['quote']}\". Fix the widget accordingly when regenerating it.")
+                continue
+            lines.append(f"- `{note['id']}` at `{note['anchor']}`{where}: \"{note['quote']}\".{message}{follow_up}")
+    if request["existing_widgets"]:
+        lines.append("")
+        lines.append("Existing widgets (under `inputs/existing/`): " + ", ".join(
+            f"`{item['id']}` for `{item['anchor']}`" for item in request["existing_widgets"]
+        ) + ". Do not recreate them unless requested above.")
+    lines.append("")
+    lines.append(f"The paper is *{document.get('title', '')}*. Its statements are:")
+    for statement in document.get("statements", []):
+        proofs = ", ".join(statement.get("proofs", [])) or "no proof environment"
+        lines.append(f"- `{statement['id']}`: {statement['label']}{' (' + statement['title'] + ')' if statement.get('title') else ''}; proofs: {proofs}")
+    lines.append("")
+    return "\n".join(lines) + "\n"
+
+
+def _expectations(document: dict, anchors: list[str], notes: list[dict] | None = None) -> dict:
+    return {
+        "anchors": anchors,
+        "annotations_required": DEFAULT_ANCHOR in anchors or NOTES_ANCHOR in anchors,
+        "document_ids": paper_document.anchor_ids(document),
+        "proof_paragraphs": {proof["id"]: list(proof.get("paragraphs", [])) for proof in document.get("proofs", [])},
+        "paragraph_text": {paragraph["id"]: paragraph.get("text", "") for paragraph in document.get("paragraphs", [])},
+        "note_ids": [note["id"] for note in notes or []],
+        "note_containers": sorted({note["container"] for note in notes or [] if note.get("container")}),
+    }
+
+
+def _review_generated(
+    source: visualizations.SourceRef,
+    document: dict,
+    generated_workspace: Path,
+    generated_result: dict,
+    *,
+    codex: str,
+    prompt: str,
+    schema_path: Path,
+    options: codex_cli.ModelOptions,
+    web_search: str,
+) -> tuple[Path, dict]:
+    workspace = Path(tempfile.mkdtemp(prefix=".visualization-review-run-", dir=source.directory)).resolve()
+    try:
+        inputs = _stage_common_inputs(workspace, source, document)
+        generated = inputs / "generated"
+        shutil.copytree(generated_workspace / visualization_validation.OUTPUT_DIRECTORY, generated)
+        shutil.copyfile(generated_workspace / "agent-result.json", generated / "agent-result.json")
+        if (generated_workspace / "inputs" / "reader-notes.json").is_file():
+            shutil.copyfile(generated_workspace / "inputs" / "reader-notes.json", inputs / "reader-notes.json")
+        codex_cli.grant_sandbox_read_access(inputs)
+        widget_ids = [widget["id"] for widget in generated_result.get("widgets", []) if isinstance(widget, dict)]
+        report = codex_cli.run_validated_codex(
+            codex=codex,
+            workspace=workspace,
+            prompt=prompt,
+            schema_path=schema_path,
+            validator=codex_cli.OutputValidator(
+                Path(review_validation.__file__).resolve(),
+                review_validation.validate,
+                {"widget_ids": widget_ids, "annotations_present": bool(generated_result.get("annotations_updated"))},
+                dependencies=VALIDATION_DEPENDENCIES,
+            ),
+            options=options,
+            web_search=web_search,
+        )
+        return workspace, codex_cli.validated_result(report)
+    except (common.CodexError, OSError, ValueError) as exc:
+        raise common.CodexError(common.preserved_workspace_message(exc, workspace)) from exc
+
+
+def _archive_review(workspace: Path, review_workspace: Path, review_result: dict, round_number: int) -> None:
+    """Keep a superseded review beside the generated files for provenance."""
+    archive = workspace / f"review-before-repair-{round_number}"
+    archive.mkdir(exist_ok=True)
+    common.write_json(archive / "review-result.json", review_result)
+    for name in (review_validation.CRITIQUE_FILENAME, "events.jsonl", "run.log"):
+        if (review_workspace / name).is_file():
+            shutil.copyfile(review_workspace / name, archive / name)
+    common.cleanup_workspace(review_workspace, installed_log=archive / "run.log")
+
+
+def transient_failure(workspace: Path) -> str | None:
+    """Return the provider error when a Codex turn failed for a transient reason."""
+    events = workspace / "events.jsonl"
+    try:
+        lines = events.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines[-5:]):
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("type") not in {"error", "turn.failed"}:
+            continue
+        message = event.get("message") or (event.get("error") or {}).get("message") or ""
+        if any(marker in message.lower() for marker in TRANSIENT_FAILURE_MARKERS):
+            return str(message)
+    return None
+
+
+def needs_repair(review_result: dict) -> bool:
+    """Return whether the critic found gaps a designer repair round should fix."""
+    for review in review_result.get("widget_reviews", []):
+        if not isinstance(review, dict):
+            continue
+        if review.get("fidelity") in {"major_gaps", "incorrect"}:
+            return True
+        if review.get("interaction_quality") in {"major_issues", "unusable"}:
+            return True
+        if review.get("blocking_gaps"):
+            return True
+    annotations = review_result.get("annotations_review") or {}
+    return annotations.get("accuracy") == "major_issues"
+
+
+def _repair_prompt(rendered: str, review_result: dict, critique: str) -> str:
+    lines = [
+        rendered.rstrip(),
+        "",
+        "# Repair round",
+        "",
+        "Your previous turn produced the files now under `output/` and "
+        "`agent-result.json`. An independent reviewer audited them; its full "
+        "critique follows. Fix every blocking gap and major finding in place, "
+        "preserving everything that was judged correct, then update "
+        "`agent-result.json`, rerun your scripted interaction test, and "
+        "validate again. Prefer removing a fragile feature over keeping a "
+        "broken one.",
+        "",
+    ]
+    annotations = review_result.get("annotations_review") or {}
+    if annotations.get("accuracy") not in {None, "not_applicable", "accurate"}:
+        lines.append(f"Annotations ({annotations.get('accuracy')}):")
+        lines.extend(f"- {item}" for item in annotations.get("findings", []))
+        lines.append("")
+    for review in review_result.get("widget_reviews", []):
+        if not isinstance(review, dict):
+            continue
+        lines.append(
+            f"Widget `{review.get('id')}`: fidelity {review.get('fidelity')}, "
+            f"interaction {review.get('interaction_quality')}."
+        )
+        for gap in review.get("blocking_gaps", []):
+            lines.append(f"- BLOCKING: {gap}")
+        for finding in review.get("findings", []):
+            lines.append(f"- {finding}")
+        lines.append("")
+    lines.append("Full critique:")
+    lines.append("")
+    lines.append(critique.strip())
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _resume_prompt(rendered: str) -> str:
+    return (
+        rendered.rstrip()
+        + "\n\n# Resumed run\n\n"
+        + "A previous turn on this task was interrupted by a provider error. "
+        + "Files it already wrote may exist under `output/`. Inspect them, keep "
+        + "what is correct, complete the remaining work, and finish normally.\n"
+    )
+
+
+def visualize(
+    source: visualizations.SourceRef,
+    anchors: list[str],
+    *,
+    codex: str,
+    codex_version: str,
+    prompt: str,
+    schema_path: Path,
+    config_digest: str,
+    options: codex_cli.ModelOptions,
+    web_search: str,
+    review: bool,
+    review_prompt: str,
+    review_schema_path: Path,
+    review_config_digest: str,
+    review_options: codex_cli.ModelOptions,
+    review_web_search: str,
+    rebuild_document: bool = False,
+    repair_rounds: int | None = None,
+) -> RunOutcome:
+    document, manifest = visualizations.ensure_document(source, rebuild=rebuild_document)
+    anchors = resolve_anchors(document, anchors)
+    notes_only = anchors == [NOTES_ANCHOR]
+    if notes_only and not options.reasoning_effort:
+        # Notes-only runs produce annotations, not widgets: medium effort is enough.
+        options = codex_cli.ModelOptions(options.model, NOTES_ONLY_REASONING_EFFORT, options.fast)
+    if repair_rounds is None:
+        repair_rounds = 0 if notes_only else DEFAULT_REPAIR_ROUNDS
+    workspace = Path(tempfile.mkdtemp(prefix=".visualize-run-", dir=source.directory)).resolve()
+    review_workspace: Path | None = None
+    review_result: dict | None = None
+    try:
+        with visualizations.package_lock(source.package):
+            manifest = visualizations.load_manifest(source.package) or manifest
+            inputs = _stage_common_inputs(workspace, source, document)
+            _stage_existing(inputs, source, manifest)
+            notes = _reader_notes(source, document)
+        request = _request(document, anchors, manifest, notes)
+        common.write_json(inputs / "request.json", request)
+        common.write_json(inputs / "reader-notes.json", {"notes": notes})
+        # Kept with the inputs so a preserved workspace can be installed later.
+        provenance = {
+            "config_digest": config_digest,
+            "review_config_digest": review_config_digest,
+            "codex_version": codex_version,
+            "requested_model": options.model,
+            "requested_reasoning_effort": options.reasoning_effort,
+            "requested_fast_mode": options.fast,
+            "review_model": review_options.model,
+            "review_reasoning_effort": review_options.reasoning_effort,
+            "review_fast_mode": review_options.fast,
+        }
+        common.write_json(inputs / "provenance.json", provenance)
+        codex_cli.grant_sandbox_read_access(inputs)
+        rendered_prompt = _render_prompt(prompt, document, request)
+        validator = codex_cli.OutputValidator(
+            Path(visualization_validation.__file__).resolve(),
+            visualization_validation.validate,
+            _expectations(document, anchors, notes),
+            dependencies=VALIDATION_DEPENDENCIES,
+        )
+        retries = 0
+        while True:
+            try:
+                report = codex_cli.run_validated_codex(
+                    codex=codex,
+                    workspace=workspace,
+                    prompt=rendered_prompt,
+                    schema_path=schema_path,
+                    validator=validator,
+                    options=options,
+                    web_search=web_search,
+                )
+                break
+            except common.CodexError as exc:
+                reason = transient_failure(workspace)
+                if reason is None or retries >= MAX_TRANSIENT_RETRIES:
+                    raise
+                retries += 1
+                print(f"Codex failed transiently ({reason}); resuming, retry {retries}/{MAX_TRANSIENT_RETRIES}...")
+                rendered_prompt = _resume_prompt(_render_prompt(prompt, document, request))
+        generated_result = codex_cli.validated_result(report)
+        repairs = 0
+        while review and (generated_result.get("widgets") or generated_result.get("annotations_updated")):
+            review_workspace, review_result = _review_generated(
+                source, document, workspace, generated_result,
+                codex=codex, prompt=review_prompt, schema_path=review_schema_path,
+                options=review_options, web_search=review_web_search,
+            )
+            if repairs >= repair_rounds or not needs_repair(review_result):
+                break
+            repairs += 1
+            print(f"Reviewer found blocking gaps; designer repair round {repairs}/{repair_rounds}...")
+            critique = (review_workspace / review_validation.CRITIQUE_FILENAME).read_text(encoding="utf-8")
+            _archive_review(workspace, review_workspace, review_result, repairs)
+            report = codex_cli.run_validated_codex(
+                codex=codex,
+                workspace=workspace,
+                prompt=_repair_prompt(_render_prompt(prompt, document, request), review_result, critique),
+                schema_path=schema_path,
+                validator=validator,
+                options=options,
+                web_search=web_search,
+            )
+            generated_result = codex_cli.validated_result(report)
+            review_workspace, review_result = None, None
+        generated_result["repair_rounds"] = repairs
+        try:
+            installed = visualizations.install_run(
+                source.package, manifest, anchors, workspace, generated_result, review_workspace, review_result,
+                provenance=provenance, document_digest=document.get("source", {}).get("digest", ""),
+            )
+        except (common.CodexError, OSError, ValueError) as exc:
+            # The expensive part is done; say how to keep it.
+            raise common.CodexError(_recovery_hint(exc, source, workspace, review_workspace)) from exc
+    except (common.CodexError, OSError, ValueError) as exc:
+        raise common.CodexError(common.preserved_workspace_message(exc, workspace)) from exc
+    common.cleanup_workspace(workspace, installed_log=installed / "run.log")
+    if review_workspace is not None:
+        common.cleanup_workspace(review_workspace, installed_log=installed / "review-run.log")
+    return RunOutcome(
+        source, installed,
+        [widget["id"] for widget in generated_result.get("widgets", [])],
+        bool(generated_result.get("annotations_updated")),
+        (review_result or {}).get("summary", ""),
+    )
+
+
+def _recovery_hint(exc: BaseException, source: visualizations.SourceRef, workspace: Path, review_workspace: Path | None) -> str:
+    command = ["python", "src/visualize_paper.py", str(source.directory), "--install-workspace", str(workspace)]
+    if review_workspace is not None:
+        command += ["--review-workspace", str(review_workspace)]
+    return (
+        f"{exc}; the generated files are preserved in {workspace}. Once the cause is fixed, "
+        "install them without another Codex run: " + " ".join(shlex.quote(part) for part in command)
+    )
+
+
+def _validated_workspace(validate, workspace: Path, description: str) -> dict:
+    """Recheck a preserved workspace against the expectations staged with it."""
+    try:
+        expectations = common.read_json(
+            workspace / "validation" / validation_common.EXPECTATIONS_FILENAME,
+            description=f"{description} expectations",
+        )
+    except common.CodexError as exc:
+        raise common.CodexError(f"{workspace} is not a preserved {description} workspace: {exc}") from exc
+    report = validate(workspace=workspace, expectations=expectations)
+    if not report.valid or report.result is None:
+        issues = "; ".join(issue.render() for issue in report.issues) or "no structured result"
+        raise common.CodexError(f"the preserved {description} in {workspace} fails validation: {issues}")
+    return report.result
+
+
+def install_preserved(source: visualizations.SourceRef, workspace: Path, review_workspace: Path | None = None) -> RunOutcome:
+    """Install a run whose Codex work finished but whose installation failed.
+
+    A preserved workspace holds everything the run produced (inputs, validated
+    output, review), so nothing is generated again; the output is rechecked
+    against the expectations staged with it and must still match the document.
+    """
+    workspace = workspace.expanduser().resolve()
+    review_workspace = review_workspace.expanduser().resolve() if review_workspace is not None else None
+    document, manifest = visualizations.ensure_document(source)
+    staged = common.read_json(workspace / "inputs" / "document" / paper_document.DOCUMENT_JSON, description="staged document")
+    request = common.read_json(workspace / "inputs" / "request.json", description="staged request")
+    digest = document.get("source", {}).get("digest", "")
+    if staged.get("source", {}).get("digest") != digest:
+        raise common.CodexError(
+            f"{workspace} was generated for an earlier version of the document; run the visualization again instead"
+        )
+    anchors = resolve_anchors(document, [anchor for anchor in request.get("anchors", []) if isinstance(anchor, str)])
+    generated_result = _validated_workspace(visualization_validation.validate, workspace, "visualization")
+    generated_result["repair_rounds"] = len(list(workspace.glob("review-before-repair-*")))
+    review_result = None
+    if review_workspace is not None:
+        review_result = _validated_workspace(review_validation.validate, review_workspace, "review")
+    provenance = common.load_json(workspace / "inputs" / "provenance.json")
+    provenance = dict(provenance) if isinstance(provenance, dict) else {}
+    provenance["recovered_from"] = str(workspace)
+    installed = visualizations.install_run(
+        source.package, manifest, anchors, workspace, generated_result, review_workspace, review_result,
+        provenance=provenance, document_digest=digest,
+    )
+    common.cleanup_workspace(workspace, installed_log=installed / "run.log")
+    if review_workspace is not None:
+        common.cleanup_workspace(review_workspace, installed_log=installed / "review-run.log")
+    return RunOutcome(
+        source, installed,
+        [widget["id"] for widget in generated_result.get("widgets", [])],
+        bool(generated_result.get("annotations_updated")),
+        (review_result or {}).get("summary", ""),
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="build reading aids (document, definitions, widgets) for a paper or manuscript draft",
+    )
+    parser.add_argument("sources", nargs="+", type=Path, help="manuscript draft-NNN or paper directories")
+    parser.add_argument(
+        "--anchor", action="append", default=[], metavar="ID",
+        help="statement or proof id to visualize (repeatable); 'default' requests the glossary, main-result widget, and proof outlines",
+    )
+    parser.add_argument("--document-only", action="store_true", help="only convert the source; do not run Codex")
+    parser.add_argument("--rebuild-document", action="store_true", help="reconvert the source even if a document exists")
+    parser.add_argument("--skip-review", action="store_true", help="do not run the independent fidelity review")
+    parser.add_argument(
+        "--repair-rounds", type=int, default=None, metavar="N",
+        help=f"designer repair rounds after a review with blocking gaps (default: {DEFAULT_REPAIR_ROUNDS}, or 0 for notes-only runs)",
+    )
+    parser.add_argument(
+        "--install-workspace", type=Path, metavar="DIR",
+        help="install the preserved workspace of a run whose installation failed, without running Codex",
+    )
+    parser.add_argument(
+        "--review-workspace", type=Path, metavar="DIR",
+        help="with --install-workspace: that run's preserved review workspace",
+    )
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--codex", default="codex")
+    codex_cli.add_prompt_arguments(parser, default_template=DEFAULT_PROMPT_PATH, task="visualization designer")
+    parser.add_argument("--schema", type=Path, default=DEFAULT_SCHEMA_PATH)
+    codex_cli.add_model_arguments(parser)
+    codex_cli.add_web_search_argument(parser, default="disabled")
+    codex_cli.add_prompt_arguments(parser, default_template=DEFAULT_REVIEW_PROMPT_PATH, task="visualization reviewer", prefix="review")
+    parser.add_argument("--review-schema", type=Path, default=DEFAULT_REVIEW_SCHEMA_PATH)
+    codex_cli.add_model_arguments(parser, prefix="review")
+    codex_cli.add_web_search_argument(parser, default="disabled", prefix="review")
+    return parser
+
+
+def _inherit_review_options(primary: codex_cli.ModelOptions, review: codex_cli.ModelOptions) -> codex_cli.ModelOptions:
+    return codex_cli.ModelOptions(
+        review.model or primary.model,
+        review.reasoning_effort or primary.reasoning_effort,
+        review.fast or primary.fast,
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
+    codex_cli.configure_utf8_stdio()
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        sources = [visualizations.source_from_path(path) for path in args.sources]
+        anchors = list(dict.fromkeys(args.anchor)) or [DEFAULT_ANCHOR]
+        if args.review_workspace is not None and args.install_workspace is None:
+            raise common.CodexError("--review-workspace requires --install-workspace")
+        if args.install_workspace is not None:
+            if len(sources) != 1:
+                raise common.CodexError("--install-workspace installs the preserved run of exactly one source")
+            outcome = install_preserved(sources[0], args.install_workspace, args.review_workspace)
+            print(
+                f"Installed {outcome.run_directory} from {args.install_workspace}: "
+                f"widgets {', '.join(outcome.widgets) or 'none'}; "
+                f"annotations {'updated' if outcome.annotations_updated else 'unchanged'}."
+            )
+            if outcome.review_summary:
+                print(f"Review: {outcome.review_summary}")
+            return 0
+        if args.document_only:
+            for source in sources:
+                document, _manifest = visualizations.ensure_document(source, rebuild=True)
+                print(
+                    f"Converted {source.label}: {len(document['sections'])} sections, "
+                    f"{len(document['statements'])} statements, {len(document['proofs'])} proofs, "
+                    f"{len(document['figures'])} figures, {len(document['warnings'])} warnings."
+                )
+                for warning in document["warnings"]:
+                    print(f"  warning: {warning}")
+            return 0
+        prompt = codex_cli.with_user_prompt(
+            args.prompt_template.expanduser().resolve().read_text(encoding="utf-8"),
+            args.prompt, task="visualization designer",
+        )
+        review_prompt = codex_cli.with_user_prompt(
+            args.review_prompt_template.expanduser().resolve().read_text(encoding="utf-8"),
+            args.review_prompt, task="visualization reviewer", option_name="--review-prompt",
+        )
+        schema_path = args.schema.expanduser().resolve()
+        review_schema_path = args.review_schema.expanduser().resolve()
+        schema_text = schema_path.read_text(encoding="utf-8")
+        review_schema_text = review_schema_path.read_text(encoding="utf-8")
+        json.loads(schema_text)
+        json.loads(review_schema_text)
+        options = codex_cli.model_options_from_args(args)
+        review_options = _inherit_review_options(options, codex_cli.model_options_from_args(args, prefix="review"))
+        config_digest = codex_cli.semantic_config_digest(
+            prompt, schema_text, options, web_search=args.web_search,
+            validation_source=Path(visualization_validation.__file__).resolve(),
+            validation_dependencies=VALIDATION_DEPENDENCIES,
+        )
+        review_config_digest = codex_cli.semantic_config_digest(
+            review_prompt, review_schema_text, review_options,
+            web_search=args.review_web_search or args.web_search,
+            validation_source=Path(review_validation.__file__).resolve(),
+            validation_dependencies=VALIDATION_DEPENDENCIES,
+        )
+    except (common.CodexError, OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return codex_cli.report_error(parser, exc)
+
+    if args.dry_run:
+        for source in sources:
+            number = visualizations.next_run_number(source.package)
+            print(
+                f"Would visualize {source.label} ({', '.join(anchors)}) as run-{number:03d}"
+                + ("" if args.skip_review else " and run an independent review")
+                + "."
+            )
+        return 0
+
+    try:
+        codex = codex_cli.resolve_codex_executable(args.codex)
+        codex_version = codex_cli.read_codex_version(codex)
+        for source in sources:
+            print(f"Visualizing {source.label} ({', '.join(anchors)})...")
+            outcome = visualize(
+                source, anchors,
+                codex=codex, codex_version=codex_version,
+                prompt=prompt, schema_path=schema_path, config_digest=config_digest,
+                options=options, web_search=args.web_search,
+                review=not args.skip_review,
+                review_prompt=review_prompt, review_schema_path=review_schema_path,
+                review_config_digest=review_config_digest, review_options=review_options,
+                review_web_search=args.review_web_search or args.web_search,
+                rebuild_document=args.rebuild_document,
+                repair_rounds=None if args.repair_rounds is None else max(0, args.repair_rounds),
+            )
+            print(
+                f"Installed {outcome.run_directory}: widgets {', '.join(outcome.widgets) or 'none'}; "
+                f"annotations {'updated' if outcome.annotations_updated else 'unchanged'}."
+            )
+            if outcome.review_summary:
+                print(f"Review: {outcome.review_summary}")
+    except common.CodexError as exc:
+        return codex_cli.report_error(parser, exc)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

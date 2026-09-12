@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Paper reader · Loose Ends</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.17.0/dist/katex.min.css">
+  <link rel="stylesheet" href="reader.css">
+  <script src="https://cdn.jsdelivr.net/npm/katex@0.17.0/dist/katex.min.js" defer></script>
+  <script src="reader.js" defer></script>
+</head>
+<body>
+  <div id="reader" class="reader">
+    <aside id="outline" class="outline" aria-label="Outline">
+      <div class="outline-head">
+        <span>Outline</span>
+        <button id="outline-close" class="icon-button" type="button" aria-label="Hide outline">×</button>
+      </div>
+      <nav id="outline-list" class="outline-list"></nav>
+    </aside>
+    <div class="reader-main">
+      <div id="toolbar" class="toolbar" role="toolbar" aria-label="Reading controls">
+        <button id="outline-open" class="tool" type="button">☰ Outline</button>
+        <span class="tool-group">
+          <button id="expand-all" class="tool" type="button">Expand all</button>
+          <button id="collapse-all" class="tool" type="button">Collapse all</button>
+          <button id="toggle-proofs" class="tool" type="button">Show proofs</button>
+        </span>
+        <span id="toolbar-status" class="toolbar-status"></span>
+        <span class="tool-group tool-group-right" id="toolbar-actions"></span>
+      </div>
+      <div id="notice" class="notice" hidden></div>
+      <main id="content" class="content"><div class="loading">Loading paper…</div></main>
+    </div>
+  </div>
+  <div id="popover" class="popover" role="tooltip" hidden></div>
+</body>
+</html>

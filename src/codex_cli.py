@@ -103,6 +103,7 @@ class OutputValidator:
     source: Path
     validate: Callable[..., validation_common.ValidationReport]
     expectations: Mapping[str, object]
+    dependencies: tuple[Path, ...] = ()  # Standalone modules staged at the workspace root.
 
 
 def validated_result(
@@ -320,6 +321,7 @@ def semantic_config_digest(
     *,
     web_search: str = "disabled",
     validation_source: Path | None = None,
+    validation_dependencies: tuple[Path, ...] = (),
 ) -> str:
     payload = {
         "fast": options.fast,
@@ -332,7 +334,7 @@ def semantic_config_digest(
     if web_search != "disabled":
         payload["web_search"] = web_search
     if validation_source is not None:
-        payload["validation"] = validation_code_digest(validation_source)
+        payload["validation"] = validation_code_digest(validation_source, validation_dependencies)
     encoded = json.dumps(
         payload,
         ensure_ascii=False,
@@ -342,12 +344,13 @@ def semantic_config_digest(
     return hashlib.sha256(encoded).hexdigest()
 
 
-def validation_code_digest(source: Path) -> str:
+def validation_code_digest(source: Path, dependencies: tuple[Path, ...] = ()) -> str:
     digest = hashlib.sha256()
     for path in (
         Path(validation_common.__file__).resolve(),
         source.resolve(),
         DEFAULT_VALIDATION_PROMPT_PATH.resolve(),
+        *sorted((path.resolve() for path in dependencies), key=lambda path: path.name),
     ):
         digest.update(path.name.encode("utf-8"))
         digest.update(b"\0")
@@ -357,7 +360,7 @@ def validation_code_digest(source: Path) -> str:
 
 
 def stage_output_validator(workspace: Path, validator: OutputValidator) -> Path:
-    """Stage only the selected checker, shared primitives, and expectations."""
+    """Stage the selected checker, its explicit dependencies, and expectations."""
     directory = workspace / "validation"
     directory.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(
@@ -365,6 +368,8 @@ def stage_output_validator(workspace: Path, validator: OutputValidator) -> Path:
         directory / "common.py",
     )
     shutil.copyfile(validator.source.resolve(), directory / "validate.py")
+    for dependency in validator.dependencies:
+        shutil.copyfile(dependency.resolve(), workspace / dependency.name)
     (directory / "__init__.py").write_text("", encoding="utf-8")
     (directory / validation_common.EXPECTATIONS_FILENAME).write_text(
         json.dumps(
@@ -1274,6 +1279,7 @@ def run_validated_codex(
         validator.source,
         validator.validate,
         {**validator.expectations, "result_schema": result_schema},
+        dependencies=validator.dependencies,
     )
     validation_directory = stage_output_validator(
         workspace,
@@ -1284,6 +1290,8 @@ def run_validated_codex(
     # The model must be able to inspect and execute this validator because the
     # prompt requires an in-turn `python -m validation.validate` check.
     grant_sandbox_read_access(validation_directory)
+    for dependency in effective_validator.dependencies:
+        grant_sandbox_read_access(workspace / dependency.name)
     resolved_schema = schema_path.resolve()
     if resolved_schema.is_relative_to(workspace):
         # Review workflows generate a claim-constrained schema inside the

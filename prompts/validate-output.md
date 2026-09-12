@@ -10,7 +10,7 @@ Before finishing, validate your output via the following command:
 python -m validation.validate
 ```
 
-Fix every reported issue without modifying `validation/` or any staged input,
+Fix every reported issue without modifying `validation/`, its staged dependency modules, or any staged input,
 and rerun the command until it prints `Validation passed.` Do not change
 generated output after the successful check. Your final assistant message is
 only a short completion note; the driver reads `agent-result.json` directly.
