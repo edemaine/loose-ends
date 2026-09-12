@@ -99,6 +99,10 @@ Your web browser should automatically open the server at
    and select a new paper. ArXiv papers should already have their metadata
    (title and authors), but for local files you will need to supply it:
    use **Extract metadata** to automate or **Edit metadata** to do it manually.
+   Optionally choose **Extract references** (per paper, or from the selection
+   bar) to parse each paper's bibliography; the **Graph** view in **Papers**
+   then shows how the papers cite each other, which references they share,
+   and which clusters they form (see [Map citations](#map-citations-between-papers)).
 2. **Analyze papers (extract open problems).**
    In **Papers**, select all papers by choosing **Select visible**
    (after optionally searching to filter down to a subset of papers),
@@ -360,6 +364,61 @@ dates or timestamps. Importers may add source-specific identifiers and
 provenance (for example `arxiv_id`, `doi`, `url`, or `provenance`); consumers
 ignore unknown fields. Directory names do not encode semantics and need only be
 unique within their collection.
+
+## Map citations between papers
+
+`src/extract_paper_references.py` uses one bounded Codex turn per paper to
+turn its bibliography into structured data, and `src/citation_graph.py`
+connects the results into a citation graph without any model call.
+
+```sh
+python src/extract_paper_references.py papers/edemaine/arXiv-0705.4085v1
+python src/extract_paper_references.py papers/edemaine/*/ --dry-run
+python src/citation_graph.py papers/edemaine --summary
+python src/citation_graph.py papers/edemaine --output graph.json
+```
+
+The extractor looks for the bibliography in this order: a `.bbl` file under
+`source/` (preferring the one matching the main `.tex` file), a
+`thebibliography` environment embedded in the `.tex` sources, a `.bib`
+database (together with the keys the sources actually cite), the reference
+section of `pdftotext paper.pdf` when `pdftotext` is installed, and finally the
+PDF itself. Codex returns one entry per cited work with its citation key,
+title, authors, year, venue, arXiv ID, DOI, URL, and the raw one-line text,
+validated against `schemas/paper-references.schema.json`. The result is
+installed as `references/references.json` next to the paper, with the staged
+bibliography text in `references/source.txt` and the run's `events.jsonl` and
+`run.log`. A paper whose PDF and source are unchanged is skipped unless
+`--force` is given. `--prompt TEXT`, `--model`, `--reasoning-effort` (default
+`medium`), and `--fast` work as for the other tools.
+
+The graph builder resolves every reference against the installed papers:
+
+* An arXiv ID (from the entry, its URL, or its raw text) or a DOI that matches
+  an installed paper is an **exact** citation.
+* A reference whose title matches an installed paper's title (exactly after
+  normalization, or closely with a shared author surname) is an **inferred**
+  citation: typically the journal or conference version of an arXiv paper in
+  the collection. Inferred links are drawn dashed and amber in the workbench.
+* Everything else becomes a **stub**, a referenced work that is not in the
+  collection. Stubs cited by several papers are merged by arXiv ID, DOI, or
+  near-identical title, so shared references reveal connections even between
+  papers that never cite each other.
+
+Installed papers are clustered with Louvain modularity over direct citations,
+bibliographic coupling (shared references), and co-citation. Each cluster is
+labeled with the distinctive words of its titles and its most frequent authors.
+
+In the workbench, the **Papers** tab gains an **Extract references** action per
+paper and in the selection bar, a **References** filter, **References** and
+**Cited by** panels on each paper page, and a **Graph** view (the
+Details/Graph switch in the sidebar). The graph shows papers colored by
+cluster, shared references as hollow nodes, and cluster hulls; the sidebar
+search and filters restrict which papers appear; clicking a node shows its
+details, and a stub can be added to the collection with **Add from arXiv**
+(when it carries an arXiv ID) or **Add from files**. Once such a paper is
+imported and its metadata extracted, matching references link to it
+automatically.
 
 ## Analyze papers with Codex
 

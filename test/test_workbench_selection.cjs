@@ -8,7 +8,7 @@ const reviewModel = globalThis.LooseEndsReviewModel;
 const source = readFileSync(`${__dirname}/../src/workbench_web/app.js`, "utf8");
 const functions = [
   "filterControl", "filterToggle", "renderResearchFilters", "filteredReviews", "renderResearch",
-  "paperFilterControl", "renderPaperFilters", "filteredPapers", "renderPapers",
+  "paperFilterControl", "renderPaperFilters", "filteredPapers", "renderPapers", "paperSideMeta",
   "manuscriptFilterControl", "renderManuscriptFilters", "filteredManuscripts", "renderManuscripts",
   "sidebarSearch", "renderActivity",
   "syncListNavigation", "restoreSidebarScroll", "revealIfHidden", "revealCentered",
@@ -41,7 +41,7 @@ function harness(view, sort = "alphabetical") {
   }));
   const papers = keys.map((key, index) => ({
     key, path: key, title: title(key), activityTimestamp: index + 1,
-    metadataComplete: key !== "c",
+    metadataComplete: key !== "c", referencesExtracted: key !== "c", referenceCount: 7,
   }));
   const manuscripts = keys.map((key, index) => {
     const latest = { key: `${key}-draft`, title: title(key), createdTimestamp: index + 1,
@@ -50,6 +50,7 @@ function harness(view, sort = "alphabetical") {
   });
   const state = {
     catalog: { reviews, papers, manuscripts }, search: "", paperSort: sort, manuscriptSort: sort,
+    paperView: "details",
     selectedProblem: "c", selectedReview: "c-1", selectedPaper: "c",
     selectedManuscript: "c", selectedDraft: "c-old", manuscriptDraftSelections: new Map(),
     researchFilters: reviewModel.createDefaultFilters(), paperFilters: reviewModel.createDefaultPaperFilters(),
@@ -74,6 +75,7 @@ function harness(view, sort = "alphabetical") {
     button: (text, handler) => ({ text, handler }),
     persistentSidebarControls() {}, visibleProblemSelectionControl() {}, visiblePaperSelectionControl() {},
     relatedTaskHost() {}, attemptTagsNode() {}, problemTarget() {}, paperTarget() {}, attemptTarget() {},
+    ensureCitationGraph() {},
     routeHref: () => "/research?problem=OP-001&attempt=attempt-003",
     setTab: () => render(),
     humanize: reviewModel.humanize,
@@ -192,6 +194,16 @@ for (const [view, selectedKey, filter, value] of [
     assert.equal(h.state[selectedKey], "a");
   });
 }
+
+test("Papers: the references filter splits extracted from missing", () => {
+  const h = harness("Papers");
+  h.change("references", "extracted");
+  assert.deepEqual(h.cards.map(card => card.title), ["a match", "b match", "d match", "e match"]);
+  assert.ok(h.cards[0].meta.includes("7 refs"));
+  h.change("references", "missing");
+  assert.deepEqual(h.cards.map(card => card.title), ["c excluded"]);
+  assert.ok(h.cards[0].meta.includes("no refs"));
+});
 
 test("Research: filtered attempts move to the nearest attempt within the same problem", () => {
   const h = harness("Research");
