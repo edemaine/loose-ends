@@ -10,6 +10,7 @@ from functools import lru_cache
 import hashlib
 import ipaddress
 import json
+import logging
 import mimetypes
 import os
 from pathlib import Path, PurePosixPath
@@ -59,6 +60,7 @@ except ImportError:  # pragma: no cover - reported cleanly from main
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ASSET_DIRECTORY = Path(__file__).resolve().parent / "workbench_web"
 DEFAULT_STATE_DIRECTORY = PROJECT_ROOT / ".loose-ends"
+SCHEDULER_ERROR_RETRY_SECONDS = 5.0
 DEFAULT_MANUSCRIPTS = PROJECT_ROOT / "manuscripts"
 IGNORED_PARTS = {".git", ".loose-ends", "__pycache__", ".runs"}
 IGNORED_PREFIXES = (
@@ -1420,7 +1422,18 @@ class Scheduler:
                 if self.stopping.wait(0.05):
                     break
                 self.pending.clear()
-            wake_after = self._check()
+            try:
+                wake_after = self._check()
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "Scheduler check failed; retrying in %s seconds",
+                    SCHEDULER_ERROR_RETRY_SECONDS,
+                )
+                # Database events must not bypass the backoff, and shutdown
+                # must still interrupt it. Retry even without another event.
+                if self.stopping.wait(SCHEDULER_ERROR_RETRY_SECONDS):
+                    break
+                wake_after = 0.0
 
     def close(self) -> None:
         self.stopping.set()
