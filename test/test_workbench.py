@@ -2,6 +2,7 @@ from pathlib import Path
 from io import BytesIO
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
@@ -128,6 +129,27 @@ class ProblemDetailTests(unittest.TestCase):
                 parts = human_review.problem_statement_parts(value)
                 self.assertEqual(parts["problemStatementShort"], value)
                 self.assertEqual(parts["problemBackground"], "")
+
+    def test_paragraph_statement_labels_preserve_lists_and_math(self):
+        for label in ("**Precise statement.**", "**Precise statement:**", "**Precise statement**:"):
+            with self.subTest(label=label):
+                statement = (
+                    "Given a triangulation T, minimize the flips to a Hamiltonian triangulation.\n\n"
+                    "Consider both variants:\n\n- Sequential flips.\n- Simultaneous flips.\n\n"
+                    "\\[ f(T) \\le n \\]"
+                )
+                parts = human_review.problem_statement_parts(
+                    f"**Explicitness:** `uncertain`\n\n{label} {statement}\n\n"
+                    "**Source location.** Section 1, PDF p. 3.\n\n"
+                    "**Context.** The Hamiltonian target remains unresolved.\n\n"
+                    "**Ambiguity.** Status at publication is uncertain."
+                )
+                self.assertEqual(parts["problemStatementShort"], statement)
+                self.assertEqual(parts["problemSource"], "Section 1, PDF p. 3.")
+                self.assertIn("**Explicitness:** `uncertain`", parts["problemBackground"])
+                self.assertIn("**Context.** The Hamiltonian target remains unresolved.", parts["problemBackground"])
+                self.assertIn("**Ambiguity.** Status at publication is uncertain.", parts["problemBackground"])
+                self.assertNotIn("Given a triangulation", parts["problemBackground"])
 
     def test_lazy_detail_includes_claims_and_current_statement(self):
         with TemporaryDirectory() as temporary:
@@ -2804,6 +2826,75 @@ class WorkbenchWatchTests(unittest.TestCase):
             self.assertGreater(store.stale_run_ids.call_count, checks)
         finally:
             scheduler.close()
+
+    def test_scheduler_retries_database_errors_without_another_event(self):
+        with TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            store = WorkbenchStore(state / "workbench.sqlite3", state)
+            job = store.create_job(
+                {"action": "solve"},
+                fake_plan([sys.executable, "-c", "pass"]),
+            )
+            scheduler = object.__new__(workbench.Scheduler)
+            scheduler.store = store
+            scheduler.hub = Mock()
+            scheduler.memory = Mock()
+            scheduler.memory_lock = threading.Lock()
+            scheduler.stopping = threading.Event()
+            scheduler.pending = threading.Event()
+            scheduler.pending.set()
+            scheduler.revision = store.revision()
+            scheduler.last_launch = 0.0
+            scheduler.settings_snapshot = Mock(return_value={
+                "workerLimit": 1, "queuePaused": False,
+            })
+            scheduler._publish_memory_if_changed = Mock()
+            scheduler._launch = Mock(side_effect=lambda *_: scheduler.stopping.set())
+            with patch.object(
+                store, "stale_run_ids",
+                side_effect=[sqlite3.OperationalError("disk I/O error"),
+                             sqlite3.OperationalError("disk I/O error"), []],
+            ), patch.object(
+                workbench, "SCHEDULER_ERROR_RETRY_SECONDS", 0.01,
+            ), self.assertLogs("workbench", level="ERROR") as logs:
+                scheduler.thread = threading.Thread(target=scheduler._loop)
+                scheduler.thread.start()
+                try:
+                    scheduler.thread.join(2)
+                    self.assertFalse(scheduler.thread.is_alive())
+                finally:
+                    scheduler.close()
+            self.assertEqual(len(logs.output), 2)
+            self.assertIn("disk I/O error", logs.output[0])
+            scheduler._launch.assert_called_once()
+            self.assertEqual(store.get_run(job["runs"][0]["id"])["status"], "starting")
+
+    def test_scheduler_shutdown_interrupts_error_backoff(self):
+        scheduler = object.__new__(workbench.Scheduler)
+        scheduler.pending = threading.Event()
+        scheduler.pending.set()
+        scheduler.stopping = Mock()
+        scheduler.stopping.is_set.return_value = False
+        scheduler.stopping.wait.side_effect = [False, True]
+        scheduler._check = Mock(side_effect=sqlite3.OperationalError("disk I/O error"))
+        with self.assertLogs("workbench", level="ERROR"):
+            scheduler._loop()
+        scheduler._check.assert_called_once()
+        self.assertEqual(
+            scheduler.stopping.wait.call_args.args,
+            (workbench.SCHEDULER_ERROR_RETRY_SECONDS,),
+        )
+
+    def test_store_closes_connection_when_setup_fails(self):
+        store = object.__new__(WorkbenchStore)
+        store.database = "unused.sqlite3"
+        connection = Mock()
+        connection.execute.side_effect = [None, sqlite3.OperationalError("disk I/O error")]
+        with patch("workbench_store.sqlite3.connect", return_value=connection):
+            with self.assertRaisesRegex(sqlite3.OperationalError, "disk I/O error"):
+                with store.connect():
+                    self.fail("connection setup should fail")
+        connection.close.assert_called_once()
 
     def test_sqlite_wal_change_wakes_scheduler(self):
         with TemporaryDirectory() as temporary:

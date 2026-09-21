@@ -25,6 +25,7 @@ import time
 from typing import Callable, Iterable, Mapping
 
 from validation import common as validation_common
+from codex_transcripts import record_transcript
 
 
 REASONING_EFFORTS = ("low", "medium", "high", "xhigh", "max", "ultra")
@@ -1378,6 +1379,7 @@ def _finish_claude_turn(
     )
 
 
+@record_transcript
 def run_structured_codex(
     *,
     codex: str,

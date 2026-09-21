@@ -1104,6 +1104,20 @@ interrupted and runs that installed no output can be retried. A run that
 installed output before a later phase failed is marked partial so the next
 action can operate on that output without accidentally duplicating it.
 
+In **Activity**, expand **Codex transcript** for a read-only
+transcript: Codex messages appear as Markdown, with expandable task prompts,
+tool activity, and diagnostics. Transcripts refresh while the run is active.
+The **command & output** fold opens independently.
+Each problem also has a **Full reports → Codex logs** tab for the selected
+attempt's saved solution/review logs and the problem's triage/literature logs.
+It shares the Activity transcript viewer, including expandable tool calls and
+paged loading. Original prompts remain available in Activity for archived runs.
+The **Papers** and **Manuscripts** tabs also have a **Codex logs** fold for
+paper analysis and the selected draft's writing/review logs, respectively.
+New managed runs archive each Codex invocation separately, including repair
+turns and failures. Older runs use event logs beside their installed artifacts;
+these may reflect later reviews or replacements and do not include the prompt.
+
 Use the worker control in the top bar to change concurrent CLI invocations or
 pause new starts. Codex credit exhaustion automatically pauses the queue;
 replenish credits and use **Resume queue** to restart pending work. Active runs

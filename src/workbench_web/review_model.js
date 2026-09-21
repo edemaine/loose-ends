@@ -813,7 +813,8 @@
         for (const token of block.children || []) {
           if (token.type === "text") {
             token.content = token.content.replace(/~/g, "\u00a0")
-              .replace(/``/g, "“").replace(/''/g, "”");
+              .replace(/``/g, "“").replace(/''/g, "”")
+              .replace(/---/g, "—").replace(/--/g, "–");
           }
         }
       }
