@@ -300,7 +300,7 @@ def add_model_arguments(
         metavar="MODEL",
         help=(
             "Codex or Claude model ID; for example, gpt-5.6-sol or "
-            "claude-opus-5; claude-* models run through the Claude Code CLI "
+            "claude-opus-5-5; claude-* models run through the Claude Code CLI "
             f"(default: {model_default_help})"
         ),
     )

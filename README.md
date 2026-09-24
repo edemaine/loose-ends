@@ -468,7 +468,7 @@ at a higher rate.
 
 ### Claude Code backend
 
-A model ID starting with `claude` (for example, `--model claude-opus-5`, or
+A model ID starting with `claude` (for example, `--model claude-opus-5-5`, or
 `--review-model claude-fable-5-1` for the critic only) runs that agent through
 the [Claude Code](https://code.claude.com/docs/en/overview) CLI instead of
 Codex; `--claude` names the executable, as `--codex` does for Codex. The
