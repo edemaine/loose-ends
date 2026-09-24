@@ -96,8 +96,22 @@ class CodexError(RuntimeError):
     """A local Codex invocation or its workspace could not be used."""
 
 
+CREDIT_ERROR_PHRASES = (
+    "hit your usage limit",
+    "hit your session limit",
+    "out of credits",
+    "insufficient credits",
+    "usage credits exhausted",
+    "out of usage credits",
+)
+
+
 def codex_credit_error(events_path: Path) -> str | None:
-    """Recognize account exhaustion only in Codex error events."""
+    """Recognize account exhaustion only in agent error events.
+
+    Codex reports it in ``error`` and ``turn.failed`` events; Claude Code
+    reports its usage and session limits in a failed final ``result`` event.
+    """
     with events_path.open(encoding="utf-8", errors="replace") as events:
         for line in events:
             try:
@@ -110,14 +124,15 @@ def codex_credit_error(events_path: Path) -> str | None:
                 error = event
             elif event.get("type") == "turn.failed":
                 error = event.get("error")
+            elif event.get("type") == "result" and event.get("is_error"):
+                error = {"message": event.get("result")}
             else:
                 continue
             if not isinstance(error, dict):
                 continue
-            message = str(error.get("message", ""))
+            message = str(error.get("message") or "")
             if error.get("code") in {"usage_limit_reached", "insufficient_quota"} or any(
-                phrase in message.casefold()
-                for phrase in ("hit your usage limit", "out of credits", "insufficient credits")
+                phrase in message.casefold() for phrase in CREDIT_ERROR_PHRASES
             ):
                 return message or str(error["code"])
     return None
@@ -1511,7 +1526,7 @@ def run_structured_codex(
             break
 
     if backend == "claude":
-        if not timed_out:
+        if not timed_out and credit_error is None:
             _finish_claude_turn(
                 workspace=workspace,
                 events_path=events_path,
@@ -1534,8 +1549,12 @@ def run_structured_codex(
                 log.write(f"\nDriver ACL recovery warning: {exc}\n")
     if credit_error is not None:
         raise CodexError(
-            f"Codex credits exhausted: {credit_error}; "
-            f"workspace preserved at {workspace}"
+            (
+                "Claude Code usage limit reached"
+                if backend == "claude"
+                else "Codex credits exhausted"
+            )
+            + f": {credit_error}; workspace preserved at {workspace}"
         )
     if timed_out:
         raise CodexError(

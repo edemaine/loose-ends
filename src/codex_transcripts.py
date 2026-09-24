@@ -47,6 +47,30 @@ def transcript_stage(events: Path) -> str:
     return stage
 
 
+def transcript_backend(events: Path | None) -> str:
+    """Name the CLI that wrote an event log from its first complete event."""
+    if events is None:
+        return "Codex"
+    try:
+        with events.open(encoding="utf-8", errors="replace") as source:
+            for line in source:
+                if not line.strip():
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    break
+                if isinstance(event, dict) and (
+                    "claude_code_version" in event
+                    or event.get("type") in {"assistant", "result"}
+                ):
+                    return "Claude Code"
+                break
+    except OSError:
+        pass
+    return "Codex"
+
+
 def artifact_transcripts(directories):
     """Find installed logs in the requested directories, without scanning history."""
     transcripts = []

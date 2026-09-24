@@ -10,7 +10,9 @@ from unittest.mock import patch
 from urllib.parse import urlencode
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from codex_transcripts import record_transcript, transcript_stage, TRANSCRIPT_ENV
+from codex_transcripts import (
+    record_transcript, transcript_backend, transcript_stage, TRANSCRIPT_ENV,
+)
 from workbench import WorkbenchHandler
 
 
@@ -35,6 +37,29 @@ class TranscriptTests(unittest.TestCase):
         ):
             with self.subTest(path=path):
                 self.assertEqual(transcript_stage(Path(path)), expected)
+
+    def test_backend_is_named_from_the_first_event(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            attempt = root / "attempt-001"
+            attempt.mkdir()
+            events = attempt / "events.jsonl"
+            for text, expected in (
+                ('{"type":"system","subtype":"init","claude_code_version":"2.1.263"}\n', "Claude Code"),
+                ('\n{"type":"assistant","message":{}}\n', "Claude Code"),
+                ('{"type":"thread.started"}\n', "Codex"),
+                ('{"type":', "Codex"),
+                ("", "Codex"),
+            ):
+                with self.subTest(text=text):
+                    events.write_text(text, encoding="utf-8")
+                    self.assertEqual(transcript_backend(events), expected)
+            self.assertEqual(transcript_backend(root / "missing.jsonl"), "Codex")
+            events.write_text('{"type":"system","subtype":"init","claude_code_version":"2.1.263"}\n', encoding="utf-8")
+            handler = self.handler(root, {"log_path": str(root / "console.log"), "status": "succeeded",
+                                          "outputs": [str(attempt / "attempt.md")]})
+            handler._send_codex("id", "")
+            self.assertEqual(handler.result["transcripts"][0]["label"], "Claude Code 1 · Solve")
 
     def test_failed_turn_is_archived_before_workspace_changes(self):
         with TemporaryDirectory() as temporary:

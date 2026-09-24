@@ -61,6 +61,10 @@ class CodexCliTests(unittest.TestCase):
                 ({"type": "turn.failed", "error": {"code": "insufficient_quota"}}, True),
                 ({"type": "error", "message": "Out of credits"}, True),
                 ({"type": "error", "message": "Rate limit exceeded; retry shortly"}, False),
+                ({"type": "result", "is_error": True,
+                  "result": "You've hit your session limit · resets 4:20am (Asia/Tokyo)"}, True),
+                ({"type": "result", "is_error": True, "result": "API Error: 400 bad request"}, False),
+                ({"type": "result", "is_error": False, "result": "hit your usage limit"}, False),
                 ({"type": "item.completed", "message": "out of credits"}, False),
                 ({"type": "turn.failed", "error": None}, False),
                 ([], False),
@@ -590,6 +594,53 @@ class CodexCliTests(unittest.TestCase):
                     result_path,
                 )
             )
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX fake CLI script")
+    def test_claude_session_limit_pauses_queue(self):
+        from workbench_store import WorkbenchStore
+
+        with TemporaryDirectory() as temporary:
+            workspace = Path(temporary) / "workspace"
+            workspace.mkdir()
+            store = WorkbenchStore(Path(temporary) / "workbench.sqlite3")
+            fake = Path(temporary) / "claude"
+            fake.write_text(
+                "#!/bin/sh\n"
+                "cat > /dev/null\n"
+                "echo '{\"type\":\"result\",\"subtype\":\"success\","
+                "\"is_error\":true,\"result\":\"You\\u2019ve hit your "
+                "session limit \\u00b7 resets 4:20am\"}'\n"
+                "exit 1\n",
+                encoding="utf-8",
+            )
+            fake.chmod(0o755)
+            with (
+                patch.dict(
+                    os.environ,
+                    {codex_cli.WORKBENCH_DATABASE_ENV: str(store.database)},
+                ),
+                patch.object(
+                    codex_cli,
+                    "claude_executable",
+                    return_value=str(fake),
+                ),
+                patch.object(codex_cli, "wait_for_codex_launch_slot"),
+            ):
+                with self.assertRaisesRegex(
+                    codex_cli.CodexError,
+                    "Claude Code usage limit reached: You.*session limit",
+                ):
+                    codex_cli.run_structured_codex(
+                        codex="codex",
+                        workspace=workspace,
+                        prompt="solve it",
+                        schema_path=Path(temporary) / "schema.json",
+                        options=codex_cli.ModelOptions(model="claude-opus-5"),
+                        model_writes_result=True,
+                    )
+            settings = WorkbenchStore(store.database).scheduler_settings()
+            self.assertEqual(settings["queuePauseReason"], "codex_credits")
+            self.assertIn("session limit", settings["codexCreditError"])
 
     @unittest.skipIf(sys.platform == "win32", "POSIX fake CLI script")
     def test_claude_turn_failure_reports_the_result_error(self):

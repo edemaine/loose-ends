@@ -1051,7 +1051,7 @@ function renderSchedulerControl() {
       ? "Pause manually"
       : "Pause queue";
   if (state.settings.queuePauseReason === "codex_credits") {
-    workerStatus.textContent = `${counts.active} active; ${counts.queued} waiting. Codex credits exhausted. Replenish credits, then resume the queue. Active runs continue.`;
+    workerStatus.textContent = `${counts.active} active; ${counts.queued} waiting. Agent credits or usage limit exhausted: ${state.settings.codexCreditError || "see the failed run"}. Replenish credits or wait for the limit to reset, then resume the queue. Active runs continue.`;
   } else if (state.settings.memoryLimitPending && state.settings.memory?.error) {
     workerStatus.textContent = `${counts.active} active; ${counts.queued} waiting. Queue paused because memory enforcement failed.`;
   } else if (state.settings.memoryLimitPending) {
@@ -3512,6 +3512,23 @@ function refreshVisibleCodexLogs() {
   });
 }
 
+function claudeToolDetail(input) {
+  if (!input || typeof input !== "object") return {};
+  const detail = input.command ?? input.file_path ?? input.pattern ?? input.query ?? input.url;
+  return typeof detail === "string" ? { command: detail } : {};
+}
+
+function claudeResultText(content) {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content.map(block => (block && typeof block === "object" && typeof block.text === "string")
+      ? block.text : JSON.stringify(block)).join("\n");
+  }
+  return content == null ? "" : JSON.stringify(content, null, 2);
+}
+
+// Both CLIs' event streams reduce to the same items: agent messages, tool
+// activity keyed by ID so results merge into their calls, errors, and usage.
 function codexItems(text) {
   const items = new Map();
   let turn = 0;
@@ -3521,12 +3538,39 @@ function codexItems(text) {
     try { event = JSON.parse(line); } catch { continue; }
     if (!event || typeof event !== "object") continue;
     if (event.type === "thread.started" || event.type === "turn.started") turn++;
+    if (event.type === "system" && event.subtype === "init") turn++;
     if (event.item && typeof event.item === "object") {
       items.set(`${turn}:${event.item.id ?? sequence++}`, event.item);
     } else if (event.type === "error" || event.type === "turn.failed") {
       items.set(`error:${sequence++}`, { type: "error", text: event.message || event.error?.message || JSON.stringify(event) });
     } else if (event.type === "turn.completed") {
       items.set(`usage:${sequence++}`, { type: "usage", text: JSON.stringify(event.usage || {}) });
+    } else if (event.type === "assistant" || event.type === "user") {
+      const blocks = Array.isArray(event.message?.content) ? event.message.content : [];
+      for (const block of blocks) {
+        if (!block || typeof block !== "object") continue;
+        if (event.type === "assistant" && block.type === "text" && block.text) {
+          items.set(`${turn}:text:${sequence++}`, { type: "agent_message", text: block.text });
+        } else if (event.type === "assistant" && block.type === "tool_use") {
+          items.set(`${turn}:${block.id ?? sequence++}`, {
+            type: block.name || "tool_use", status: "in_progress",
+            ...claudeToolDetail(block.input), text: JSON.stringify(block.input ?? {}, null, 2),
+          });
+        } else if (event.type === "user" && block.type === "tool_result") {
+          const key = `${turn}:${block.tool_use_id ?? sequence++}`;
+          const item = items.get(key) || { type: "tool_result" };
+          item.status = block.is_error ? "failed" : "completed";
+          item.aggregated_output = claudeResultText(block.content);
+          items.set(key, item);
+        }
+      }
+    } else if (event.type === "result") {
+      if (event.is_error) {
+        items.set(`error:${sequence++}`, { type: "error", text: event.result || event.subtype || JSON.stringify(event) });
+      } else {
+        const { num_turns, duration_ms, total_cost_usd, usage } = event;
+        items.set(`usage:${sequence++}`, { type: "usage", text: JSON.stringify({ num_turns, duration_ms, total_cost_usd, usage }) });
+      }
     }
   }
   return [...items.values()];
@@ -3591,6 +3635,7 @@ async function refreshCodexLogs(source, element) {
     for (const entry of value.transcripts) {
       let transcript = cached.find(value => value.id === entry.id);
       if (!transcript) { transcript = { ...entry, files: {} }; cached.push(transcript); }
+      else if (entry.label && entry.label !== transcript.label) { transcript.label = entry.label; changed = true; }
       for (const kind of ["prompt", "events", "diagnostics"]) {
         // Older transcripts have no saved prompt.
         if (kind === "prompt" && entry.legacy) continue;

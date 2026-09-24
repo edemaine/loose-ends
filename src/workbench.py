@@ -11,7 +11,7 @@ import hashlib
 import ipaddress
 import json
 import logging
-from codex_transcripts import artifact_transcripts, transcript_stage
+from codex_transcripts import artifact_transcripts, transcript_backend, transcript_stage
 import mimetypes
 import os
 from pathlib import Path, PurePosixPath
@@ -2489,7 +2489,8 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
         if "index" not in values and "id" not in values:
             self.send_json({"complete": complete, "transcripts": [
                 {"index": index, "id": key,
-                 "label": f"Codex {index + 1}" + (f" · {stages[key]}" if stages.get(key) else ""),
+                 "label": f"{transcript_backend(files.get('events'))} {index + 1}"
+                 + (f" · {stages[key]}" if stages.get(key) else ""),
                  "legacy": "prompt" not in files}
                 for index, (key, files) in enumerate(transcripts)
             ]})

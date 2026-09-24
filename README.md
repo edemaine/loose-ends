@@ -1105,8 +1105,10 @@ installed output before a later phase failed is marked partial so the next
 action can operate on that output without accidentally duplicating it.
 
 In **Activity**, expand **Codex transcript** for a read-only
-transcript: Codex messages appear as Markdown, with expandable task prompts,
+transcript: agent messages appear as Markdown, with expandable task prompts,
 tool activity, and diagnostics. Transcripts refresh while the run is active.
+Claude Code turns are shown the same way, labeled **Claude Code** instead of
+**Codex**, with each tool call folded together with its result.
 The **command & output** fold opens independently.
 Each problem also has a **Full reports → Codex logs** tab for the selected
 attempt's saved solution/review logs and the problem's triage/literature logs.
@@ -1119,8 +1121,9 @@ turns and failures. Older runs use event logs beside their installed artifacts;
 these may reflect later reviews or replacements and do not include the prompt.
 
 Use the worker control in the top bar to change concurrent CLI invocations or
-pause new starts. Codex credit exhaustion automatically pauses the queue;
-replenish credits and use **Resume queue** to restart pending work. Active runs
+pause new starts. Codex credit exhaustion, or a Claude Code usage or session
+limit, automatically pauses the queue; replenish credits or wait for the limit
+to reset, then use **Resume queue** to restart pending work. Active runs
 continue. A task's **Retry all failed/partial** button creates a new task with
 its latest failed and partial runs, using the same commands and settings.
 Partial runs restart their commands and may repeat completed work.
