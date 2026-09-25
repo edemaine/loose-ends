@@ -877,7 +877,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="report pending reviews without starting Codex",
+        help="report pending reviews without starting an agent",
     )
     parser.add_argument(
         "--codex",
@@ -1042,7 +1042,8 @@ def main(argv: list[str] | None = None) -> int:
             return codex_cli.report_error(parser, exc)
         print(
             f"Reviewing {len(pending)} attempt(s), with up to "
-            f"{min(args.jobs, len(pending))} Codex critic(s) at once."
+            f"{min(args.jobs, len(pending))} "
+            f"{codex_cli.backend_label(options.model)} critic(s) at once."
         )
         finished_count = 0
 

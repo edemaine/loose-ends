@@ -1262,7 +1262,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="report adaptive solver attempts without starting Codex",
+        help="report adaptive solver attempts without starting an agent",
     )
     parser.add_argument(
         "--codex",
@@ -1465,10 +1465,11 @@ def main(argv: list[str] | None = None) -> int:
     except common.CodexError as exc:
         return codex_cli.report_error(parser, exc)
     agent_count = min(args.jobs, len(work_items))
+    agent_label = codex_cli.backend_label(options.model)
     if agent_count == 1:
-        concurrency = "sequentially with 1 Codex agent"
+        concurrency = f"sequentially with 1 {agent_label} agent"
     else:
-        concurrency = f"with up to {agent_count} concurrent Codex agents"
+        concurrency = f"with up to {agent_count} concurrent {agent_label} agents"
     round_phrase = (
         "one round"
         if args.max_rounds == 1
@@ -1563,7 +1564,7 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 f"Reviewing {len(selected_attempts)} new attempt(s), with up "
                 f"to {min(args.review_jobs or args.jobs, len(selected_attempts))} "
-                f"Codex critic(s) at once."
+                f"{codex_cli.backend_label(review_options.model)} critic(s) at once."
             )
             review_finished_count = 0
 

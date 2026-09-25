@@ -2150,7 +2150,7 @@ function renderReviewDetail(item) {
   }));
 
   const tabs = reviewModel.detailTabs(item);
-  tabs.splice(tabs.length - 1, 0, ["codex", "Codex logs"]);
+  tabs.splice(tabs.length - 1, 0, ["codex", "Agent logs"]);
   if (!tabs.some(([key]) => key === state.detailTab)) state.detailTab = tabs[0][0];
   const reports = node("section", "section problem-reports");
   reports.id = "problem-documents";
@@ -3364,13 +3364,13 @@ function renderJobDetail(job) {
     }
     const codexExpanded = state.expandedCodexRuns.has(run.id);
     const codexFooter = node("div", "run-detail-footer");
-    const codexToggle = button(`${codexExpanded ? "Hide" : "Show"} Codex transcript`, () => {
+    const codexToggle = button(`${codexExpanded ? "Hide" : "Show"} agent transcript`, () => {
       if (state.expandedCodexRuns.has(run.id)) state.expandedCodexRuns.delete(run.id);
       else state.expandedCodexRuns.add(run.id);
       renderJobDetail(job);
     }, "run-detail-toggle");
     codexToggle.setAttribute("aria-expanded", String(codexExpanded));
-    codexToggle.setAttribute("aria-label", `${codexExpanded ? "Hide" : "Show"} Codex transcript for ${presentation.title}`);
+    codexToggle.setAttribute("aria-label", `${codexExpanded ? "Hide" : "Show"} agent transcript for ${presentation.title}`);
     codexToggle.prepend(node("span", "run-chevron", "›"));
     codexFooter.append(codexToggle);
     section.append(codexFooter);
@@ -3483,7 +3483,7 @@ function catalogTranscriptFold(kind, item) {
     category: kind, key: item.key, version: state.catalog.version || 0,
   })}`;
   const fold = node("details", "catalog-transcript-fold");
-  fold.append(node("summary", "", "Codex logs"));
+  fold.append(node("summary", "", "Agent logs"));
   fold.open = state.expandedTranscriptPanels.has(key);
   if (fold.open) fold.append(codexTranscript(source));
   fold.addEventListener("toggle", () => {
@@ -3502,7 +3502,7 @@ function catalogTranscriptFold(kind, item) {
 function codexTranscript(source) {
   const element = node("section", "codex-transcripts");
   element.dataset.codexSource = source;
-  element.append(node("h3", "", "Codex transcript"));
+  element.append(node("h3", "", "Agent transcript"));
   return element;
 }
 
@@ -3577,9 +3577,9 @@ function codexItems(text) {
 }
 
 function renderCodexTranscript(element, transcripts) {
-  element.replaceChildren(node("h3", "", "Codex transcript"));
+  element.replaceChildren(node("h3", "", "Agent transcript"));
   if (!transcripts.length) {
-    element.append(node("p", "muted", "No saved Codex transcript available yet."));
+    element.append(node("p", "muted", "No saved agent transcript available yet."));
   }
   for (const transcript of transcripts) {
     element.append(node("h4", "codex-invocation-heading", transcript.label));

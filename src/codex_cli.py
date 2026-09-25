@@ -461,6 +461,11 @@ def backend_for_model(model: str | None) -> str:
     return "claude" if is_claude_model(model) else "codex"
 
 
+def backend_label(model: str | None) -> str:
+    """Name the CLI a model runs through, for progress messages."""
+    return "Claude Code" if is_claude_model(model) else "Codex"
+
+
 def add_claude_argument(parser: argparse.ArgumentParser) -> None:
     """Add the Claude Code executable option next to ``--codex``."""
     parser.add_argument(

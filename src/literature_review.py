@@ -812,7 +812,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="report pending literature searches without starting Codex",
+        help="report pending literature searches without starting an agent",
     )
     parser.add_argument(
         "--codex",
@@ -973,7 +973,8 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"Searching literature for {len(stale)} stale problem(s) from "
             f"{len(grouped)} paper(s), with up to "
-            f"{min(args.jobs, len(grouped))} Codex agent(s) at once "
+            f"{min(args.jobs, len(grouped))} "
+            f"{codex_cli.backend_label(options.model)} agent(s) at once "
             f"({args.web_search} web search)."
         )
         with ThreadPoolExecutor(

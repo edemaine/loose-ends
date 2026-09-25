@@ -479,7 +479,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="report what would be triaged without starting Codex",
+        help="report what would be triaged without starting an agent",
     )
     parser.add_argument(
         "--solve",
@@ -643,7 +643,8 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"Triaging {len(stale)} stale problem(s) from "
             f"{len(grouped)} paper(s), with up to "
-            f"{min(args.jobs, len(grouped))} Codex agent(s) at once."
+            f"{min(args.jobs, len(grouped))} "
+            f"{codex_cli.backend_label(options.model)} agent(s) at once."
         )
         with ThreadPoolExecutor(
             max_workers=min(args.jobs, len(grouped))
