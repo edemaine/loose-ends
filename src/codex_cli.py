@@ -1343,6 +1343,12 @@ def build_claude_command(
             schema = json.loads(schema_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise CodexError(f"could not read result schema {schema_path}: {exc}") from exc
+        if isinstance(schema, dict):
+            # Claude Code validates the schema with a draft-07 validator that
+            # has no draft 2020-12 meta-schema registered, so a "$schema"
+            # dialect declaration makes it refuse the turn before starting.
+            # The declaration carries no constraints, so drop it.
+            schema = {key: value for key, value in schema.items() if key != "$schema"}
         command.extend(
             ("--json-schema", json.dumps(schema, separators=(",", ":")))
         )

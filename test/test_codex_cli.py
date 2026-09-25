@@ -450,6 +450,30 @@ class CodexCliTests(unittest.TestCase):
         )
         self.assertNotIn("--effort", command)
 
+    def test_claude_command_drops_schema_dialect_declaration(self):
+        with TemporaryDirectory() as temporary:
+            schema = Path(temporary) / "schema.json"
+            schema.write_text(json.dumps({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {"$schema": {"type": "string"}},
+                "required": ["$schema"],
+            }), encoding="utf-8")
+            command = codex_cli.build_claude_command(
+                claude="claude",
+                schema_path=schema,
+                options=codex_cli.ModelOptions(model="claude-opus-5-5"),
+            )
+
+        self.assertEqual(
+            json.loads(command[command.index("--json-schema") + 1]),
+            {
+                "type": "object",
+                "properties": {"$schema": {"type": "string"}},
+                "required": ["$schema"],
+            },
+        )
+
     def test_claude_command_requires_a_model(self):
         with self.assertRaisesRegex(codex_cli.CodexError, "Claude model ID"):
             codex_cli.build_claude_command(
