@@ -114,11 +114,17 @@
       ["present", "Has open problems"],
       ["none", "Analyzed, no open problems"],
     ],
+    references: [
+      ["all", "Any reference status"],
+      ["missing", "Needs reference extraction"],
+      ["extracted", "References extracted"],
+    ],
   });
   const paperFilterParameters = Object.freeze({
     metadata: "metadata",
     analysis: "analysis",
     problems: "problems",
+    references: "references",
   });
   const manuscriptFilterOptions = Object.freeze({
     verdict: [
@@ -235,7 +241,7 @@
   }
 
   function createDefaultPaperFilters() {
-    return { metadata: "all", analysis: "all", problems: "all" };
+    return { metadata: "all", analysis: "all", problems: "all", references: "all" };
   }
 
   function matchesPaper(paper, filters) {
@@ -246,6 +252,8 @@
     const problemCount = Number(paper.problemCount) || 0;
     if (filters.problems === "present" && problemCount === 0) return false;
     if (filters.problems === "none" && (!paper.analyzed || problemCount !== 0)) return false;
+    if (filters.references === "missing" && paper.referencesExtracted) return false;
+    if (filters.references === "extracted" && !paper.referencesExtracted) return false;
     return true;
   }
 
