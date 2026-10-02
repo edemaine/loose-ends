@@ -30,6 +30,27 @@ test("nearest matching selection keeps matches, measures distance, and prefers f
   assert.equal(nearest("c", []), "");
 });
 
+test("Not resolved keeps non-resolution claims and unattempted problems", () => {
+  const items = ["solution", "counterexample", "partial_result", "obstruction", "none", ""].map(claimedResultType => ({
+    claimedResultType, attemptStatus: claimedResultType ? "unreviewed" : "unattempted",
+  }));
+  const filters = reviewModel.createDefaultFilters();
+  filters.claim = "not-resolved";
+  assert.deepEqual(reviewModel.filterItems(items, filters).map(item => item.claimedResultType),
+    ["partial_result", "obstruction", "none", ""]);
+  filters.claim = "resolution";
+  assert.deepEqual(reviewModel.filterItems(items, filters).map(item => item.claimedResultType),
+    ["solution", "counterexample"]);
+});
+
+test("Not resolved claim filter survives URL round trips and appears in the summary", () => {
+  const filters = reviewModel.filtersFromSearchParams(new URLSearchParams("claim=not-resolved"));
+  assert.equal(filters.claim, "not-resolved");
+  const parameters = reviewModel.filtersToSearchParams(new URLSearchParams(), filters);
+  assert.equal(parameters.get("claim"), "not-resolved");
+  assert.match(reviewModel.queueSummary([], filters), /not resolved/);
+});
+
 function harness(view, sort = "alphabetical") {
   const keys = ["a", "b", "c", "d", "e"];
   const title = key => `${key} ${key === "c" ? "excluded" : "match"}`;

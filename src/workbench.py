@@ -696,6 +696,7 @@ class CatalogManager:
         self.fingerprint = ""
         self.paper_caches: dict[str, dict] = {}
         self.manuscript_cache: dict | None = None
+        self.paper_updates: dict[str, dict] = {}
         self._load_caches()
         self.pending = threading.Event()
         self.pending_lock = threading.Lock()
@@ -920,7 +921,10 @@ class CatalogManager:
         force: bool = False,
         dirty_roots: set[str] | None = None,
     ) -> None:
+        with self.lock:
+            started_updates = dict(self.paper_updates)
         rescanned = False
+        rescanned_roots: list[Path] = []
         try:
             entries: dict[str, dict] = {}
             for root in self.paths:
@@ -936,6 +940,7 @@ class CatalogManager:
                     continue
                 entry = self._scan_paper_root(root, signature)
                 rescanned = True
+                rescanned_roots.append(root)
                 entries[key] = entry
                 try:
                     self._save_cache_file(
@@ -1018,15 +1023,24 @@ class CatalogManager:
             self.ready.set()
             self.hub.publish("catalog.error", message=str(exc))
             return
-        fingerprint = self._catalog_fingerprint(value)
-        # A relevant file can affect lazily loaded detail without changing
-        # the summary catalog, so a real root rescan still advances version.
-        changed = (
-            fingerprint != self.fingerprint
-            or force
-            or (rescanned and dirty_roots is not None)
-        )
         with self.lock:
+            # A manual edit may finish while this scan is reading older files.
+            # Keep its published rows until a scan started after the edit.
+            for key, update in list(self.paper_updates.items()):
+                if started_updates.get(key) is update and any(
+                    Path(key) == root or _relative_to(Path(key), root)
+                    for root in rescanned_roots
+                ):
+                    del self.paper_updates[key]
+                else:
+                    self._replace_paper(value, key, update)
+            fingerprint = self._catalog_fingerprint(value)
+            # Relevant files can affect detail without changing summary rows.
+            changed = (
+                fingerprint != self.fingerprint
+                or force
+                or (rescanned and dirty_roots is not None)
+            )
             if not changed:
                 self.error = ""
                 self.catalog["error"] = ""
@@ -1042,6 +1056,36 @@ class CatalogManager:
         self.ready.set()
         if changed:
             self.hub.publish("catalog.changed", version=self.version)
+
+    @staticmethod
+    def _replace_paper(value: dict, key: str, update: dict) -> None:
+        papers, reviews = CatalogManager._merge_paper_caches([
+            {
+                "papers": [row for row in value["papers"] if row["path"] != key],
+                "reviews": [
+                    row for row in value["reviews"] if row["paperDirectory"] != key
+                ],
+            },
+            update,
+        ])
+        value.update(CatalogManager._catalog_value(
+            papers, reviews, value["manuscripts"], loading=value["loading"],
+        ))
+
+    def publish_paper(self, paper: Path) -> None:
+        """Make a saved edit browsable without waiting for a full root scan."""
+        key = str(paper.resolve())
+        update = {
+            "papers": _paper_inventory([paper]),
+            "reviews": _review_inventory([paper]),
+        }
+        with self.lock:
+            self.paper_updates[key] = update
+            self._replace_paper(self.catalog, key, update)
+            self.fingerprint = self._catalog_fingerprint(self.catalog)
+            self.version += 1
+            self.catalog["version"] = self.version
+        self.hub.publish("catalog.changed", version=self.version)
 
     def _set_progress(
         self,
@@ -1885,6 +1929,14 @@ class WorkbenchApplication:
                 manifest_temporary.unlink(missing_ok=True)
                 problems_temporary.unlink(missing_ok=True)
 
+            catalog_pending = False
+            try:
+                self.catalog.publish_paper(paper)
+            except (OSError, UnicodeError, common.CodexError, json.JSONDecodeError):
+                # The edit is already saved. Reporting a failed save here
+                # would encourage a retry that creates a second problem.
+                catalog_pending = True
+                logging.exception("Could not publish the saved problem in %s", paper)
         self.catalog.schedule([manifest_path, problems_path])
         return {
             "path": str(paper / problem_id),
@@ -1892,6 +1944,7 @@ class WorkbenchApplication:
             "title": title,
             "statement": statement,
             "explicitness": explicitness,
+            "catalogPending": catalog_pending,
         }
 
     def set_manuscript_pinning(self, request: dict) -> dict:

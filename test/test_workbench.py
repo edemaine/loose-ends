@@ -1526,6 +1526,77 @@ class WorkbenchPlanningTests(unittest.TestCase):
         self.assertIn("## OP-002: A related question", markdown)
         self.assertIn("Can we prove $x > 0$?", markdown)
         app.catalog.schedule.assert_called_once()
+        app.catalog.publish_paper.assert_called_once_with(paper.resolve())
+
+    def test_added_problem_is_published_before_background_rescan(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = make_paper(root / "papers")
+            manager = CatalogManager([paper.parent], root / "manuscripts", EventHub())
+            try:
+                self.assertTrue(manager.wait_until_ready(8))
+                app = object.__new__(workbench.WorkbenchApplication)
+                app.paths = [paper.parent]
+                app.analysis_lock = threading.Lock()
+                app.catalog = manager
+                version = manager.version
+                with patch.object(manager, "schedule") as schedule:
+                    result = app.add_open_problem({
+                        "path": str(paper), "title": "New question",
+                        "statement": "What happens?",
+                    })
+                snapshot = manager.snapshot()
+                self.assertGreater(snapshot["version"], version)
+                self.assertEqual(snapshot["papers"][0]["problemCount"], 2)
+                self.assertEqual(snapshot["counts"]["problems"], 2)
+                self.assertIn(result["id"], {row["problemId"] for row in snapshot["reviews"]})
+                schedule.assert_called_once()
+            finally:
+                manager.close()
+
+    def test_background_scan_cannot_overwrite_newly_published_problem(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = make_paper(root / "papers")
+            manager = CatalogManager([paper.parent], root / "manuscripts", EventHub())
+            try:
+                self.assertTrue(manager.wait_until_ready(8))
+                app = object.__new__(workbench.WorkbenchApplication)
+                app.paths = [paper.parent]
+                app.analysis_lock = threading.Lock()
+                app.catalog = manager
+                original = manager._scan_paper_root
+
+                def scan_then_add(path, signature):
+                    stale = original(path, signature)
+                    with patch.object(manager, "schedule"):
+                        app.add_open_problem({
+                            "path": str(paper), "title": "New question",
+                            "statement": "What happens?",
+                        })
+                    return stale
+
+                with patch.object(manager, "_scan_paper_root", side_effect=scan_then_add):
+                    manager.refresh(force=True)
+                self.assertEqual(manager.snapshot()["counts"]["problems"], 2)
+                self.assertTrue(manager.paper_updates)
+                # Refreshing an unrelated root must also preserve the edit.
+                manager.refresh(dirty_roots=set())
+                self.assertEqual(manager.snapshot()["counts"]["problems"], 2)
+                self.assertTrue(manager.paper_updates)
+                # Work installed after publication must win on the next scan.
+                manifest_path = paper / "analysis" / "manifest.json"
+                manifest = common.read_json(manifest_path)
+                manifest["open_problems"].append({
+                    "id": "OP-003", "title": "Later question",
+                    "explicitness": "additional",
+                })
+                common.write_json(manifest_path, manifest)
+                manager.refresh(force=True)
+                self.assertEqual(manager.snapshot()["counts"]["problems"], 3)
+                self.assertFalse(manager.paper_updates)
+            finally:
+                manager.close()
 
     def test_add_open_problem_requires_analyzed_paper(self):
         with TemporaryDirectory() as temporary:
@@ -1542,6 +1613,24 @@ class WorkbenchPlanningTests(unittest.TestCase):
                     "title": "Question",
                     "statement": "What happens?",
                 })
+
+    def test_saved_problem_remains_successful_if_catalog_publication_fails(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = make_paper(root)
+            app = object.__new__(workbench.WorkbenchApplication)
+            app.paths = [root]
+            app.analysis_lock = threading.Lock()
+            app.catalog = Mock()
+            app.catalog.publish_paper.side_effect = common.CodexError("Invalid prior result")
+            with self.assertLogs(level="ERROR"):
+                result = app.add_open_problem({
+                    "path": str(paper), "title": "Question", "statement": "What happens?",
+                })
+            self.assertTrue(result["catalogPending"])
+            self.assertEqual(common.read_json(paper / "analysis" / "manifest.json")
+                             ["open_problems"][-1]["id"], result["id"])
+            app.catalog.schedule.assert_called_once()
 
     def test_multi_problem_plan_title_includes_single_paper_title(self):
         with TemporaryDirectory() as temporary:
