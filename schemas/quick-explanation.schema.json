@@ -1,0 +1,24 @@
+{
+  "type": "object",
+  "properties": {
+    "title": {
+      "type": "string"
+    },
+    "text": {
+      "type": "string"
+    },
+    "phrase": {
+      "type": "string"
+    },
+    "needs_picture": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "title",
+    "text",
+    "phrase",
+    "needs_picture"
+  ],
+  "additionalProperties": false
+}
