@@ -2792,7 +2792,8 @@ function openProblemEditor(paper) {
 
 async function saveProblemEditor() {
   const editor = state.dialog;
-  if (!editor || editor.kind !== "open-problem") return;
+  if (!editor || editor.kind !== "open-problem" || editor.saving) return;
+  editor.saving = true;
   const values = {};
   dialogBody.querySelectorAll("[name]").forEach(input => {
     values[input.name] = input.value;
@@ -2800,22 +2801,38 @@ async function saveProblemEditor() {
   dialogFooter.querySelectorAll("button").forEach(value => {
     value.disabled = true;
   });
+  const addButton = dialogFooter.querySelector(".primary");
+  addButton.textContent = "Adding problem…";
+  dialog.setAttribute("aria-busy", "true");
+  const status = node("div", "muted", "Saving problem and updating Research…");
+  status.setAttribute("role", "status");
+  dialogBody.append(status);
+  const preventClose = event => event.preventDefault();
+  dialog.addEventListener("cancel", preventClose);
   try {
     const problem = await api("/api/papers/open-problems", {
       method: "POST",
       body: { path: editor.paper.path, ...values },
     });
-    editor.paper.problemCount += 1;
+    addButton.textContent = "Updating Research…";
+    await refreshCatalog().catch(error => showNotice(error.message, true));
     dialog.close();
     state.dialog = null;
-    renderPapers();
-    showNotice(`${problem.id} was added to ${editor.paper.title}.`);
+    showNotice(`${problem.id} was added to ${editor.paper.title}.${
+      problem.catalogPending ? " Research will update after the catalog refresh." : ""
+    }`);
   } catch (error) {
     dialogFooter.querySelectorAll("button").forEach(value => {
       value.disabled = false;
     });
     dialogBody.querySelector(".error-box")?.remove();
     dialogBody.prepend(node("div", "error-box", error.message));
+  } finally {
+    editor.saving = false;
+    addButton.textContent = "Add problem";
+    status.remove();
+    dialog.removeAttribute("aria-busy");
+    dialog.removeEventListener("cancel", preventClose);
   }
 }
 
