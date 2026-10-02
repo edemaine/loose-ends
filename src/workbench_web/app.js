@@ -4218,6 +4218,7 @@ function field(name, label, { type = "text", value = "", placeholder = "", help 
 function modelField(name, label, value, defaultLabel) {
   const options = [
     ["", defaultLabel],
+    ["gpt-6.1-sol", "GPT-6.1 Sol"],
     ["gpt-6-astra", "GPT-6 Astra"],
     ["gpt-5.6-sol", "GPT-5.6 Sol"],
     ["gpt-5.6-terra", "GPT-5.6 Terra"],
