@@ -8,7 +8,106 @@ const functions = [
   "latestJobRuns", "retryJob", "codexItems", "refreshCodexLogs",
   "separateWriteTasks", "taskRequests", "taskRequestOptions", "taskTargetsForRequest",
   "targetKey", "targetCountLabel", "reviewTask", "confirmTask", "collectDialogOptions",
+  "saveProblemEditor",
 ].map(name => source.match(new RegExp(`^(?:async )?function ${name}\\([^]*?^}`, "m"))[0]).join("\n");
+
+function problemEditorHarness(api, refreshCatalog = async () => {}) {
+  const controls = [{ disabled: false }, { disabled: false, textContent: "Add problem" }];
+  const attributes = new Map();
+  const listeners = new Map();
+  const statusNodes = [];
+  const context = vm.createContext({
+    state: { dialog: { kind: "open-problem", paper: { path: "/paper", title: "Paper", problemCount: 1 } } },
+    dialogFooter: {
+      querySelectorAll: () => controls,
+      querySelector: () => controls[1],
+    },
+    dialogBody: {
+      querySelectorAll: () => [
+        { name: "title", value: "Question" }, { name: "statement", value: "What happens?" },
+      ],
+      querySelector: () => null,
+      append: value => statusNodes.push(value),
+      prepend: value => { context.error = value.textContent; },
+    },
+    dialog: {
+      setAttribute: (key, value) => attributes.set(key, value),
+      removeAttribute: key => attributes.delete(key),
+      addEventListener: (key, value) => listeners.set(key, value),
+      removeEventListener: key => listeners.delete(key),
+      close: () => { context.closed = true; },
+    },
+    node: (_tag, _className, textContent) => ({
+      textContent, setAttribute(key, value) { this[key] = value; },
+      remove() { this.removed = true; },
+    }),
+    api, refreshCatalog,
+    showNotice: (message, error) => { context.notices.push({ message, error }); },
+    notices: [],
+  });
+  vm.runInContext(functions, context);
+  return { context, controls, attributes, listeners, statusNodes };
+}
+
+test("adding a problem shows progress and submits once until Research is refreshed", async () => {
+  let finishSave, finishRefresh, startRefresh;
+  let requests = 0;
+  const saved = new Promise(resolve => { finishSave = resolve; });
+  const refreshed = new Promise(resolve => { finishRefresh = resolve; });
+  const refreshStarted = new Promise(resolve => { startRefresh = resolve; });
+  const { context, controls, attributes, listeners, statusNodes } = problemEditorHarness(
+    () => { requests += 1; return saved; }, () => { startRefresh(); return refreshed; },
+  );
+  const pending = context.saveProblemEditor();
+  await context.saveProblemEditor();
+  assert.equal(requests, 1);
+  assert.ok(controls.every(value => value.disabled));
+  assert.equal(controls[1].textContent, "Adding problem…");
+  assert.equal(attributes.get("aria-busy"), "true");
+  assert.equal(statusNodes[0].role, "status");
+  let prevented = false;
+  listeners.get("cancel")({ preventDefault: () => { prevented = true; } });
+  assert.equal(prevented, true);
+  finishSave({ id: "OP-002" });
+  await refreshStarted;
+  assert.equal(controls[1].textContent, "Updating Research…");
+  assert.equal(context.closed, undefined);
+  finishRefresh();
+  await pending;
+  assert.equal(context.closed, true);
+  assert.equal(context.state.dialog, null);
+  assert.equal(attributes.has("aria-busy"), false);
+  assert.equal(listeners.has("cancel"), false);
+  assert.equal(statusNodes[0].removed, true);
+  assert.match(context.notices[0].message, /OP-002 was added/);
+});
+
+test("failed problem save restores controls and retains entered text", async () => {
+  const { context, controls, attributes, statusNodes } = problemEditorHarness(
+    async () => { throw new Error("Title is required"); },
+  );
+  await context.saveProblemEditor();
+  assert.equal(context.error, "Title is required");
+  assert.equal(context.state.dialog.saving, false);
+  assert.equal(context.closed, undefined);
+  assert.ok(controls.every(value => !value.disabled));
+  assert.equal(controls[1].textContent, "Add problem");
+  assert.equal(attributes.has("aria-busy"), false);
+  assert.equal(statusNodes[0].removed, true);
+});
+
+test("failed catalog fetch after saving does not invite another submission", async () => {
+  const { context } = problemEditorHarness(
+    async () => ({ id: "OP-002" }),
+    async () => { throw new Error("Refresh failed"); },
+  );
+  await context.saveProblemEditor();
+  assert.equal(context.closed, true);
+  assert.equal(context.state.dialog, null);
+  assert.equal(context.error, undefined);
+  assert.equal(context.notices[0].error, true);
+  assert.match(context.notices[1].message, /OP-002 was added/);
+});
 
 test("Codex transcript updates items and keeps repeated IDs in later turns", () => {
   const context = vm.createContext({});

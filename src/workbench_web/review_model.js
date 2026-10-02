@@ -19,6 +19,7 @@
     claim: [
       ["all", "Any claim type"],
       ["resolution", "Any resolution claim"],
+      ["not-resolved", "Not resolved"],
       ["solution", "Solution"],
       ["counterexample", "Counterexample"],
       ["partial_result", "Partial result"],
@@ -204,7 +205,8 @@
       return false;
     }
     if (filters.claim === "resolution" && !["solution", "counterexample"].includes(item.claimedResultType)) return false;
-    if (!["all", "resolution"].includes(filters.claim) && item.claimedResultType !== filters.claim) return false;
+    if (filters.claim === "not-resolved" && ["solution", "counterexample"].includes(item.claimedResultType)) return false;
+    if (!["all", "resolution", "not-resolved"].includes(filters.claim) && item.claimedResultType !== filters.claim) return false;
     if (filters.correctness === "credible" && !["plausible", "well_supported"].includes(item.correctness)) return false;
     if (filters.correctness === "no_major_error" && !["minor_gaps", "plausible", "well_supported"].includes(item.correctness)) return false;
     if (!["all", "credible", "no_major_error"].includes(filters.correctness) && item.correctness !== filters.correctness) return false;
@@ -654,6 +656,7 @@
     if (staleCount) parts.push(`${staleCount} stale`);
     const focusLabels = {
       resolution: "resolution claims", solution: "solution claims", counterexample: "counterexample claims",
+      "not-resolved": "not resolved",
       partial_result: "partial results", obstruction: "obstructions", none: "no result claim",
     };
     const literatureLabels = {
