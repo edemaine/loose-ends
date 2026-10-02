@@ -162,6 +162,7 @@ def run_worker(database: Path, run_id: str) -> int:
         environment["CODEX_HOME"] = options["codexHome"]
     environment["PYTHONUNBUFFERED"] = "1"
     environment[codex_cli.WORKBENCH_DATABASE_ENV] = str(store.database)
+    environment["LOOSE_ENDS_CODEX_TRANSCRIPTS"] = str(log_path.parent / "codex")
     artifact_log = log_path.parent / "artifacts.txt"
     artifact_log.touch(exist_ok=True)
     environment[artifact_reporting.ARTIFACT_LOG_ENV] = str(artifact_log)

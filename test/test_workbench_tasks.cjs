@@ -5,10 +5,159 @@ const vm = require("node:vm");
 
 const source = readFileSync(`${__dirname}/../src/workbench_web/app.js`, "utf8");
 const functions = [
-  "latestJobRuns", "retryJob",
+  "latestJobRuns", "retryJob", "codexItems", "refreshCodexLogs",
   "separateWriteTasks", "taskRequests", "taskRequestOptions", "taskTargetsForRequest",
   "targetKey", "targetCountLabel", "reviewTask", "confirmTask", "collectDialogOptions",
+  "saveProblemEditor",
 ].map(name => source.match(new RegExp(`^(?:async )?function ${name}\\([^]*?^}`, "m"))[0]).join("\n");
+
+function problemEditorHarness(api, refreshCatalog = async () => {}) {
+  const controls = [{ disabled: false }, { disabled: false, textContent: "Add problem" }];
+  const attributes = new Map();
+  const listeners = new Map();
+  const statusNodes = [];
+  const context = vm.createContext({
+    state: { dialog: { kind: "open-problem", paper: { path: "/paper", title: "Paper", problemCount: 1 } } },
+    dialogFooter: {
+      querySelectorAll: () => controls,
+      querySelector: () => controls[1],
+    },
+    dialogBody: {
+      querySelectorAll: () => [
+        { name: "title", value: "Question" }, { name: "statement", value: "What happens?" },
+      ],
+      querySelector: () => null,
+      append: value => statusNodes.push(value),
+      prepend: value => { context.error = value.textContent; },
+    },
+    dialog: {
+      setAttribute: (key, value) => attributes.set(key, value),
+      removeAttribute: key => attributes.delete(key),
+      addEventListener: (key, value) => listeners.set(key, value),
+      removeEventListener: key => listeners.delete(key),
+      close: () => { context.closed = true; },
+    },
+    node: (_tag, _className, textContent) => ({
+      textContent, setAttribute(key, value) { this[key] = value; },
+      remove() { this.removed = true; },
+    }),
+    api, refreshCatalog,
+    showNotice: (message, error) => { context.notices.push({ message, error }); },
+    notices: [],
+  });
+  vm.runInContext(functions, context);
+  return { context, controls, attributes, listeners, statusNodes };
+}
+
+test("adding a problem shows progress and submits once until Research is refreshed", async () => {
+  let finishSave, finishRefresh, startRefresh;
+  let requests = 0;
+  const saved = new Promise(resolve => { finishSave = resolve; });
+  const refreshed = new Promise(resolve => { finishRefresh = resolve; });
+  const refreshStarted = new Promise(resolve => { startRefresh = resolve; });
+  const { context, controls, attributes, listeners, statusNodes } = problemEditorHarness(
+    () => { requests += 1; return saved; }, () => { startRefresh(); return refreshed; },
+  );
+  const pending = context.saveProblemEditor();
+  await context.saveProblemEditor();
+  assert.equal(requests, 1);
+  assert.ok(controls.every(value => value.disabled));
+  assert.equal(controls[1].textContent, "Adding problem…");
+  assert.equal(attributes.get("aria-busy"), "true");
+  assert.equal(statusNodes[0].role, "status");
+  let prevented = false;
+  listeners.get("cancel")({ preventDefault: () => { prevented = true; } });
+  assert.equal(prevented, true);
+  finishSave({ id: "OP-002" });
+  await refreshStarted;
+  assert.equal(controls[1].textContent, "Updating Research…");
+  assert.equal(context.closed, undefined);
+  finishRefresh();
+  await pending;
+  assert.equal(context.closed, true);
+  assert.equal(context.state.dialog, null);
+  assert.equal(attributes.has("aria-busy"), false);
+  assert.equal(listeners.has("cancel"), false);
+  assert.equal(statusNodes[0].removed, true);
+  assert.match(context.notices[0].message, /OP-002 was added/);
+});
+
+test("failed problem save restores controls and retains entered text", async () => {
+  const { context, controls, attributes, statusNodes } = problemEditorHarness(
+    async () => { throw new Error("Title is required"); },
+  );
+  await context.saveProblemEditor();
+  assert.equal(context.error, "Title is required");
+  assert.equal(context.state.dialog.saving, false);
+  assert.equal(context.closed, undefined);
+  assert.ok(controls.every(value => !value.disabled));
+  assert.equal(controls[1].textContent, "Add problem");
+  assert.equal(attributes.has("aria-busy"), false);
+  assert.equal(statusNodes[0].removed, true);
+});
+
+test("failed catalog fetch after saving does not invite another submission", async () => {
+  const { context } = problemEditorHarness(
+    async () => ({ id: "OP-002" }),
+    async () => { throw new Error("Refresh failed"); },
+  );
+  await context.saveProblemEditor();
+  assert.equal(context.closed, true);
+  assert.equal(context.state.dialog, null);
+  assert.equal(context.error, undefined);
+  assert.equal(context.notices[0].error, true);
+  assert.match(context.notices[1].message, /OP-002 was added/);
+});
+
+test("Codex transcript updates items and keeps repeated IDs in later turns", () => {
+  const context = vm.createContext({});
+  vm.runInContext(functions, context);
+  const events = [
+    { type: "turn.started" },
+    { type: "item.started", item: { id: "item_0", type: "command_execution", status: "in_progress" } },
+    { type: "item.completed", item: { id: "item_0", type: "command_execution", status: "completed", aggregated_output: "done" } },
+    { type: "turn.started" },
+    { type: "item.completed", item: { id: "item_0", type: "agent_message", text: "Hello" } },
+    { type: "turn.failed", error: { message: "failure" } },
+  ].map(value => JSON.stringify(value)).join("\n");
+  const items = context.codexItems(events + "\n--- repair ---\nnull\n{");
+  assert.equal(items.length, 3);
+  assert.equal(items[0].aggregated_output, "done");
+  assert.equal(items[1].text, "Hello");
+  assert.equal(items[2].text, "failure");
+});
+
+test("shared transcript loader preserves report queries and pages both sources", async () => {
+  for (const source of ["/api/runs/run-id/codex", "/api/review-codex?key=attempt&version=2"]) {
+    const requests = [];
+    const pages = [
+      { text: "first\n", nextOffset: 6, complete: false },
+      { text: "second\n", nextOffset: 13, complete: true },
+    ];
+    const context = vm.createContext({
+      URLSearchParams,
+      state: { codexLogs: new Map(), codexLoads: new Set(), codexTimers: new Map() },
+      main: { querySelectorAll: () => [] },
+      clearTimeout() {}, setTimeout() { return 1; },
+      api: async url => {
+        requests.push(url);
+        if (url === source) return { complete: true, transcripts: [{ id: "saved-log", legacy: true }] };
+        const query = new URL(url, "http://localhost").searchParams;
+        if (source.includes("?")) assert.equal(query.get("key"), "attempt");
+        if (query.get("kind") === "diagnostics") return { text: "", nextOffset: 0, complete: true };
+        assert.equal(query.get("offset"), pages.length === 2 ? "0" : "6");
+        return pages.shift();
+      },
+    });
+    vm.runInContext(functions, context);
+    const element = { dataset: { rendered: "true" }, isConnected: true };
+    await context.refreshCodexLogs(source, element);
+    await context.refreshCodexLogs(source, element);
+    assert.equal(context.state.codexLogs.get(source)[0].events, "first\nsecond\n");
+    assert.equal(pages.length, 0);
+    assert.equal(requests.filter(url => url.includes("kind=prompt")).length, 0);
+  }
+});
 
 test("bulk retry confirms latest failed/partial runs and selects the new task", async () => {
   const control = { disabled: false };

@@ -19,6 +19,7 @@ import time
 from typing import Callable, Mapping
 
 from validation import common as validation_common
+from codex_transcripts import record_transcript
 
 
 REASONING_EFFORTS = ("low", "medium", "high", "xhigh", "max", "ultra")
@@ -1090,6 +1091,7 @@ def build_exec_command(
     return command
 
 
+@record_transcript
 def run_structured_codex(
     *,
     codex: str,

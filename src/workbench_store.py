@@ -109,11 +109,11 @@ class WorkbenchStore:
     @contextmanager
     def connect(self):
         connection = sqlite3.connect(self.database, timeout=30)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA busy_timeout = 30000")
-        connection.execute("PRAGMA journal_mode = WAL")
-        connection.execute("PRAGMA foreign_keys = ON")
         try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA busy_timeout = 30000")
+            connection.execute("PRAGMA journal_mode = WAL")
+            connection.execute("PRAGMA foreign_keys = ON")
             with connection:
                 yield connection
         finally:

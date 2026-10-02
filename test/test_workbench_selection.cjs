@@ -13,6 +13,7 @@ const functions = [
   "sidebarSearch", "renderActivity",
   "syncListNavigation", "restoreSidebarScroll", "revealIfHidden", "revealCentered",
   "paperSortControl", "manuscriptSortControl", "normalizeManuscriptSort",
+  "olderVersionWarning", "olderAttemptWarning", "openRoute",
 ].map(name => source.match(new RegExp(`^function ${name}[(][^]*?^}`, "m"))[0]).join("\n");
 
 test("nearest matching selection keeps matches, measures distance, and prefers following ties", () => {
@@ -27,6 +28,27 @@ test("nearest matching selection keeps matches, measures distance, and prefers f
   assert.equal(nearest("missing", ["b", "d"]), "b");
   assert.equal(nearest("", ["b", "d"]), "b");
   assert.equal(nearest("c", []), "");
+});
+
+test("Not resolved keeps non-resolution claims and unattempted problems", () => {
+  const items = ["solution", "counterexample", "partial_result", "obstruction", "none", ""].map(claimedResultType => ({
+    claimedResultType, attemptStatus: claimedResultType ? "unreviewed" : "unattempted",
+  }));
+  const filters = reviewModel.createDefaultFilters();
+  filters.claim = "not-resolved";
+  assert.deepEqual(reviewModel.filterItems(items, filters).map(item => item.claimedResultType),
+    ["partial_result", "obstruction", "none", ""]);
+  filters.claim = "resolution";
+  assert.deepEqual(reviewModel.filterItems(items, filters).map(item => item.claimedResultType),
+    ["solution", "counterexample"]);
+});
+
+test("Not resolved claim filter survives URL round trips and appears in the summary", () => {
+  const filters = reviewModel.filtersFromSearchParams(new URLSearchParams("claim=not-resolved"));
+  assert.equal(filters.claim, "not-resolved");
+  const parameters = reviewModel.filtersToSearchParams(new URLSearchParams(), filters);
+  assert.equal(parameters.get("claim"), "not-resolved");
+  assert.match(reviewModel.queueSummary([], filters), /not resolved/);
 });
 
 function harness(view, sort = "alphabetical") {
@@ -63,6 +85,7 @@ function harness(view, sort = "alphabetical") {
     return { tag, text, dataset: {}, children: [], handlers: {},
       append(...children) { this.children.push(...children); },
       addEventListener(event, handler) { this.handlers[event] = handler; },
+      setAttribute(name, value) { this[name] = value; },
     };
   }
   const context = vm.createContext({
@@ -72,6 +95,8 @@ function harness(view, sort = "alphabetical") {
     button: (text, handler) => ({ text, handler }),
     persistentSidebarControls() {}, visibleProblemSelectionControl() {}, visiblePaperSelectionControl() {},
     relatedTaskHost() {}, attemptTagsNode() {}, problemTarget() {}, paperTarget() {}, attemptTarget() {},
+    routeHref: () => "/research?problem=OP-001&attempt=attempt-003",
+    setTab: () => render(),
     humanize: reviewModel.humanize,
     appendSideCard: (_list, card) => cards.push(card),
     sidebar: node("aside"), main: { replaceChildren() {}, querySelector() {} }, renderReviewDetail() {}, loadReviewDetail() {},
@@ -108,6 +133,49 @@ function harness(view, sort = "alphabetical") {
   }
   return { state, cards, context, render, change, reset, search };
 }
+
+test("Research: hidden newer attempts are counted and the warning link reveals the latest", () => {
+  const h = harness("Research");
+  const original = h.state.catalog.reviews.find(item => item.problemKey === "c");
+  Object.assign(original, { claimedResultType: "solution", attemptName: "attempt-001" });
+  h.state.catalog.reviews.push(...[2, 3].map(attemptNumber => ({
+    ...original, attemptNumber, itemKey: `c-${attemptNumber}`, attemptName: `attempt-00${attemptNumber}`,
+    claimedResultType: "partial_result",
+  })));
+  h.state.researchFilters.claim = "resolution";
+  h.render();
+  assert.equal(h.state.selectedReview, "c-1");
+  const sidebarText = element => [element?.text || "", ...(element?.children || []).map(sidebarText)].join(" ");
+  assert.match(sidebarText(h.context.sidebar), /Attempts · 1 of 3 · filtered/);
+  const latest = reviewModel.attemptsForProblem(h.state.catalog.reviews, "c")[0];
+  assert.equal(latest.attemptName, "attempt-003");
+  const warning = h.context.olderAttemptWarning(original, latest);
+  assert.match(sidebarText(warning), /latest attempt is hidden/);
+  const link = warning.children[2];
+  assert.equal(link.text, "Clear filters and view latest attempt");
+  link.handlers.click({ button: 0, preventDefault() {} });
+  assert.equal(h.state.researchFilters.claim, "all");
+  assert.equal(h.state.selectedReview, "c-3");
+  assert.equal(h.state.selectedProblem, "c");
+  h.render();
+  assert.equal(h.state.selectedReview, "c-3", "selection remains latest after rerender");
+});
+
+test("Research: a visible latest attempt keeps the current filters", () => {
+  const h = harness("Research");
+  const original = h.state.catalog.reviews.find(item => item.problemKey === "c");
+  Object.assign(original, { claimedResultType: "solution", attemptName: "attempt-001" });
+  const latest = { ...original, attemptNumber: 2, itemKey: "c-2", attemptName: "attempt-002" };
+  h.state.catalog.reviews.push(latest);
+  h.state.researchFilters.claim = "resolution";
+  h.state.keepSidebarSelectionVisible = true;
+  h.context.syncNavigation = () => h.render();
+  const warning = h.context.olderAttemptWarning(original, latest);
+  assert.equal(warning.children[2].text, "View latest attempt");
+  warning.children[2].handlers.click({ button: 0, preventDefault() {} });
+  assert.equal(h.state.researchFilters.claim, "resolution");
+  assert.equal(h.state.selectedReview, "c-2");
+});
 
 for (const [view, selectedKey, filter, value] of [
   ["Research", "selectedProblem", "claim", "solution"],

@@ -10,6 +10,8 @@ from functools import lru_cache
 import hashlib
 import ipaddress
 import json
+import logging
+from codex_transcripts import artifact_transcripts, transcript_stage
 import mimetypes
 import os
 from pathlib import Path, PurePosixPath
@@ -59,6 +61,7 @@ except ImportError:  # pragma: no cover - reported cleanly from main
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ASSET_DIRECTORY = Path(__file__).resolve().parent / "workbench_web"
 DEFAULT_STATE_DIRECTORY = PROJECT_ROOT / ".loose-ends"
+SCHEDULER_ERROR_RETRY_SECONDS = 5.0
 DEFAULT_MANUSCRIPTS = PROJECT_ROOT / "manuscripts"
 IGNORED_PARTS = {".git", ".loose-ends", "__pycache__", ".runs"}
 IGNORED_PREFIXES = (
@@ -693,6 +696,7 @@ class CatalogManager:
         self.fingerprint = ""
         self.paper_caches: dict[str, dict] = {}
         self.manuscript_cache: dict | None = None
+        self.paper_updates: dict[str, dict] = {}
         self._load_caches()
         self.pending = threading.Event()
         self.pending_lock = threading.Lock()
@@ -917,7 +921,10 @@ class CatalogManager:
         force: bool = False,
         dirty_roots: set[str] | None = None,
     ) -> None:
+        with self.lock:
+            started_updates = dict(self.paper_updates)
         rescanned = False
+        rescanned_roots: list[Path] = []
         try:
             entries: dict[str, dict] = {}
             for root in self.paths:
@@ -933,6 +940,7 @@ class CatalogManager:
                     continue
                 entry = self._scan_paper_root(root, signature)
                 rescanned = True
+                rescanned_roots.append(root)
                 entries[key] = entry
                 try:
                     self._save_cache_file(
@@ -1015,15 +1023,24 @@ class CatalogManager:
             self.ready.set()
             self.hub.publish("catalog.error", message=str(exc))
             return
-        fingerprint = self._catalog_fingerprint(value)
-        # A relevant file can affect lazily loaded detail without changing
-        # the summary catalog, so a real root rescan still advances version.
-        changed = (
-            fingerprint != self.fingerprint
-            or force
-            or (rescanned and dirty_roots is not None)
-        )
         with self.lock:
+            # A manual edit may finish while this scan is reading older files.
+            # Keep its published rows until a scan started after the edit.
+            for key, update in list(self.paper_updates.items()):
+                if started_updates.get(key) is update and any(
+                    Path(key) == root or _relative_to(Path(key), root)
+                    for root in rescanned_roots
+                ):
+                    del self.paper_updates[key]
+                else:
+                    self._replace_paper(value, key, update)
+            fingerprint = self._catalog_fingerprint(value)
+            # Relevant files can affect detail without changing summary rows.
+            changed = (
+                fingerprint != self.fingerprint
+                or force
+                or (rescanned and dirty_roots is not None)
+            )
             if not changed:
                 self.error = ""
                 self.catalog["error"] = ""
@@ -1039,6 +1056,36 @@ class CatalogManager:
         self.ready.set()
         if changed:
             self.hub.publish("catalog.changed", version=self.version)
+
+    @staticmethod
+    def _replace_paper(value: dict, key: str, update: dict) -> None:
+        papers, reviews = CatalogManager._merge_paper_caches([
+            {
+                "papers": [row for row in value["papers"] if row["path"] != key],
+                "reviews": [
+                    row for row in value["reviews"] if row["paperDirectory"] != key
+                ],
+            },
+            update,
+        ])
+        value.update(CatalogManager._catalog_value(
+            papers, reviews, value["manuscripts"], loading=value["loading"],
+        ))
+
+    def publish_paper(self, paper: Path) -> None:
+        """Make a saved edit browsable without waiting for a full root scan."""
+        key = str(paper.resolve())
+        update = {
+            "papers": _paper_inventory([paper]),
+            "reviews": _review_inventory([paper]),
+        }
+        with self.lock:
+            self.paper_updates[key] = update
+            self._replace_paper(self.catalog, key, update)
+            self.fingerprint = self._catalog_fingerprint(self.catalog)
+            self.version += 1
+            self.catalog["version"] = self.version
+        self.hub.publish("catalog.changed", version=self.version)
 
     def _set_progress(
         self,
@@ -1446,7 +1493,18 @@ class Scheduler:
                 if self.stopping.wait(0.05):
                     break
                 self.pending.clear()
-            wake_after = self._check()
+            try:
+                wake_after = self._check()
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "Scheduler check failed; retrying in %s seconds",
+                    SCHEDULER_ERROR_RETRY_SECONDS,
+                )
+                # Database events must not bypass the backoff, and shutdown
+                # must still interrupt it. Retry even without another event.
+                if self.stopping.wait(SCHEDULER_ERROR_RETRY_SECONDS):
+                    break
+                wake_after = 0.0
 
     def close(self) -> None:
         self.stopping.set()
@@ -1897,6 +1955,14 @@ class WorkbenchApplication:
                 manifest_temporary.unlink(missing_ok=True)
                 problems_temporary.unlink(missing_ok=True)
 
+            catalog_pending = False
+            try:
+                self.catalog.publish_paper(paper)
+            except (OSError, UnicodeError, common.CodexError, json.JSONDecodeError):
+                # The edit is already saved. Reporting a failed save here
+                # would encourage a retry that creates a second problem.
+                catalog_pending = True
+                logging.exception("Could not publish the saved problem in %s", paper)
         self.catalog.schedule([manifest_path, problems_path])
         return {
             "path": str(paper / problem_id),
@@ -1904,6 +1970,7 @@ class WorkbenchApplication:
             "title": title,
             "statement": statement,
             "explicitness": explicitness,
+            "catalogPending": catalog_pending,
         }
 
     def set_manuscript_pinning(self, request: dict) -> dict:
@@ -2153,12 +2220,18 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
             elif path == "/api/review-detail":
                 key = parse_qs(parsed.query).get("key", [""])[0]
                 self.send_json(self.app.catalog.review_detail(key))
+            elif path == "/api/review-codex":
+                self._send_review_codex(parsed.query)
+            elif path == "/api/catalog-codex":
+                self._send_catalog_codex(parsed.query)
             elif path == "/api/jobs":
                 self.send_json({"jobs": self.app.store.list_jobs()})
             elif match := re.fullmatch(r"/api/jobs/([0-9a-f-]+)", path):
                 self.send_json(self.app.store.get_job(match.group(1)))
             elif match := re.fullmatch(r"/api/runs/([0-9a-f-]+)/log", path):
                 self._send_log(match.group(1), parsed.query)
+            elif match := re.fullmatch(r"/api/runs/([0-9a-f-]+)/codex", path):
+                self._send_codex(match.group(1), parsed.query)
             elif path == "/api/events":
                 self._send_events(parsed.query)
             elif path == "/api/file":
@@ -2423,6 +2496,120 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
             self.end_headers()
             while chunk := temporary.read(1024 * 1024):
                 self.wfile.write(chunk)
+
+    def _send_codex(self, run_id: str, query: str) -> None:
+        run = self.app.store.get_run(run_id)
+        root = Path(run["log_path"]).parent / "codex"
+        transcripts = []
+        stages = {}
+        for folder in sorted(root.glob("turn-*")):
+            try:
+                sources = json.loads((folder / "source.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            files = {"prompt": folder / "prompt.txt"}
+            for name in ("events", "diagnostics"):
+                archived = folder / name
+                source = Path(sources[name])
+                files[name] = archived if archived.is_file() else source
+            transcripts.append((folder.name, files))
+            stages[folder.name] = sources.get("stage") or transcript_stage(Path(sources["events"]))
+        if not transcripts:
+            transcripts, stages = artifact_transcripts(
+                Path(path).parent for path in run.get("outputs", [])
+            )
+        self._send_transcripts(
+            transcripts, stages, query,
+            complete=run["status"] not in ACTIVE_STATUSES and run["status"] != "queued",
+            roots=[root, *self.app.allowed_roots],
+        )
+
+    def _send_review_codex(self, query: str) -> None:
+        key = parse_qs(query).get("key", [""])[0]
+        item = self.app.catalog.review_detail(key)
+        directories = []
+        if item.get("attemptDirectory"):
+            directories.append(Path(item["attemptDirectory"]))
+        directories.append(Path(item["paperDirectory"]) / item["problemId"])
+        self._send_saved_codex(directories, query)
+
+    def _send_catalog_codex(self, query: str) -> None:
+        values = parse_qs(query)
+        key = values.get("key", [""])[0]
+        kind = values.get("category", [""])[0]
+        with self.app.catalog.lock:
+            catalog = self.app.catalog.catalog
+            if kind == "paper":
+                items = catalog.get("papers", [])
+            elif kind == "draft":
+                items = [draft for manuscript in catalog.get("manuscripts", [])
+                         for draft in manuscript.get("drafts", [])]
+            else:
+                raise PlanError("unknown transcript category")
+            item = next((item for item in items if item["key"] == key), None)
+            if item is None:
+                raise KeyError(key)
+            directory = Path(item["path"])
+        if kind == "paper":
+            directory /= "analysis"
+        self._send_saved_codex([directory], query)
+
+    def _send_saved_codex(self, directories, query: str) -> None:
+        if any(not _is_allowed_file(path, self.app.allowed_roots) for path in directories):
+            raise PlanError("transcript is outside allowed roots")
+        transcripts, stages = artifact_transcripts(directories)
+        self._send_transcripts(
+            transcripts, stages, query, complete=True, roots=self.app.allowed_roots,
+        )
+
+    def _send_transcripts(self, transcripts, stages, query, *, complete, roots) -> None:
+        """Serve the same paged transcript format for tasks and saved reports."""
+        values = parse_qs(query)
+        if "index" not in values and "id" not in values:
+            self.send_json({"complete": complete, "transcripts": [
+                {"index": index, "id": key,
+                 "label": f"Codex {index + 1}" + (f" · {stages[key]}" if stages.get(key) else ""),
+                 "legacy": "prompt" not in files}
+                for index, (key, files) in enumerate(transcripts)
+            ]})
+            return
+        try:
+            index = (
+                next((i for i, (key, _) in enumerate(transcripts) if key == values["id"][0]), -1)
+                if "id" in values else int(values["index"][0])
+            )
+            offset = max(0, int(values.get("offset", ["0"])[0]))
+            if index < 0:
+                raise ValueError()
+            _, files = transcripts[index]
+        except (ValueError, IndexError):
+            raise PlanError("unknown Codex transcript")
+        kind = values.get("kind", ["events"])[0]
+        if kind not in files:
+            raise PlanError("unknown transcript file")
+        path = files[kind]
+        if not _is_allowed_file(path, roots):
+            raise PlanError("transcript is outside allowed roots")
+        data = b""
+        size = 0
+        if path.is_file():
+            with path.open("rb") as source:
+                size = os.fstat(source.fileno()).st_size
+                offset = min(offset, size)
+                source.seek(offset)
+                for line in source:
+                    # Leave a partial live event for the next poll.
+                    if kind == "events" and not line.endswith(b"\n") and not complete:
+                        break
+                    data += line
+                    if len(data) >= 256_000:
+                        break
+        next_offset = offset + len(data)
+        self.send_json({
+            "text": data.decode("utf-8", errors="replace"),
+            "nextOffset": next_offset,
+            "complete": complete and next_offset >= size,
+        })
 
     def _send_log(self, run_id: str, query: str) -> None:
         run = self.app.store.get_run(run_id)

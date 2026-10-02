@@ -534,3 +534,24 @@ button { color: inherit; }
 @media (prefers-color-scheme: dark) {
   .markdown { background: var(--code-bg); }
 }
+.codex-transcripts {
+  display: grid;
+  gap: 4px;
+  max-height: 80vh;
+  overflow: auto;
+  padding: 4px;
+}
+.catalog-transcript-fold { margin-top: 24px; padding-top: 12px; border-top: 1px solid var(--line); }
+.catalog-transcript-fold > summary { padding: 4px 0; color: var(--muted); font-size: 12px; font-weight: 600; cursor: pointer; }
+.catalog-transcript-fold > summary:hover, .catalog-transcript-fold > summary:focus-visible { color: var(--heading); }
+.catalog-transcript-fold[open] > summary { margin-bottom: 8px; }
+.codex-message, .codex-activity {
+  min-width: 0;
+}
+.codex-invocation-heading { margin: 16px 0 6px; padding-top: 12px; border-top: 1px solid var(--line); font-size: 16px; font-weight: 700; color: var(--heading); }
+.codex-message { padding: 8px 0; }
+.codex-message > .markdown { margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; }
+.codex-activity { padding: 2px 0; font-size: 12px; line-height: 1.4; }
+.codex-activity summary { cursor: pointer; overflow-wrap: anywhere; color: var(--muted); }
+.codex-activity-label { display: inline-block; max-width: calc(100% - 1.5em); vertical-align: bottom; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.codex-activity pre { margin: 4px 0 4px 14px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 24rem; overflow: auto; font-size: inherit; }
