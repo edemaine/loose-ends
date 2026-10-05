@@ -99,6 +99,10 @@ let navigationReady = false;
 let eventConnection = null;
 let eventReconnectNeedsRefresh = false;
 let sessionRefresh = null;
+let jobsRefresh = null;
+let jobsRefreshPending = false;
+let jobsRefreshPreserveDetail = true;
+let jobsRefreshTimer = null;
 let workerLimitDraft = null;
 let workerLimitTimer = null;
 let workerLimitSaving = false;
@@ -3653,6 +3657,19 @@ function refreshVisibleRunElapsed(job) {
   });
 }
 
+function refreshLiveActivity() {
+  if (!navigationReady || document.hidden) return;
+  if (state.tab === "activity") {
+    const job = state.jobDetails.get(state.selectedJob);
+    if (job) refreshVisibleRunElapsed(job);
+  }
+  // Transcripts already have their own polling timer. Only fetch console
+  // logs that are displayed; completed logs and in-flight loads are cached.
+  main.querySelectorAll("[data-run-log]").forEach(log => {
+    refreshRunLog(log.dataset.runLog);
+  });
+}
+
 async function retryJob(job, control) {
   const runs = latestJobRuns(job).filter(run => ["failed", "partial"].includes(run.status));
   const partial = runs.some(run => run.status === "partial");
@@ -4176,7 +4193,7 @@ function taskScopeSummary(job) {
   const pieces = [paperScope || targetCountLabel(targets)];
   const papers = targetPaperCount(targets);
   if (papers && !paperScope) pieces.push(`${papers} paper${papers === 1 ? "" : "s"}`);
-  const units = job.plan?.units?.length || new Set((job.runs || []).map(run => run.unit_index)).size;
+  const units = job.counts?.total || job.plan?.units?.length || new Set((job.runs || []).map(run => run.unit_index)).size;
   if (units) pieces.push(`${units} run${units === 1 ? "" : "s"}`);
   return pieces.join(" · ");
 }
@@ -4795,6 +4812,31 @@ async function refreshCatalog() {
 }
 
 async function refreshJobs({ preserveActivityDetail = false } = {}) {
+  clearTimeout(jobsRefreshTimer);
+  jobsRefreshTimer = null;
+  jobsRefreshPending = true;
+  jobsRefreshPreserveDetail &&= preserveActivityDetail;
+  if (jobsRefresh) return jobsRefresh;
+  jobsRefresh = (async () => {
+    // A change arriving during a fetch needs one trailing fetch, rather than
+    // a parallel request whose older response could overwrite newer state.
+    while (jobsRefreshPending) {
+      const preserveDetail = jobsRefreshPreserveDetail;
+      jobsRefreshPending = false;
+      jobsRefreshPreserveDetail = true;
+      await fetchJobs({ preserveActivityDetail: preserveDetail });
+    }
+  })();
+  try {
+    await jobsRefresh;
+  } finally {
+    jobsRefresh = null;
+    jobsRefreshPending = false;
+    jobsRefreshPreserveDetail = true;
+  }
+}
+
+async function fetchJobs({ preserveActivityDetail }) {
   const value = await api("/api/jobs");
   state.jobs = value.jobs;
   updateActivityCount();
@@ -4809,6 +4851,15 @@ async function refreshJobs({ preserveActivityDetail = false } = {}) {
   const url = currentUrl();
   history.replaceState(historyPayload(window.scrollY), "", url);
   renderedUrl = url;
+}
+
+function scheduleJobsRefresh() {
+  if (jobsRefreshTimer !== null) return;
+  jobsRefreshTimer = setTimeout(() => {
+    jobsRefreshTimer = null;
+    refreshJobs({ preserveActivityDetail: true })
+      .catch(error => showNotice(error.message, true));
+  }, 100);
 }
 
 function connectEvents() {
@@ -4847,8 +4898,7 @@ function connectEvents() {
         refreshCatalog().catch(error => showNotice(error.message, true));
       }
       if (value.type === "tasks.changed") {
-        refreshJobs({ preserveActivityDetail: true })
-          .catch(error => showNotice(error.message, true));
+        scheduleJobsRefresh();
       }
       if (value.type === "settings.changed") {
         state.settings = { ...state.settings, ...value };
@@ -4893,5 +4943,8 @@ window.addEventListener("popstate", event => {
     scrollY: event.state?.looseEndsWorkbench ? event.state.scrollY : undefined,
   });
 });
+
+setInterval(refreshLiveActivity, 2000);
+document.addEventListener("visibilitychange", refreshLiveActivity);
 
 start();

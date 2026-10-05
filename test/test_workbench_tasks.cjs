@@ -307,3 +307,106 @@ test("only the checked writing mode is collected", () => {
   ] };
   assert.equal(context.collectDialogOptions().writeMode, "separate");
 });
+
+function jobsHarness(api) {
+  const timers = new Map();
+  let nextTimer = 0;
+  const context = vm.createContext({
+    state: { jobs: [], tab: "activity", jobDetails: new Map(), selectedJob: "job" },
+    jobsRefresh: null, jobsRefreshPending: false, jobsRefreshPreserveDetail: true,
+    jobsRefreshTimer: null, navigationReady: true, api,
+    clearTimeout: id => timers.delete(id),
+    setTimeout: callback => { timers.set(++nextTimer, callback); return nextTimer; },
+    updateActivityCount() {}, syncRelatedTasks() {}, rememberSidebarScroll() {}, restoreSidebarScroll() {},
+    renderActivity: options => context.renders.push(options.preserveDetail), renders: [],
+    currentUrl: () => "/activity", historyPayload: () => ({}), history: { replaceState() {} },
+    window: { scrollY: 0 }, document: { hidden: false }, renderedUrl: "",
+    main: { querySelectorAll: () => [] },
+    showNotice: message => context.notices.push(message), notices: [],
+    refreshVisibleRunElapsed: job => context.elapsed.push(job.id), elapsed: [],
+    refreshRunLog: id => context.logs.push(id), logs: [],
+  });
+  const names = ["refreshJobs", "fetchJobs", "scheduleJobsRefresh", "refreshLiveActivity", "taskScopeSummary"];
+  vm.runInContext(names.map(name => source.match(
+    new RegExp(`^(?:async )?function ${name}\\([^]*?^}`, "m"),
+  )[0]).join("\n"), context);
+  return { context, timers };
+}
+
+test("a burst of task events schedules one jobs request", async () => {
+  let requests = 0;
+  const { context, timers } = jobsHarness(async path => {
+    assert.equal(path, "/api/jobs");
+    requests += 1;
+    return { jobs: [] };
+  });
+  for (let i = 0; i < 100; i++) context.scheduleJobsRefresh();
+  assert.equal(timers.size, 1);
+  [...timers.values()][0]();
+  await context.jobsRefresh;
+  assert.equal(requests, 1);
+  assert.deepEqual(context.renders, [true]);
+});
+
+test("changes during a jobs fetch coalesce into one trailing fetch with no overlap", async () => {
+  const finishes = [];
+  let active = 0, maximum = 0;
+  const { context } = jobsHarness(() => {
+    active += 1;
+    maximum = Math.max(maximum, active);
+    return new Promise(resolve => finishes.push(value => { active -= 1; resolve(value); }));
+  });
+  const first = context.refreshJobs({ preserveActivityDetail: true });
+  const pending = Array.from({ length: 50 }, () => context.refreshJobs({ preserveActivityDetail: true }));
+  pending.push(context.refreshJobs());
+  assert.equal(finishes.length, 1);
+  finishes[0]({ jobs: [{ id: "old" }] });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(finishes.length, 2);
+  finishes[1]({ jobs: [{ id: "new" }] });
+  await Promise.all([first, ...pending]);
+  assert.equal(maximum, 1);
+  assert.equal(finishes.length, 2);
+  assert.equal(context.state.jobs[0].id, "new");
+  assert.deepEqual(context.renders, [true, false]);
+});
+
+test("a failed jobs refresh releases the request so later changes can load", async () => {
+  let requests = 0;
+  const { context } = jobsHarness(async () => {
+    if (++requests === 1) throw new Error("Unavailable");
+    return { jobs: [{ id: "recovered" }] };
+  });
+  await assert.rejects(context.refreshJobs(), /Unavailable/);
+  await context.refreshJobs();
+  assert.equal(context.state.jobs[0].id, "recovered");
+  assert.equal(requests, 2);
+});
+
+test("live elapsed times and displayed logs update without fetching jobs", () => {
+  const { context } = jobsHarness(() => { throw new Error("Jobs must not be fetched"); });
+  context.state.jobDetails.set("job", { id: "job" });
+  context.main.querySelectorAll = () => [{ dataset: { runLog: "run" } }];
+  context.refreshLiveActivity();
+  assert.deepEqual(context.elapsed, ["job"]);
+  assert.deepEqual(context.logs, ["run"]);
+  context.document.hidden = true;
+  context.refreshLiveActivity();
+  assert.equal(context.logs.length, 1);
+  context.document.hidden = false;
+  context.state.tab = "research";
+  context.main.querySelectorAll = () => [];
+  context.refreshLiveActivity();
+  assert.equal(context.elapsed.length, 1);
+});
+
+test("compact job summaries retain run counts in their scope", () => {
+  const { context } = jobsHarness();
+  context.taskTargets = job => job.plan.targets;
+  context.singlePaperProblemScope = () => "";
+  context.targetCountLabel = () => "2 problems";
+  context.targetPaperCount = () => 1;
+  assert.equal(context.taskScopeSummary({
+    plan: { targets: [{ kind: "problem" }, { kind: "problem" }] }, counts: { total: 3 },
+  }), "2 problems · 1 paper · 3 runs");
+});

@@ -27,7 +27,7 @@ import codex_cli
 from workbench_store import WorkbenchStore
 
 
-HEARTBEAT_SECONDS = 2.0
+HEARTBEAT_SECONDS = 5.0
 CANCEL_GRACE_SECONDS = 8.0
 
 

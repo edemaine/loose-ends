@@ -2431,6 +2431,89 @@ class WorkbenchStoreTests(unittest.TestCase):
                 },
             )
 
+    def test_heartbeats_preserve_task_revision_and_summary(self):
+        with TemporaryDirectory() as temporary:
+            store = WorkbenchStore(Path(temporary) / "workbench.sqlite3")
+            job = store.create_job({"action": "solve"}, fake_plan(["python", "task.py"]))
+            run_id = job["runs"][0]["id"]
+            store.update_run(run_id, status="running", heartbeat_at=1)
+            revision = store.revision()
+            summary = store.list_jobs()
+            updated_at = store.get_run(run_id)["updated_at"]
+
+            store.update_run(run_id, heartbeat_at=2, worker_pid=123)
+
+            saved = store.get_run(run_id)
+            self.assertEqual(saved["heartbeat_at"], 2)
+            self.assertEqual(saved["worker_pid"], 123)
+            self.assertEqual(saved["updated_at"], updated_at)
+            self.assertEqual(store.revision(), revision)
+            self.assertEqual(store.list_jobs(), summary)
+
+            # Workers already running at upgrade still write updated_at and
+            # reconcile the job. Those writes must also leave revision alone.
+            with store.connect() as connection:
+                connection.execute(
+                    "UPDATE runs SET heartbeat_at = 3, updated_at = ? WHERE id = ?",
+                    (time.time(), run_id),
+                )
+            store.reconcile_job(job["id"])
+            self.assertEqual(store.revision(), revision)
+
+    def test_task_revision_tracks_changes_and_transaction_rollbacks(self):
+        with TemporaryDirectory() as temporary:
+            store = WorkbenchStore(Path(temporary) / "workbench.sqlite3")
+            revision = store.revision()
+            job = store.create_job({"action": "solve"}, fake_plan(["python", "task.py"]))
+            run_id = job["runs"][0]["id"]
+            self.assertGreater(store.revision(), revision)
+            for change in (
+                lambda: store.mark_starting(run_id),
+                lambda: store.update_run(run_id, status="running"),
+                lambda: store.append_run_output(run_id, Path(temporary) / "result.json"),
+                lambda: store.request_cancel(run_id),
+                lambda: store.update_run(run_id, status="partial", finished_at=time.time()),
+                lambda: store.update_scheduler_settings(queue_paused=True),
+            ):
+                revision = store.revision()
+                change()
+                self.assertGreater(store.revision(), revision)
+
+            revision = store.revision()
+            store.update_scheduler_settings(queue_paused=True)
+            store.initialize()
+            self.assertEqual(store.revision(), revision)
+            with self.assertRaisesRegex(RuntimeError, "rollback"):
+                with store.connect() as connection:
+                    connection.execute("UPDATE jobs SET priority_level = 2")
+                    raise RuntimeError("rollback")
+            self.assertEqual(store.revision(), revision)
+
+    def test_job_list_omits_commands_and_prompts_but_preserves_scope(self):
+        with TemporaryDirectory() as temporary:
+            store = WorkbenchStore(Path(temporary) / "workbench.sqlite3")
+            targets = [{"kind": "problem", "path": "/paper/OP-001", "label": "Problem"}]
+            request = {"action": "solve", "targets": targets, "options": {"prompt": "x" * 30_000}}
+            plan = fake_plan(["python", "task.py", "x" * 30_000], unit_count=2)
+            plan.update(targets=targets, singlePaperTitle="Test Paper")
+            job = store.create_job(request, plan)
+
+            summary = store.list_jobs()[0]
+            self.assertNotIn("request", summary)
+            self.assertEqual(summary["plan"], {"targets": targets, "singlePaperTitle": "Test Paper"})
+            self.assertEqual(summary["counts"]["total"], 2)
+            self.assertEqual(summary["liveRuns"][0]["label"], "Fake run 1")
+            self.assertLess(len(json.dumps(summary)), len(json.dumps(job)) / 10)
+            detail = store.get_job(job["id"])
+            self.assertEqual(detail["request"], request)
+            self.assertEqual(detail["plan"], plan)
+
+            # Legacy plans without targets still use request-level targets.
+            del plan["targets"]
+            legacy = store.create_job(request, plan)
+            summaries = {item["id"]: item for item in store.list_jobs()}
+            self.assertEqual(summaries[legacy["id"]]["plan"]["targets"], targets)
+
     def test_job_list_includes_only_latest_nonterminal_runs(self):
         with TemporaryDirectory() as temporary:
             state = Path(temporary)
@@ -2583,13 +2666,15 @@ class WorkbenchStoreTests(unittest.TestCase):
             state = Path(temporary)
             first = state / "first.md"
             second = state / "second.md"
+            release = state / "release"
             code = (
-                "from pathlib import Path; import os, time; "
-                f"first=Path({str(first)!r}); second=Path({str(second)!r}); "
-                "log=Path(os.environ['LOOSE_ENDS_ARTIFACT_LOG']); "
-                "first.write_text('first'); log.open('a').write(str(first.resolve())+'\\n'); "
-                "time.sleep(1.0); second.write_text('second'); "
-                "log.open('a').write(str(second.resolve())+'\\n'); time.sleep(0.5)"
+                "from pathlib import Path\nimport os, time\n"
+                f"first=Path({str(first)!r})\nsecond=Path({str(second)!r})\n"
+                f"release=Path({str(release)!r})\n"
+                "log=Path(os.environ['LOOSE_ENDS_ARTIFACT_LOG'])\n"
+                "first.write_text('first')\nlog.open('a').write(str(first.resolve())+'\\n')\n"
+                "while not release.exists(): time.sleep(0.05)\n"
+                "second.write_text('second')\nlog.open('a').write(str(second.resolve())+'\\n')\n"
             )
             store = WorkbenchStore(state / "workbench.sqlite3", state)
             job = store.create_job(
@@ -2606,13 +2691,16 @@ class WorkbenchStoreTests(unittest.TestCase):
                 args=(store.database, run["id"]),
             )
             worker.start()
-            deadline = time.time() + 4
-            while not store.get_run(run["id"])["outputs"] and time.time() < deadline:
-                time.sleep(0.05)
-            during = store.get_run(run["id"])
-            self.assertEqual(during["outputs"], [str(first.resolve())])
-            self.assertEqual(during["status"], "running")
-            worker.join(10)
+            try:
+                deadline = time.time() + 10
+                while not store.get_run(run["id"])["outputs"] and time.time() < deadline:
+                    time.sleep(0.05)
+                during = store.get_run(run["id"])
+                self.assertEqual(during["outputs"], [str(first.resolve())])
+                self.assertEqual(during["status"], "running")
+            finally:
+                release.touch()
+                worker.join(10)
             self.assertFalse(worker.is_alive())
             saved = store.get_run(run["id"])
             self.assertEqual(saved["outputs"], [str(first.resolve()), str(second.resolve())])
@@ -3016,7 +3104,7 @@ class WorkbenchWatchTests(unittest.TestCase):
             try:
                 time.sleep(0.15)
                 sequence = hub.current_sequence()
-                store.update_run(run["id"], heartbeat_at=time.time())
+                store.request_cancel(run["id"])
                 deadline = time.time() + 5
                 while (
                     hub.current_sequence() == sequence

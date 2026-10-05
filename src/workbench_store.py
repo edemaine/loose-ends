@@ -228,6 +228,42 @@ class WorkbenchStore:
                 """,
                 (DEFAULT_WORKER_LIMIT, time.time()),
             )
+            connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS task_revision (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    revision INTEGER NOT NULL
+                );
+                INSERT OR IGNORE INTO task_revision VALUES (1, 0);
+                """
+            )
+            # Track observable changes in the database itself, including
+            # writes by workers that were started with an older version.
+            # Heartbeats and scheduler bookkeeping must not invalidate UI data.
+            for table, ignored in (
+                ("jobs", {"updated_at", "scheduler_credit", "last_dispatched_at"}),
+                ("runs", {"updated_at", "heartbeat_at", "worker_pid"}),
+                ("scheduler_settings", {"updated_at"}),
+            ):
+                fields = [
+                    row["name"]
+                    for row in connection.execute(f"PRAGMA table_info({table})")
+                    if row["name"] not in ignored
+                ]
+                changed = " OR ".join(
+                    f"NEW.{name} IS NOT OLD.{name}" for name in fields
+                )
+                for operation in ("INSERT", "UPDATE", "DELETE"):
+                    when = f"WHEN {changed}" if operation == "UPDATE" else ""
+                    connection.execute(
+                        f"""
+                        CREATE TRIGGER IF NOT EXISTS {table}_task_revision_{operation}
+                        AFTER {operation} ON {table} {when}
+                        BEGIN
+                            UPDATE task_revision SET revision = revision + 1 WHERE id = 1;
+                        END
+                        """
+                    )
 
     @staticmethod
     def _decode(row: sqlite3.Row, fields: Iterable[str]) -> dict:
@@ -372,7 +408,15 @@ class WorkbenchStore:
     def list_jobs(self, *, limit: int = 1000) -> list[dict]:
         with self.connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,)
+                """
+                SELECT id, action, title, status, priority_level,
+                    scheduling_paused, scheduler_credit, last_dispatched_at,
+                    created_at, updated_at, finished_at,
+                    COALESCE(json_extract(plan_json, '$.targets'),
+                        json_extract(request_json, '$.targets'), '[]') AS targets_json,
+                    json_extract(plan_json, '$.singlePaperTitle') AS single_paper_title
+                FROM jobs ORDER BY created_at DESC LIMIT ?
+                """, (limit,)
             ).fetchall()
             counts = {
                 row["job_id"]: dict(row)
@@ -427,7 +471,13 @@ class WorkbenchStore:
                 live_runs.setdefault(run["job_id"], []).append(run)
         jobs = []
         for row in rows:
-            job = self._decode(row, ("request_json", "plan_json"))
+            job = self._decode(row, ("targets_json",))
+            # List views need scope and counts, not every command and prompt.
+            # Full plans and requests remain available through get_job().
+            job["plan"] = {
+                "targets": job.pop("targets"),
+                "singlePaperTitle": job.pop("single_paper_title"),
+            }
             job["counts"] = counts.get(job["id"], {})
             job["liveRuns"] = live_runs.get(job["id"], [])
             jobs.append(job)
@@ -760,7 +810,10 @@ class WorkbenchStore:
         unknown = set(values) - allowed
         if unknown:
             raise ValueError(f"unsupported run fields: {sorted(unknown)}")
-        values["updated_at"] = time.time()
+        heartbeat_only = bool(values) and set(values) <= {"heartbeat_at", "worker_pid"}
+        # Liveness writes must not invalidate task summaries or details.
+        if not heartbeat_only:
+            values["updated_at"] = time.time()
         assignments = ", ".join(f"{name} = ?" for name in values)
         parameters = [
             json.dumps(value, ensure_ascii=False)
@@ -773,6 +826,8 @@ class WorkbenchStore:
             connection.execute(
                 f"UPDATE runs SET {assignments} WHERE id = ?", parameters
             )
+        if heartbeat_only:
+            return
         try:
             job_id = self.get_run(run_id)["job_id"]
         except KeyError:
@@ -978,15 +1033,10 @@ class WorkbenchStore:
             self.reconcile_job(job_id)
         return changed
 
-    def revision(self) -> float:
+    def revision(self) -> int:
+        """Revision of task data, excluding heartbeat-only writes."""
         with self.connect() as connection:
-            job = connection.execute(
-                "SELECT COALESCE(MAX(updated_at), 0) FROM jobs"
+            revision = connection.execute(
+                "SELECT revision FROM task_revision WHERE id = 1"
             ).fetchone()[0]
-            run = connection.execute(
-                "SELECT COALESCE(MAX(updated_at), 0) FROM runs"
-            ).fetchone()[0]
-            settings = connection.execute(
-                "SELECT COALESCE(MAX(updated_at), 0) FROM scheduler_settings"
-            ).fetchone()[0]
-        return max(float(job), float(run), float(settings))
+        return int(revision)
