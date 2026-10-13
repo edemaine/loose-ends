@@ -1118,6 +1118,10 @@ elsewhere. The default binding is local-only. To use the workbench from another
 machine on a trusted network, pass `--host 0.0.0.0` and browse to this machine's
 IP address.
 
+On macOS and other platforms without an enforcement backend, workers run
+without a memory limit regardless of the configured allocation. The worker
+popover shows a warning; tasks can still start.
+
 Linux enforcement requires a writable cgroups v2 subtree delegated to the
 workbench with the memory controller enabled. By default, the workbench creates
 a manager cgroup and one child cgroup per worker beneath its current cgroup. A

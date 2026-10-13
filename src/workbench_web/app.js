@@ -1007,6 +1007,10 @@ function renderMemoryControl(maximumWorkers) {
     memoryStatus.textContent = `Queue paused because the memory limit could not be enforced: ${telemetry.error}`;
     return;
   }
+  if (telemetry.warning) {
+    memoryStatus.textContent = `Warning: ${telemetry.warning}`;
+    return;
+  }
   if (!telemetry.available) {
     const policy = unlimited
       ? "Configured total allocation limit: unlimited."

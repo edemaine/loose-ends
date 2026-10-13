@@ -2380,6 +2380,68 @@ class WorkbenchStoreTests(unittest.TestCase):
             (cgroup / "cgroup.procs").write_text("", encoding="ascii")
             self.assertFalse(controller.run_has_processes("run-1"))
 
+    def test_unsupported_platform_runs_without_memory_enforcement(self):
+        database = PROJECT_ROOT / "unused-memory-test.sqlite3"
+        for platform in ("darwin", "freebsd"):
+            with (
+                patch.object(workbench_memory.sys, "platform", platform),
+                patch.object(workbench_memory.os, "name", "posix"),
+                patch.object(
+                    workbench_memory,
+                    "physical_memory_bytes",
+                    return_value=16 * workbench_memory.GB_BYTES,
+                ),
+            ):
+                controller = workbench_memory.QueueMemoryController(database)
+                for mode, value in (("percent", 50), ("gb", 8), ("unlimited", None)):
+                    with self.subTest(platform=platform, mode=mode):
+                        settings = {"memoryLimit": {"mode": mode, "value": value}}
+                        snapshot = controller.reconcile(settings)
+                        self.assertFalse(snapshot["available"])
+                        self.assertFalse(snapshot["pending"])
+                        self.assertIsNone(snapshot["error"])
+                        self.assertIsNone(snapshot["appliedBytes"])
+                        self.assertIn("without a memory limit", snapshot["warning"])
+                        if platform == "darwin":
+                            self.assertIn("macOS", snapshot["warning"])
+                        self.assertIsNone(controller.prepare_run("test-run", settings))
+
+    def test_supported_platform_setup_failure_blocks_finite_memory_policies(self):
+        database = PROJECT_ROOT / "unused-memory-test.sqlite3"
+        for platform, os_name in (("linux", "posix"), ("win32", "nt")):
+            with (
+                patch.object(workbench_memory.sys, "platform", platform),
+                patch.object(workbench_memory.os, "name", os_name),
+                patch.object(
+                    workbench_memory,
+                    "physical_memory_bytes",
+                    return_value=16 * workbench_memory.GB_BYTES,
+                ),
+                patch.object(
+                    workbench_memory.QueueMemoryController,
+                    "_initialize_linux",
+                    side_effect=OSError("test setup failure"),
+                ),
+                patch.object(
+                    workbench_memory,
+                    "_configure_kernel32",
+                    side_effect=OSError("test setup failure"),
+                ),
+            ):
+                controller = workbench_memory.QueueMemoryController(database)
+                for mode, value in (("percent", 50), ("gb", 8)):
+                    with self.subTest(platform=platform, mode=mode):
+                        settings = {"memoryLimit": {"mode": mode, "value": value}}
+                        snapshot = controller.reconcile(settings)
+                        self.assertTrue(snapshot["pending"])
+                        self.assertIn("test setup failure", snapshot["error"])
+                        self.assertIsNone(snapshot["warning"])
+                        with self.assertRaisesRegex(OSError, "test setup failure"):
+                            controller.prepare_run("test-run", settings)
+                unlimited = {"memoryLimit": {"mode": "unlimited", "value": None}}
+                self.assertFalse(controller.reconcile(unlimited)["pending"])
+                self.assertIsNone(controller.prepare_run("test-run", unlimited))
+
     def test_linux_without_delegation_pauses_a_finite_policy(self):
         controller = object.__new__(workbench_memory.QueueMemoryController)
         controller.physical_bytes = 64 * workbench_memory.GB_BYTES
@@ -3116,6 +3178,34 @@ class WorkbenchWatchTests(unittest.TestCase):
                 observer.stop()
                 observer.join(5)
                 scheduler.close()
+
+    def test_scheduler_launches_macos_worker_with_a_finite_memory_policy(self):
+        scheduler = object.__new__(workbench.Scheduler)
+        scheduler.store = Mock()
+        scheduler.hub = Mock()
+        scheduler.state_directory = PROJECT_ROOT / ".loose-ends"
+        scheduler.last_launch = 0.0
+        scheduler.memory_lock = threading.Lock()
+        database = PROJECT_ROOT / "unused-memory-test.sqlite3"
+        with (
+            patch.object(workbench_memory.sys, "platform", "darwin"),
+            patch.object(workbench_memory.os, "name", "posix"),
+            patch.object(
+                workbench_memory,
+                "physical_memory_bytes",
+                return_value=16 * workbench_memory.GB_BYTES,
+            ),
+            patch.dict(os.environ),
+            patch.object(workbench.subprocess, "Popen") as popen,
+        ):
+            os.environ.pop(workbench_memory.QUEUE_JOB_ENV, None)
+            scheduler.memory = workbench_memory.QueueMemoryController(database)
+            settings = {"memoryLimit": {"mode": "percent", "value": 50}}
+            scheduler._launch({"id": "test-run"}, settings)
+
+        popen.assert_called_once()
+        scheduler.store.update_run.assert_not_called()
+        self.assertNotIn(workbench_memory.QUEUE_JOB_ENV, popen.call_args.kwargs["env"])
 
     @unittest.skipUnless(sys.platform == "win32", "Windows process flags")
     def test_scheduler_launches_worker_without_a_console_window(self):

@@ -8,8 +8,31 @@ const functions = [
   "latestJobRuns", "retryJob", "codexItems", "refreshCodexLogs",
   "separateWriteTasks", "taskRequests", "taskRequestOptions", "taskTargetsForRequest",
   "targetKey", "targetCountLabel", "reviewTask", "confirmTask", "collectDialogOptions",
-  "saveProblemEditor",
+  "saveProblemEditor", "configuredMemoryLimit", "renderMemoryControl",
 ].map(name => source.match(new RegExp(`^(?:async )?function ${name}\\([^]*?^}`, "m"))[0]).join("\n");
+
+test("memory control distinguishes unsupported-platform warnings from enforcement failures", () => {
+  const warning = "Worker memory limits are unavailable on macOS; workers will run without a memory limit.";
+  for (const mode of ["percent", "gb", "unlimited"]) {
+    const context = vm.createContext({
+      state: { settings: { memoryLimit: { mode, value: 50 }, memory: { available: false, warning } } },
+      memoryLimitDraft: null, memoryLimitSaving: false,
+      memoryMode: { querySelectorAll: () => [] },
+      memoryValueLabel: {}, memoryStepper: {}, memoryValue: {},
+      memoryDecrease: {}, memoryIncrease: {}, memoryStatus: {},
+      document: { activeElement: null },
+    });
+    vm.runInContext(functions, context);
+    context.renderMemoryControl(1);
+    assert.equal(context.memoryStatus.textContent, `Warning: ${warning}`);
+
+    context.state.settings.memoryLimitPending = true;
+    context.state.settings.memory = { available: false, error: "delegation unavailable" };
+    context.renderMemoryControl(1);
+    assert.equal(context.memoryStatus.textContent,
+      "Queue paused because the memory limit could not be enforced: delegation unavailable");
+  }
+});
 
 function problemEditorHarness(api, refreshCatalog = async () => {}) {
   const controls = [{ disabled: false }, { disabled: false, textContent: "Add problem" }];
