@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import stat
+import ssl
 import sys
 import tarfile
 import time
@@ -193,7 +194,24 @@ def open_arxiv_url(url: str, *, pacer: RequestPacer | None = None):
     except HTTPError as exc:
         raise ArxivHTTPError(exc.code, url, str(exc.reason)) from exc
     except (URLError, TimeoutError, OSError) as exc:
-        raise DownloadError(f"could not download {url}: {exc}") from exc
+        message = f"could not download {url}: {exc}"
+        reason = exc.reason if isinstance(exc, URLError) else exc
+        if (
+            isinstance(reason, ssl.SSLCertVerificationError)
+            or "CERTIFICATE_VERIFY_FAILED" in str(reason)
+        ):
+            message += " HTTPS certificate verification failed."
+            if sys.platform == "darwin":
+                version = f"{sys.version_info.major}.{sys.version_info.minor}"
+                message += (
+                    " If you installed Python from python.org, run "
+                    f'"/Applications/Python {version}/Install Certificates.command" '
+                    "and retry. If that file is absent, check your Python "
+                    "distribution's trusted CA certificate setup."
+                )
+            else:
+                message += " Check this Python installation's trusted CA certificates and retry."
+        raise DownloadError(message) from exc
 
 
 def normalized_text(value: str | None) -> str:

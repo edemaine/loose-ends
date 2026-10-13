@@ -2670,6 +2670,57 @@ class WorkbenchStoreTests(unittest.TestCase):
             )
             self.assertEqual(store.get_job(job["id"])["status"], "succeeded")
 
+    def test_worker_shows_certificate_hint_in_failed_download_summary(self):
+        with TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            code = (
+                "import sys, ssl\n"
+                "from urllib.error import URLError\n"
+                "from unittest.mock import patch\n"
+                f"sys.path.insert(0, {str(PROJECT_ROOT / 'src')!r})\n"
+                "import download_arxiv\n"
+                "error = URLError(ssl.SSLCertVerificationError(1, 'untrusted certificate'))\n"
+                "with patch.object(sys, 'platform', 'darwin'), "
+                "patch.object(download_arxiv, 'urlopen', side_effect=error):\n"
+                f"    status = download_arxiv.main(['1706.03762', '--output-dir', {str(state / 'papers')!r}])\n"
+                "raise SystemExit(status)\n"
+            )
+            store = WorkbenchStore(state / "workbench.sqlite3", state)
+            plan = fake_plan([sys.executable, "-u", "-c", code])
+            plan["action"] = "download"
+            job = store.create_job({"action": "download"}, plan)
+            run = job["runs"][0]
+            store.mark_starting(run["id"])
+
+            self.assertEqual(workbench_worker.run_worker(store.database, run["id"]), 1)
+
+            saved = store.get_run(run["id"])
+            self.assertEqual(saved["status"], "failed")
+            self.assertEqual(saved["exit_code"], 1)
+            self.assertIn("1706.03762", saved["error"])
+            self.assertIn("HTTPS certificate verification failed", saved["error"])
+            self.assertIn("Install Certificates.command", saved["error"])
+            self.assertIn("and retry", saved["error"])
+            log = Path(saved["log_path"]).read_text(encoding="utf-8")
+            self.assertIn(saved["error"], log)
+
+    def test_failed_download_without_error_message_keeps_exit_code_summary(self):
+        with TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            store = WorkbenchStore(state / "workbench.sqlite3", state)
+            plan = fake_plan([sys.executable, "-c", "raise SystemExit(2)"])
+            plan["action"] = "download"
+            job = store.create_job({"action": "download"}, plan)
+            run = job["runs"][0]
+            store.mark_starting(run["id"])
+
+            self.assertEqual(workbench_worker.run_worker(store.database, run["id"]), 1)
+
+            saved = store.get_run(run["id"])
+            self.assertEqual(saved["status"], "failed")
+            self.assertEqual(saved["exit_code"], 2)
+            self.assertEqual(saved["error"], "command exited with code 2")
+
     def test_worker_codex_home_is_isolated_and_preserved_on_retry(self):
         with TemporaryDirectory() as temporary:
             state = Path(temporary)

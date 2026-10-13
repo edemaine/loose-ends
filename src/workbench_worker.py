@@ -31,6 +31,21 @@ HEARTBEAT_SECONDS = 5.0
 CANCEL_GRACE_SECONDS = 8.0
 
 
+def _download_failure_message(log_path: Path) -> str | None:
+    """Use the CLI's last download error as the failed task's summary."""
+    try:
+        with log_path.open("rb") as log:
+            log.seek(0, os.SEEK_END)
+            log.seek(max(0, log.tell() - 64 * 1024))
+            lines = log.read().decode("utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        if line.startswith("error: "):
+            return line.removeprefix("error: ")
+    return None
+
+
 def _artifact_roots(run: dict) -> list[Path]:
     roots = []
     for resource in run.get("resources", []):
@@ -157,7 +172,8 @@ def run_worker(database: Path, run_id: str) -> int:
         worker_pid=os.getpid(),
     )
     environment = os.environ.copy()
-    options = store.get_job(run["job_id"])["plan"].get("options", {})
+    plan = store.get_job(run["job_id"])["plan"]
+    options = plan.get("options", {})
     if options.get("codexHome"):
         environment["CODEX_HOME"] = options["codexHome"]
     environment["PYTHONUNBUFFERED"] = "1"
@@ -242,6 +258,8 @@ def run_worker(database: Path, run_id: str) -> int:
     else:
         status = "partial" if outputs else "failed"
         error = f"command exited with code {exit_code}"
+        if plan.get("action") == "download":
+            error = _download_failure_message(log_path) or error
     finished = time.time()
     store.update_run(
         run_id,
