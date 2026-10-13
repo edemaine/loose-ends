@@ -23,6 +23,7 @@ import open_problem_common as common
 ACTIONS = {
     "download",
     "metadata",
+    "references",
     "analyze",
     "triage",
     "literature",
@@ -45,6 +46,7 @@ MAX_PRIORITY_LEVEL = 3
 def task_cli_defaults() -> dict[str, dict[str, str]]:
     """Read workbench-visible defaults from each action's actual CLI parser."""
     import extract_paper_metadata
+    import extract_paper_references
     import literature_review
     import review_solutions
     import solve_open_problems
@@ -53,6 +55,7 @@ def task_cli_defaults() -> dict[str, dict[str, str]]:
 
     modules = {
         "metadata": extract_paper_metadata,
+        "references": extract_paper_references,
         "analyze": analyze_papers,
         "triage": triage_open_problems,
         "literature": literature_review,
@@ -566,6 +569,30 @@ def build_plan(
             units.append(
                 _unit(
                     label=f"Extract metadata for {target['label']}",
+                    argv=argv,
+                    project_root=project_root,
+                    targets=[target],
+                )
+            )
+
+    elif action == "references":
+        _require(targets, {"paper"}, action)
+        for target in targets:
+            argv = [
+                python,
+                "-u",
+                str(script / "extract_paper_references.py"),
+                target["path"],
+            ]
+            _common_arguments(argv, options)
+            if options.get("force") is True:
+                argv.append("--force")
+                warnings.append(
+                    "Forced extraction replaces the installed reference list."
+                )
+            units.append(
+                _unit(
+                    label=f"Extract references for {target['label']}",
                     argv=argv,
                     project_root=project_root,
                     targets=[target],
