@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
+import tomllib
 import unittest
 from unittest.mock import Mock, patch
 
@@ -16,6 +17,182 @@ import codex_cli
 
 
 class CodexCliTests(unittest.TestCase):
+    def setUp(self):
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.codex_home = Path(temporary.name)
+        environment = patch.dict(os.environ, {
+            "CODEX_HOME": str(self.codex_home),
+            "CODEX_SQLITE_HOME": "",
+        })
+        environment.start()
+        self.addCleanup(environment.stop)
+
+    def command_config(self):
+        command = codex_cli.build_exec_command(
+            codex="codex", workspace=Path("."), prompt="test",
+            schema_path=Path("schema.json"), result_path=Path("result.json"),
+            options=codex_cli.ModelOptions(model="requested-model"),
+        )
+        self.assertIn("--ignore-user-config", command)
+        self.assertEqual(command[command.index("--model") + 1], "requested-model")
+        return tomllib.loads("\n".join(
+            command[index + 1]
+            for index, argument in enumerate(command)
+            if argument == "--config"
+        ))
+
+    def test_preserves_only_account_settings_and_selected_provider(self):
+        (self.codex_home / "config.toml").write_text('''
+cli_auth_credentials_store = "keyring"
+forced_login_method = "chatgpt"
+forced_chatgpt_workspace_id = "00000000-0000-0000-0000-000000000001"
+sqlite_home = "account state"
+model_provider = "gateway.with.dot"
+openai_base_url = "https://api.example.test/v1"
+chatgpt_base_url = "https://chatgpt.example.test/"
+model = "ignored-model"
+model_reasoning_effort = "low"
+web_search = "live"
+notify = ["ignored-hook"]
+[apps._default]
+enabled = true
+[agents]
+enabled = true
+[sandbox_workspace_write]
+network_access = true
+[model_providers."gateway.with.dot"]
+name = 'Gateway "café"'
+base_url = "https://gateway.example.test/v1"
+request_max_retries = 3
+supports_websockets = false
+query_params = { "api.version" = "2026-01-01" }
+http_headers = { "X-Example" = 'quoted "value"' }
+auth = { command = "token-command", args = ["--account", "second account"], cwd = "auth dir" }
+[model_providers.unselected]
+name = "Ignored provider"
+''', encoding="utf-8")
+        os.environ["CODEX_SQLITE_HOME"] = "ignored-env-path"
+        config = self.command_config()
+
+        self.assertEqual(config["cli_auth_credentials_store"], "keyring")
+        self.assertEqual(config["forced_login_method"], "chatgpt")
+        self.assertEqual(config["forced_chatgpt_workspace_id"],
+                         "00000000-0000-0000-0000-000000000001")
+        self.assertEqual(config["sqlite_home"],
+                         codex_cli.path_for_codex(self.codex_home / "account state"))
+        self.assertEqual(config["openai_base_url"], "https://api.example.test/v1")
+        self.assertEqual(config["chatgpt_base_url"], "https://chatgpt.example.test/")
+        self.assertEqual(config["model_provider"], "gateway.with.dot")
+        self.assertEqual(list(config["model_providers"]), ["gateway.with.dot"])
+        provider = config["model_providers"]["gateway.with.dot"]
+        self.assertEqual(provider["name"], 'Gateway "café"')
+        self.assertEqual(provider["base_url"], "https://gateway.example.test/v1")
+        self.assertEqual(provider["request_max_retries"], 3)
+        self.assertFalse(provider["supports_websockets"])
+        self.assertEqual(provider["query_params"], {"api.version": "2026-01-01"})
+        self.assertEqual(provider["http_headers"], {"X-Example": 'quoted "value"'})
+        self.assertEqual(provider["auth"], {
+            "command": "token-command", "args": ["--account", "second account"],
+            "cwd": codex_cli.path_for_codex(self.codex_home / "auth dir"),
+        })
+        self.assertNotIn("model", config)
+        self.assertNotIn("model_reasoning_effort", config)
+        self.assertNotIn("notify", config)
+        self.assertEqual(config["web_search"], "disabled")
+        self.assertFalse(config["apps"]["_default"]["enabled"])
+        self.assertFalse(config["agents"]["enabled"])
+        self.assertFalse(config["sandbox_workspace_write"]["network_access"])
+
+    def test_account_config_uses_default_home_and_tracks_account_changes(self):
+        default = self.codex_home / ".codex"
+        default.mkdir()
+        (default / "config.toml").write_text('forced_login_method = "api"\n')
+        with (
+            patch.dict(os.environ, {"CODEX_HOME": "", "USERPROFILE": ""}),
+            patch.object(codex_cli.Path, "home", return_value=self.codex_home),
+        ):
+            self.assertEqual(self.command_config()["forced_login_method"], "api")
+        (self.codex_home / "config.toml").write_text('forced_login_method = "chatgpt"\n')
+        self.assertEqual(self.command_config()["forced_login_method"], "chatgpt")
+
+    def test_account_config_reads_native_windows_home_from_cygwin(self):
+        (self.codex_home / "config.toml").write_text('cli_auth_credentials_store = "file"\n')
+        with (
+            patch.dict(os.environ, {"CODEX_HOME": r"C:\Accounts\second"}),
+            patch.object(codex_cli.sys, "platform", "cygwin"),
+            patch.object(codex_cli, "_run_local_command", return_value=str(self.codex_home)) as convert,
+        ):
+            config = self.command_config()
+        self.assertEqual(config["cli_auth_credentials_store"], "file")
+        convert.assert_called_once_with(
+            ["cygpath", "-u", r"C:\Accounts\second"], "could not convert Codex home"
+        )
+
+    def test_account_config_preserves_absolute_windows_sqlite_path(self):
+        (self.codex_home / "config.toml").write_text(
+            "sqlite_home = 'C:\\Accounts\\second account\\sqlite'\n"
+        )
+        self.assertEqual(self.command_config()["sqlite_home"],
+                         r"C:\Accounts\second account\sqlite")
+
+    def test_account_config_errors_are_reported_without_falling_back(self):
+        for text, message in (
+            ('forced_login_method = [', "could not read Codex configuration"),
+            ('forced_login_method = 42', "forced_login_method must be a string"),
+            ('model_providers = 42', "model_providers must be a table"),
+            ('model_provider = "gateway"\nmodel_providers.gateway = 42',
+             "selected provider must be a table"),
+        ):
+            with self.subTest(text=text):
+                (self.codex_home / "config.toml").write_text(text)
+                with self.assertRaisesRegex(codex_cli.CodexError, message):
+                    self.command_config()
+        with patch.object(codex_cli.Path, "open", side_effect=PermissionError("denied")):
+            with self.assertRaisesRegex(codex_cli.CodexError, "could not read Codex configuration"):
+                codex_cli.codex_account_config_overrides()
+
+    def test_preserves_sqlite_home_while_ignoring_user_config(self):
+        for sqlite_home in (
+            "/accounts/second account/sqlite",
+            r"C:\Accounts\second account\sqlite",
+            'accounts/"quoted"/café',
+            "relative/account",
+            "",
+            None,
+        ):
+            with (
+                self.subTest(sqlite_home=sqlite_home),
+                patch.dict(os.environ, {}),
+            ):
+                if sqlite_home is not None:
+                    os.environ["CODEX_SQLITE_HOME"] = sqlite_home
+                else:
+                    os.environ.pop("CODEX_SQLITE_HOME", None)
+                command = codex_cli.build_exec_command(
+                    codex="codex",
+                    workspace=Path("."),
+                    prompt="test",
+                    schema_path=Path("schema.json"),
+                    result_path=Path("result.json"),
+                    options=codex_cli.ModelOptions(),
+                )
+                config = tomllib.loads("\n".join(
+                    command[index + 1]
+                    for index, argument in enumerate(command)
+                    if argument == "--config"
+                ))
+
+                self.assertIn("--ignore-user-config", command)
+                if sqlite_home:
+                    self.assertEqual(config["sqlite_home"], sqlite_home)
+                else:
+                    self.assertNotIn("sqlite_home", config)
+                self.assertFalse(config["apps"]["_default"]["enabled"])
+                self.assertFalse(config["agents"]["enabled"])
+                self.assertFalse(config["sandbox_workspace_write"]["network_access"])
+                self.assertEqual(command[-1], "-")
+
     def test_credit_exhaustion_pauses_queue_and_preserves_pending_work(self):
         from workbench_store import WorkbenchStore
 

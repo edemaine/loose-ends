@@ -16,6 +16,7 @@ import subprocess
 import sys
 import threading
 import time
+import tomllib
 from typing import Callable, Mapping
 
 from validation import common as validation_common
@@ -35,6 +36,15 @@ CODEX_POLL_INTERVAL_SECONDS = 0.5
 CODEX_STOP_GRACE_SECONDS = 10.0
 WINDOWS_SANDBOX_ACL_FAILURE = "helper_unknown_error: apply deny-read acls"
 WORKBENCH_DATABASE_ENV = "LOOSE_ENDS_WORKBENCH_DATABASE"
+CODEX_ACCOUNT_CONFIG_KEYS = (
+    "cli_auth_credentials_store",
+    "forced_login_method",
+    "forced_chatgpt_workspace_id",
+    "sqlite_home",
+    "model_provider",
+    "openai_base_url",
+    "chatgpt_base_url",
+)
 _CODEX_LAUNCH_LOCK = threading.Lock()
 _WINDOWS_SANDBOX_PROBE_LOCK = threading.Lock()
 _WINDOWS_ACL_NORMALIZE_LOCK = threading.Lock()
@@ -1014,6 +1024,85 @@ def _run_codex_process(
     )
 
 
+def _toml_value(value: object) -> str:
+    """Encode account/provider settings as TOML CLI override values."""
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, list):
+        return "[" + ", ".join(_toml_value(item) for item in value) + "]"
+    if isinstance(value, dict):
+        return "{" + ", ".join(
+            f"{_toml_value(key)} = {_toml_value(item)}"
+            for key, item in value.items()
+        ) + "}"
+    raise CodexError("unsupported value type in Codex account/provider configuration")
+
+
+def codex_account_config_overrides() -> list[str]:
+    """Preserve account and connection settings while ignoring other user config."""
+    home = os.environ.get("CODEX_HOME")
+    if not home:
+        # Cygwin Python can have a different home from the native Windows CLI.
+        home = os.environ.get("USERPROFILE") if sys.platform == "cygwin" else None
+    if home and sys.platform == "cygwin" and PureWindowsPath(home).is_absolute():
+        home = _run_local_command(
+            ["cygpath", "-u", home], "could not convert Codex home"
+        ).strip()
+    config_path = (Path(home).expanduser() if home else Path.home() / ".codex")
+    # USERPROFILE names the user's home, rather than CODEX_HOME itself.
+    if not os.environ.get("CODEX_HOME") and home:
+        config_path /= ".codex"
+    config_path = config_path.resolve() / "config.toml"
+    try:
+        with config_path.open("rb") as source:
+            config = tomllib.load(source)
+    except FileNotFoundError:
+        config = {}
+    except (OSError, ValueError) as exc:
+        raise CodexError(f"could not read Codex configuration {config_path}: {exc}") from exc
+
+    settings = {key: config[key] for key in CODEX_ACCOUNT_CONFIG_KEYS if key in config}
+    for key, value in settings.items():
+        if not isinstance(value, str):
+            raise CodexError(f"Codex configuration {config_path}: {key} must be a string")
+
+    def config_directory(value: str) -> str:
+        if PureWindowsPath(value).is_absolute():
+            return value
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            path = config_path.parent / path
+        return path_for_codex(path)
+
+    if "sqlite_home" in settings:
+        settings["sqlite_home"] = config_directory(settings["sqlite_home"])
+    elif sqlite_home := os.environ.get("CODEX_SQLITE_HOME"):
+        # --ignore-user-config also bypasses the SQLite environment override.
+        settings["sqlite_home"] = sqlite_home
+
+    provider = settings.get("model_provider", "openai")
+    providers = config.get("model_providers", {})
+    if not isinstance(providers, dict):
+        raise CodexError(f"Codex configuration {config_path}: model_providers must be a table")
+    if provider in providers:
+        definition = providers[provider]
+        if not isinstance(definition, dict):
+            raise CodexError(f"Codex configuration {config_path}: selected provider must be a table")
+        auth = definition.get("auth")
+        if isinstance(auth, dict) and isinstance(auth.get("cwd"), str):
+            auth["cwd"] = config_directory(auth["cwd"])
+        settings["model_providers"] = {provider: definition}
+
+    overrides = []
+    for key, value in settings.items():
+        overrides.extend(("--config", f"{key}={_toml_value(value)}"))
+    return overrides
+
+
 def build_exec_command(
     *,
     codex: str,
@@ -1057,6 +1146,7 @@ def build_exec_command(
         "-C",
         path_for_codex(workspace),
     ]
+    command.extend(codex_account_config_overrides())
     if not model_writes_result:
         command.extend(
             (

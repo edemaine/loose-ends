@@ -57,7 +57,7 @@ The workbench additionally uses `watchdog` for efficient filesystem updates.
 
 To use Loose Ends, install the following prerequisites if you haven't already:
 
-* [Python](https://www.python.org/)
+* [Python 3.11+](https://www.python.org/)
 * Python dependencies: `python -m pip install -r requirements.txt`
 * [Codex CLI](https://learn.chatgpt.com/docs/codex/cli), and run
   `codex login` to authenticate your account
@@ -1139,13 +1139,22 @@ All Codex-backed commands share the analyzer's `--model`,
 `--reasoning-effort`, `--fast`, `--codex`, Cygwin path conversion, Windows ACL
 repair, and transient startup retry behavior. Batch commands also expose
 concurrency controls.
-Automated Codex runs ignore the invoking user's Codex configuration and
+Automated Codex runs ignore the invoking user's Codex execution settings and
 explicitly disable MCP/plugin app tools, shell network access, automatic MCP
 dependency installation, and nested agent spawning. Paper analysis and triage
 also disable web search; literature, solver, paper writer, and critic runs
 default to live first-party web search, independently of shell network access.
-Saved Codex authentication is still used, as documented for
-`--ignore-user-config`. On Windows, the launcher explicitly restores the
+Saved Codex authentication is still used. With `--ignore-user-config`, the
+launcher explicitly preserves these settings from `$CODEX_HOME/config.toml`
+(default: `~/.codex/config.toml`): `cli_auth_credentials_store`,
+`forced_login_method`, `forced_chatgpt_workspace_id`, `sqlite_home`,
+`model_provider`, the selected `model_providers` entry, `openai_base_url`, and
+`chatgpt_base_url`. Relative SQLite and provider authentication working-directory
+paths resolve from the configuration directory. If `sqlite_home` is absent,
+a nonempty `CODEX_SQLITE_HOME` supplies it. Other environment variables,
+including authentication tokens and certificate settings, remain inherited.
+Missing configuration files use defaults; unreadable or invalid files fail
+before the agent starts. On Windows, the launcher explicitly restores the
 elevated sandbox implementation so `workspace-write` remains effective even
 though user configuration is ignored.
 
