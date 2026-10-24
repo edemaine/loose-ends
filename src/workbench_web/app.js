@@ -2520,6 +2520,13 @@ function appendPaperImportItems(items) {
   }
 }
 
+function showTaskDialog() {
+  dialog.showModal();
+  // Hidden dialogs have no scroll box; reset after opening and focus placement.
+  dialog.scrollTop = 0;
+  dialogBody.scrollTop = 0;
+}
+
 function openFileImport() {
   state.dialog = {
     kind: "fileImport",
@@ -2527,7 +2534,7 @@ function openFileImport() {
     outputDirectory: (state.settings.paperRoots || [])[0] || "",
   };
   renderFileImport();
-  dialog.showModal();
+  showTaskDialog();
 }
 
 function renderFileImport(errorMessage = "") {
@@ -2726,7 +2733,7 @@ function openMetadataEditor(paper) {
     button("Cancel", () => dialog.close()),
     button("Save metadata", saveMetadataEditor, "button primary"),
   );
-  dialog.showModal();
+  showTaskDialog();
 }
 
 async function saveMetadataEditor() {
@@ -2794,7 +2801,7 @@ function openProblemEditor(paper) {
     button("Cancel", () => dialog.close()),
     button("Add problem", saveProblemEditor, "button primary"),
   );
-  dialog.showModal();
+  showTaskDialog();
   dialogBody.querySelector('[name="title"]')?.focus();
 }
 
@@ -4311,7 +4318,7 @@ function openTask(action, targets) {
     authorSearch: null, authorSelection: new Set(),
   };
   renderTaskConfiguration();
-  dialog.showModal();
+  showTaskDialog();
 }
 
 function renderTaskTargetChips(task, container) {
@@ -4414,8 +4421,17 @@ async function fetchArxivAuthorPapers() {
   }
 }
 
+function beginTaskDialogStep(step) {
+  const task = state.dialog;
+  task.scrollPositions ??= {};
+  if (task.step) task.scrollPositions[task.step] = dialogBody.scrollTop;
+  task.step = step;
+  return task.scrollPositions[step] ?? 0;
+}
+
 function renderTaskConfiguration(errorMessage = "") {
   const task = state.dialog;
+  const scrollTop = beginTaskDialogStep("configure");
   dialogEyebrow.textContent = "Step 1 of 2 · Configure";
   dialogTitle.textContent = task.action === "write" && task.targets.length > 1
     ? "Write papers" : actionNames[task.action];
@@ -4516,6 +4532,7 @@ function renderTaskConfiguration(errorMessage = "") {
         button("Review download", reviewTask, "button primary"),
       );
     }
+    dialogBody.scrollTop = scrollTop;
     return;
   }
   grid.append(field("prompt", promptLabel(task.action), {
@@ -4627,6 +4644,7 @@ function renderTaskConfiguration(errorMessage = "") {
     button("Cancel", () => dialog.close()),
     button(separateWriteTasks(task) ? `Review ${task.targets.length} jobs` : "Review task", reviewTask, "button primary"),
   );
+  dialogBody.scrollTop = scrollTop;
 }
 
 function collectDialogOptions() {
@@ -4713,6 +4731,7 @@ async function reviewTask() {
 
 function renderTaskConfirmation() {
   const task = state.dialog;
+  const scrollTop = beginTaskDialogStep("confirm");
   const plan = task.plan;
   dialogEyebrow.textContent = "Step 2 of 2 · Confirm";
   dialogTitle.textContent = plan.title;
@@ -4774,6 +4793,7 @@ function renderTaskConfirmation() {
     button("Back", () => renderTaskConfiguration()),
     button(task.plans.length > 1 ? `Start ${task.plans.length} jobs` : `Start ${plan.units.length} run${plan.units.length === 1 ? "" : "s"}`, confirmTask, "button primary"),
   );
+  dialogBody.scrollTop = scrollTop;
 }
 
 async function confirmTask() {

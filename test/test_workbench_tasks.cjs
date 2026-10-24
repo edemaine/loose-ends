@@ -11,6 +11,69 @@ const functions = [
   "saveProblemEditor", "configuredMemoryLimit", "renderMemoryControl",
 ].map(name => source.match(new RegExp(`^(?:async )?function ${name}\\([^]*?^}`, "m"))[0]).join("\n");
 
+test("task steps remember independent scroll positions only until the dialog closes", async () => {
+  const element = () => ({
+    children: [], scrollTop: 0,
+    append(...children) { this.children.push(...children); },
+    replaceChildren(...children) { this.children = children; this.scrollTop = 0; },
+    querySelectorAll() { return []; },
+    querySelector() { return null; },
+  });
+  const body = element();
+  let open = false;
+  let scrollTop = 900;
+  // Like a hidden dialog, retain the old offset but ignore scroll writes while closed.
+  Object.defineProperty(body, "scrollTop", {
+    get: () => open ? scrollTop : 0,
+    set: value => { if (open) scrollTop = value; },
+  });
+  const footer = element();
+  const plan = { title: "Download", units: [], warnings: [], prompts: {}, priorityLevel: 0 };
+  const context = vm.createContext({
+    state: { settings: { paperRoots: [] } },
+    dialogBody: body, dialogFooter: footer, dialogEyebrow: {}, dialogTitle: {},
+    dialog: {
+      showModal() { open = true; }, close() { open = false; },
+      setAttribute() {}, removeAttribute() {},
+    },
+    sessionStorage: { getItem: () => null },
+    dialogStorageKey: () => "draft", actionNames: { download: "Download" },
+    node: element, field: element, checkbox: element, priorityOptions: () => [],
+    button: (label, onClick) => ({ label, onClick }),
+    renderTaskTargetChips() {}, saveDialogOptions() {},
+    taskRequests: () => [{}], api: async () => plan,
+    priorityMultiplier: () => "1×", confirmTask() {},
+  });
+  const renderers = [
+    "showTaskDialog", "openTask", "beginTaskDialogStep", "renderTaskConfiguration", "renderTaskConfirmation", "reviewTask",
+  ].map(name => source.match(new RegExp(`^(?:async )?function ${name}\\([^]*?^}`, "m"))[0]).join("\n");
+  vm.runInContext(renderers, context);
+
+  body.scrollTop = 900;
+  context.openTask("download", []);
+  assert.equal(body.scrollTop, 0);
+  body.scrollTop = 240;
+  context.renderTaskConfiguration();
+  assert.equal(body.scrollTop, 240);
+  await context.reviewTask();
+  assert.equal(body.scrollTop, 0);
+
+  body.scrollTop = 420;
+  footer.children.find(button => button.label === "Back").onClick();
+  assert.equal(body.scrollTop, 240);
+  body.scrollTop = 360;
+  await context.reviewTask();
+  assert.equal(body.scrollTop, 420);
+  footer.children.find(button => button.label === "Back").onClick();
+  assert.equal(body.scrollTop, 360);
+
+  context.dialog.close();
+  context.openTask("download", []);
+  assert.equal(body.scrollTop, 0);
+  await context.reviewTask();
+  assert.equal(body.scrollTop, 0);
+});
+
 test("memory control distinguishes unsupported-platform warnings from enforcement failures", () => {
   const warning = "Worker memory limits are unavailable on macOS; workers will run without a memory limit.";
   for (const mode of ["percent", "gb", "unlimited"]) {
