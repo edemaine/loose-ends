@@ -174,6 +174,14 @@ def populate_dry_run_previews(plan: dict) -> dict:
     units = plan.get("units", [])
     if not units:
         return plan
+    if plan.get("action") != "download":
+        environment = os.environ.copy()
+        if plan.get("options", {}).get("codexHome"):
+            environment["CODEX_HOME"] = plan["options"]["codexHome"]
+        warnings = plan.setdefault("warnings", [])
+        for warning in codex_cli.codex_home_warnings(environment):
+            if warning not in warnings:
+                warnings.append(warning)
     with ThreadPoolExecutor(
         max_workers=min(MAX_DRY_RUN_WORKERS, len(units))
     ) as executor:

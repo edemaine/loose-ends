@@ -154,7 +154,9 @@ To use multiple Codex accounts, set **CODEX_HOME** at the bottom of a task's
 **Model and web-search settings** to the directory authenticated for the desired
 account, such as `~/.codex_personal`. A leading `~` expands to the server's
 `$HOME`; leaving the field blank preserves the inherited default. The setting
-applies to that task, including retries. See
+applies to that task, including retries. Codex dry runs warn when the selected
+or default home directory is missing. The web app also shows these
+warnings before you start the task. See
 [T3 Code's multiple-account guide](https://github.com/pingdotgg/t3code/blob/main/docs/user/providers-codex.md#use-multiple-accounts)
 for account setup instructions.
 

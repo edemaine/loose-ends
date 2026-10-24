@@ -129,6 +129,32 @@ name = "Ignored provider"
             ["cygpath", "-u", r"C:\Accounts\second"], "could not convert Codex home"
         )
 
+    def test_home_warnings_only_report_missing_directories(self):
+        default = self.codex_home / ".codex"
+        default.mkdir()
+        with patch.object(codex_cli.Path, "home", return_value=self.codex_home):
+            for value in (None, ""):
+                with self.subTest(value=value):
+                    environment = {} if value is None else {"CODEX_HOME": value}
+                    warnings = codex_cli.codex_home_warnings(environment)
+                    self.assertEqual(warnings, [])
+            default.rmdir()
+            warnings = codex_cli.codex_home_warnings({})
+            self.assertEqual(len(warnings), 1)
+            self.assertIn("not an existing directory", warnings[0])
+            self.assertIn(str(default.resolve()), warnings[0])
+            self.assertFalse(default.exists())
+
+        self.assertEqual(codex_cli.codex_home_warnings(), [])
+        for path in (self.codex_home / "missing", self.codex_home / "file"):
+            with self.subTest(path=path):
+                if path.name == "file":
+                    path.write_text("not a directory")
+                warnings = codex_cli.codex_home_warnings({"CODEX_HOME": str(path)})
+                self.assertEqual(len(warnings), 1)
+                self.assertIn("not an existing directory", warnings[0])
+                self.assertIn(str(path.resolve()), warnings[0])
+
     def test_account_config_preserves_absolute_windows_sqlite_path(self):
         (self.codex_home / "config.toml").write_text(
             "sqlite_home = 'C:\\Accounts\\second account\\sqlite'\n"

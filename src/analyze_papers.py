@@ -788,6 +788,8 @@ def main(argv: list[str] | None = None) -> int:
             f"{current} current"
             + (f"; {len(failures)} failed." if failures else ".")
         )
+        if selected:
+            codex_cli.report_codex_home_warnings()
         return 1 if failures else 0
 
     try:

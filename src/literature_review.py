@@ -942,6 +942,8 @@ def main(argv: list[str] | None = None) -> int:
             stale.append(problem)
 
     if args.dry_run:
+        if stale:
+            codex_cli.report_codex_home_warnings()
         for problem in stale:
             print(
                 f"Would search literature: {problem.paper_directory} "

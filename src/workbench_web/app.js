@@ -4617,7 +4617,7 @@ function renderTaskConfiguration(errorMessage = "") {
   }
   advancedGrid.append(field("codexHome", "CODEX_HOME", {
     value: options.codexHome || "", placeholder: "~/.codex", full: true,
-    help: "Leave blank to inherit the default. ~ expands to the server's HOME directory.",
+    help: "Leave blank to inherit the server's CODEX_HOME or default. Dry runs warn if the selected or default home directory is missing. ~ expands to the server's HOME directory.",
   }));
   modelSettings.append(advancedGrid);
   grid.append(modelSettings);

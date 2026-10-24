@@ -1414,6 +1414,8 @@ def main(argv: list[str] | None = None) -> int:
         return codex_cli.report_error(parser, exc)
 
     if args.dry_run:
+        if work_items:
+            codex_cli.report_codex_home_warnings()
         if args.prompt is not None:
             print(f"Solver direction: {args.prompt.strip()}")
         if args.review_prompt is not None and args.review != "none":

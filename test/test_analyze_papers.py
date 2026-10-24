@@ -1,7 +1,8 @@
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 import json
+import os
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
@@ -517,16 +518,21 @@ class MainOutputTests(unittest.TestCase):
             patch.object(analyze_papers, "analysis_is_current", return_value=False),
             patch.object(analyze_papers, "resolve_codex_executable") as resolve,
             patch.object(analyze_papers, "analyze_paper") as analyze,
+            patch.dict(os.environ, {"CODEX_HOME": "", "USERPROFILE": ""}),
+            patch.object(codex_cli.Path, "home", return_value=Path(temporary)),
         ):
             paper = make_paper(Path(temporary))
             output = StringIO()
 
-            with redirect_stdout(output):
+            error = StringIO()
+            with redirect_stdout(output), redirect_stderr(error):
                 returncode = analyze_papers.main([str(paper), "--dry-run"])
 
         self.assertEqual(returncode, 0)
         self.assertIn(f"Would analyze: {paper}", output.getvalue())
         self.assertIn("1 would run; 0 current", output.getvalue())
+        self.assertIn("Codex home is not an existing directory", error.getvalue())
+        self.assertIn(str(Path(temporary) / ".codex"), error.getvalue())
         resolve.assert_not_called()
         analyze.assert_not_called()
 

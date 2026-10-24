@@ -1807,6 +1807,55 @@ class WorkbenchPlanningTests(unittest.TestCase):
         self.assertEqual(preview["exitCode"], 2)
         self.assertIn("Standard error:\ninvalid target", preview["output"])
 
+    @patch("workbench_tasks.subprocess.run")
+    def test_plan_preview_reports_home_warnings_before_start(self, run):
+        run.return_value = Mock(returncode=0, stdout="Would run.\n", stderr="")
+        with TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            (home / ".codex").mkdir()
+            for action, inherited, selected, expected in (
+                ("solve", "", None, None),
+                ("solve", str(home), None, None),
+                ("solve", "", str(home), None),
+                ("solve", str(home), str(home / "missing"), "not an existing directory"),
+                ("download", "", None, None),
+            ):
+                with self.subTest(action=action, inherited=inherited, selected=selected):
+                    plan = fake_plan([sys.executable, "tool.py"])
+                    plan["action"] = action
+                    plan["warnings"] = ["Existing warning"]
+                    plan["options"] = {"codexHome": selected} if selected else {}
+                    with (
+                        patch.dict(os.environ, {"CODEX_HOME": inherited, "USERPROFILE": ""}),
+                        patch("codex_cli.Path.home", return_value=home),
+                    ):
+                        populate_dry_run_previews(plan)
+                    self.assertEqual(plan["warnings"][0], "Existing warning")
+                    warnings = plan["warnings"][1:]
+                    if expected:
+                        self.assertTrue(any(expected in warning for warning in warnings))
+                    else:
+                        self.assertEqual(warnings, [])
+                    self.assertEqual(plan["units"][0]["dryRun"]["status"], "ok")
+
+    def test_metadata_preview_captures_missing_home_warning_from_cli(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = make_paper(root)
+            plan = build_plan(
+                {"action": "metadata", "targets": [{"kind": "paper", "path": str(paper)}],
+                 "options": {"codexHome": str(root / "missing account")}},
+                project_root=PROJECT_ROOT, allowed_roots=[root],
+                manuscripts=root / "manuscripts", catalog_version=1,
+            )
+            populate_dry_run_previews(plan)
+            preview = plan["units"][0]["dryRun"]
+            self.assertEqual(preview["status"], "ok")
+            self.assertIn("Would ask Codex", preview["output"])
+            self.assertIn("Warning: Codex home is not an existing directory", preview["output"])
+            self.assertIn(str(root / "missing account"), preview["output"])
+            self.assertFalse((root / "missing account").exists())
+
 
 class WorkbenchStoreTests(unittest.TestCase):
     @staticmethod

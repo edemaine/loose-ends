@@ -1042,21 +1042,49 @@ def _toml_value(value: object) -> str:
     raise CodexError("unsupported value type in Codex account/provider configuration")
 
 
-def codex_account_config_overrides() -> list[str]:
-    """Preserve account and connection settings while ignoring other user config."""
-    home = os.environ.get("CODEX_HOME")
+def codex_home_path(environment: Mapping[str, str] | None = None) -> Path:
+    """Resolve the account directory used by the native Codex CLI."""
+    environment = os.environ if environment is None else environment
+    home = environment.get("CODEX_HOME")
     if not home:
         # Cygwin Python can have a different home from the native Windows CLI.
-        home = os.environ.get("USERPROFILE") if sys.platform == "cygwin" else None
+        home = environment.get("USERPROFILE") if sys.platform == "cygwin" else None
     if home and sys.platform == "cygwin" and PureWindowsPath(home).is_absolute():
         home = _run_local_command(
             ["cygpath", "-u", home], "could not convert Codex home"
         ).strip()
-    config_path = (Path(home).expanduser() if home else Path.home() / ".codex")
+    path = Path(home).expanduser() if home else Path.home() / ".codex"
     # USERPROFILE names the user's home, rather than CODEX_HOME itself.
-    if not os.environ.get("CODEX_HOME") and home:
-        config_path /= ".codex"
-    config_path = config_path.resolve() / "config.toml"
+    if not environment.get("CODEX_HOME") and home:
+        path /= ".codex"
+    return path.resolve()
+
+
+def codex_home_warnings(environment: Mapping[str, str] | None = None) -> list[str]:
+    """Check account selection without starting Codex or changing its files."""
+    environment = os.environ if environment is None else environment
+    warnings = []
+    try:
+        path = codex_home_path(environment)
+        if not path.is_dir():
+            warnings.append(
+                f"Codex home is not an existing directory: {path}. "
+                "Set CODEX_HOME in the task's Model and web-search settings "
+                "or in the CLI environment to an existing authenticated account directory."
+            )
+    except (CodexError, OSError, ValueError) as exc:
+        warnings.append(f"Could not inspect Codex home: {exc}")
+    return warnings
+
+
+def report_codex_home_warnings() -> None:
+    for warning in codex_home_warnings():
+        print(f"Warning: {warning}", file=sys.stderr)
+
+
+def codex_account_config_overrides() -> list[str]:
+    """Preserve account and connection settings while ignoring other user config."""
+    config_path = codex_home_path() / "config.toml"
     try:
         with config_path.open("rb") as source:
             config = tomllib.load(source)

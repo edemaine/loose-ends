@@ -2462,6 +2462,7 @@ def main(argv: list[str] | None = None) -> int:
         return codex_cli.report_error(parser, exc)
 
     if args.dry_run:
+        codex_cli.report_codex_home_warnings()
         print(f"Would write one manuscript: {manuscript_directory}")
         if selection_changed:
             print("  result selection changed; an author round will run first")

@@ -1020,6 +1020,8 @@ def main(argv: list[str] | None = None) -> int:
             pending.append(attempt)
 
     if args.dry_run:
+        if pending:
+            codex_cli.report_codex_home_warnings()
         for attempt in pending:
             print(
                 f"Would review: {attempt.problem.paper_directory} "
