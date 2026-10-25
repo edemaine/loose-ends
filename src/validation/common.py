@@ -11,6 +11,9 @@ from typing import Callable, Mapping
 
 AGENT_RESULT_FILENAME = "agent-result.json"
 EXPECTATIONS_FILENAME = "expectations.json"
+# Tabs and line endings are valid text; other C0/C1 controls usually indicate
+# string-escape corruption (for example, Python interpreting LaTeX's \v).
+CONTROL_CHARACTER_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 
 
 @dataclass(frozen=True)
@@ -60,6 +63,34 @@ class Reporter:
         )
 
 
+def validate_control_characters(
+    value: object,
+    reporter: Reporter,
+    *,
+    path: str,
+) -> None:
+    """Check text and nested JSON strings, reporting their source locations."""
+    if isinstance(value, str):
+        match = CONTROL_CHARACTER_RE.search(value)
+        if match:
+            reporter.error(
+                "E_CONTROL_CHARACTER",
+                f"unexpected control character U+{ord(match[0]):04X} "
+                f"at character {match.start() + 1}; check string escaping",
+                path=path,
+            )
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            validate_control_characters(
+                key, reporter, path=f"{path} (key {key!r})",
+            )
+            pointer = key.replace("~", "~0").replace("/", "~1")
+            validate_control_characters(item, reporter, path=f"{path}/{pointer}")
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            validate_control_characters(item, reporter, path=f"{path}/{index}")
+
+
 def read_json_object(
     path: Path,
     reporter: Reporter,
@@ -82,6 +113,7 @@ def read_json_object(
     if not isinstance(value, dict):
         reporter.error(code, f"{description} is not a JSON object", path=path.name)
         return None
+    validate_control_characters(value, reporter, path=f"{path.name}#")
     return value
 
 
@@ -104,6 +136,7 @@ def read_markdown(
             path=path.name,
         )
         return None
+    validate_control_characters(contents, reporter, path=path.name)
     if not contents.strip():
         reporter.error(code, f"{description} is empty", path=path.name)
         return None
@@ -253,7 +286,7 @@ def run_agent_validation(
         code="E_EXPECTATIONS",
         description="validation expectations",
     )
-    if expectations is None:
+    if expectations is None or reporter.issues:
         report = ValidationReport(issues=reporter.issues)
     else:
         try:
