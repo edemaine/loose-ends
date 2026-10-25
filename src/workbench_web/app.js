@@ -3270,6 +3270,17 @@ async function loadJob(id) {
   }
 }
 
+function shellQuote(value) {
+  return /^[a-zA-Z0-9_@%+=:,./-]+$/.test(value)
+    ? value : `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
+function runCommandDisplay(job, run) {
+  const command = run.argv.map(shellQuote).join(" ");
+  const home = job.plan?.options?.codexHome;
+  return home ? `CODEX_HOME=${shellQuote(home)} ${command}` : command;
+}
+
 function renderJobDetail(job) {
   const shell = node("div", "main-inner");
   shell.dataset.jobDetail = job.id;
@@ -3433,7 +3444,7 @@ function renderJobDetail(job) {
         details.append(selected);
       }
       const command = node("div", "confirm-block");
-      command.append(node("h3", "", "Command"), node("pre", "command", run.argv.join(" ")));
+      command.append(node("h3", "", "Command"), node("pre", "command", runCommandDisplay(job, run)));
       details.append(command);
       const cachedLog = state.runLogs.get(run.id);
       const log = node("pre", "console", runLogText(cachedLog));
