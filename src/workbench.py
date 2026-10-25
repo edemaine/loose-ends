@@ -40,6 +40,7 @@ import open_problem_common as common
 import review_solutions
 import write_paper
 from workbench_store import ACTIVE_STATUSES, WorkbenchStore
+from workbench_usage import UsageIndex
 from workbench_memory import QUEUE_JOB_ENV, QueueMemoryController
 from workbench_worker import recover_run_artifacts
 from workbench_tasks import (
@@ -1544,6 +1545,8 @@ class WorkbenchApplication:
         self.arxiv_search_lock = threading.Lock()
         self.arxiv_pacer = download_arxiv.RequestPacer()
         self.observer = None
+        self.usage = UsageIndex(self.store, paths, manuscripts, self.hub)
+        self.usage.start()
 
     def start_watching(self) -> None:
         if Observer is None:
@@ -2027,6 +2030,22 @@ class WorkbenchApplication:
             shutil.rmtree(path, ignore_errors=True)
         self.scheduler.close()
         self.catalog.close()
+        self.usage.close()
+
+    def usage_summary(self, body: dict) -> dict:
+        targets = body.get("targets")
+        if not isinstance(targets, list) or not 1 <= len(targets) <= 5000:
+            raise PlanError("select between 1 and 5000 items")
+        for target in targets:
+            if not isinstance(target, dict) or not isinstance(target.get("kind"), str) or target.get("kind") not in {
+                "paper", "problem", "attempt", "manuscript", "draft", "job", "run",
+            } or not isinstance(target.get("path"), str):
+                raise PlanError("invalid usage target")
+            if target["kind"] not in {"job", "run"} and not _is_allowed_file(
+                Path(target["path"]), self.allowed_roots,
+            ):
+                raise PlanError("usage target is outside allowed roots")
+        return self.usage.summary(targets)
 
 
 def _is_allowed_file(path: Path, roots: Iterable[Path]) -> bool:
@@ -2306,6 +2325,8 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/plans":
                 self.send_json(self.app.create_plan(body), 201)
+            elif parsed.path == "/api/usage":
+                self.send_json(self.app.usage_summary(body))
             elif parsed.path == "/api/paper-imports":
                 self.send_json(self.app.create_paper_import(), 201)
             elif match := re.fullmatch(

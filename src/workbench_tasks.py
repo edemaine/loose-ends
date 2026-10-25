@@ -41,7 +41,7 @@ MAX_DRY_RUN_WORKERS = 4
 MIN_PRIORITY_LEVEL = -3
 MAX_PRIORITY_LEVEL = 3
 EDITABLE_TASK_OPTIONS = {
-    "codexHome", "model", "reasoningEffort", "fast", "webSearch", "prompt",
+    "codexHome", "model", "reasoningEffort", "fast", "serviceTier", "webSearch", "prompt",
     "reviewModel", "reviewReasoningEffort", "reviewWebSearch", "reviewPrompt",
     "maxRounds", "review", "reviewTimeoutMinutes", "includeLiteratureResolved",
     "mode", "timeoutMinutes", "force", "recoverComplete", "authors", "title",
@@ -402,8 +402,11 @@ def _common_arguments(
         if effort not in codex_cli.REASONING_EFFORTS:
             raise PlanError("invalid reasoning effort")
         argv.extend(("--reasoning-effort", effort))
-    if options.get("fast") is True:
-        argv.append("--fast")
+    tier = options.get("serviceTier") or ("fast" if options.get("fast") is True else "standard")
+    if tier not in {"standard", "fast", "ultrafast"}:
+        raise PlanError("invalid service tier")
+    if tier != "standard":
+        argv.append(f"--{tier}")
     if web_search:
         mode = options.get("webSearch")
         if mode:

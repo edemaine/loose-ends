@@ -521,6 +521,7 @@ test("a failed jobs refresh releases the request so later changes can load", asy
 
 test("live elapsed times and displayed logs update without fetching jobs", () => {
   const { context } = jobsHarness(() => { throw new Error("Jobs must not be fetched"); });
+  context.refreshVisibleUsage = () => {};
   context.state.jobDetails.set("job", { id: "job" });
   context.main.querySelectorAll = () => [{ dataset: { runLog: "run" } }];
   context.refreshLiveActivity();

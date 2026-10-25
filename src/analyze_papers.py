@@ -138,12 +138,13 @@ def analysis_config_digest(
     model: str | None,
     reasoning_effort: str | None,
     fast: bool,
+    ultrafast: bool = False,
 ) -> str:
     """Hash settings that affect the semantic analysis."""
     return codex_cli.semantic_config_digest(
         prompt,
         schema_text,
-        codex_cli.ModelOptions(model, reasoning_effort, fast),
+        codex_cli.ModelOptions(model, reasoning_effort, fast, ultrafast),
         validation_source=Path(analysis_validation.__file__).resolve(),
     )
 
@@ -321,6 +322,7 @@ def build_manifest(
     model: str | None,
     reasoning_effort: str | None,
     fast: bool,
+    ultrafast: bool = False,
 ) -> dict:
     return {
         "schema_version": MANIFEST_SCHEMA_VERSION,
@@ -329,6 +331,7 @@ def build_manifest(
         "analysis_config_digest": config_digest,
         "codex_version": codex_version,
         "requested_fast_mode": fast,
+        "requested_service_tier": codex_cli.ModelOptions(fast=fast, ultrafast=ultrafast).service_tier,
         "requested_model": model,
         "requested_reasoning_effort": reasoning_effort,
         "status": agent_result["status"],
@@ -401,6 +404,7 @@ def analyze_paper(
     model: str | None = None,
     reasoning_effort: str | None = None,
     fast: bool = False,
+    ultrafast: bool = False,
     force: bool = False,
     launch_interval: float = CODEX_LAUNCH_INTERVAL_SECONDS,
 ) -> AnalysisOutcome:
@@ -416,6 +420,7 @@ def analyze_paper(
         model,
         reasoning_effort,
         fast,
+        ultrafast,
     )
     if not force and analysis_is_current(
         analysis_directory,
@@ -453,6 +458,7 @@ def analyze_paper(
             model,
             reasoning_effort,
             fast,
+            ultrafast,
         ),
         launch_interval=launch_interval,
     )
@@ -469,6 +475,7 @@ def analyze_paper(
             model=model,
             reasoning_effort=reasoning_effort,
             fast=fast,
+            ultrafast=ultrafast,
         )
         staged_manifest = workspace / MANIFEST_FILE
         staged_manifest.write_text(
@@ -586,6 +593,7 @@ def recover_complete_analysis(
     manifest.update(
         {
             "requested_fast_mode": None,
+            "requested_service_tier": None,
             "recovered_without_config": True,
             "recovered_from_run": workspace.name,
             "original_run_preserved": True,
@@ -756,6 +764,7 @@ def main(argv: list[str] | None = None) -> int:
             args.model,
             args.reasoning_effort,
             args.fast,
+            args.ultrafast,
         )
         for paper in papers:
             try:
@@ -835,6 +844,7 @@ def main(argv: list[str] | None = None) -> int:
                     model=args.model,
                     reasoning_effort=args.reasoning_effort,
                     fast=args.fast,
+                    ultrafast=args.ultrafast,
                     force=args.force,
                 ): paper
                 for paper in papers

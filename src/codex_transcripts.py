@@ -79,6 +79,13 @@ def record_transcript(function):
             "diagnostics": str(workspace / kwargs.get("log_filename", "run.log")),
         }
         sources["stage"] = transcript_stage(Path(sources["events"]))
+        options = kwargs.get("options")
+        if options is not None:
+            sources.update({
+                "model": options.model,
+                "reasoning_effort": options.reasoning_effort,
+                "service_tier": options.service_tier,
+            })
         (folder / "prompt.txt").write_text(kwargs["prompt"], encoding="utf-8")
         (folder / "source.json").write_text(json.dumps(sources), encoding="utf-8")
         try:

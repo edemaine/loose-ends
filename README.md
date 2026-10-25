@@ -157,6 +157,37 @@ percentage of installed RAM, a fixed number of GB, or infinity. That allocation
 is divided by the maximum worker count to produce an independent limit for each
 worker. The default is 50% of installed RAM.
 
+Paper, problem, and manuscript pages have a **Cost** button in their action row,
+labeled with the estimated API cost. It opens a popup with tokens and costs.
+Problem popups show both the lifetime problem total and the selected attempt
+(including its critic); manuscript popups show all drafts and the selected
+draft. Activity keeps its **Usage** section below **Needs attention**.
+The usage table shows stage and total
+rows with input, cache reads/writes, output, reasoning, and estimated cost. Reasoning
+is part of output, and cache reads/writes are part of input, so neither is
+added twice. Use **Cost** in the multiselect bar to total selected items;
+overlapping selections count each invocation once. Paper totals include
+analysis and all problems. Manuscript work is counted separately from its
+source papers and problems.
+
+Usage is indexed in the workbench SQLite database. A background import starts
+automatically and checks for changed logs every 30 seconds; unchanged logs
+are skipped and growing logs are read from their saved position. Queries do
+not parse logs. Recorded usage survives replacement of installed artifacts or
+removal of Activity records. Historical logs are backfilled when available;
+missing usage and unknown model prices are marked as partial. Rebuilding from
+logs can only recover history whose logs are still present.
+
+Prices are API-equivalent token estimates, not subscription charges. The
+versioned rate table in `src/workbench_usage.py` uses current short-context
+rates and 30-minute cache writes, with Fast/Ultrafast multipliers. Unreported
+cache writes use ordinary input rates. Tool fees, long-context premiums, and
+account-specific discounts are excluded. **Pricing details** shows the assumed
+USD-per-million-token rates for each model and service tier in the total,
+including the Fast/Ultrafast multipliers. Unknown rates appear as dashes and
+are excluded from the price estimate. Raw tokens are stored independently
+of the rate table, so updating prices does not require reimporting logs.
+
 To use multiple Codex accounts, set **CODEX_HOME** at the bottom of a task's
 **Model and web-search settings** to the directory authenticated for the desired
 account, such as `~/.codex_personal`. A leading `~` expands to the server's
@@ -471,7 +502,11 @@ Reasoning effort is separate from the model ID. Supported levels include
 `low`, `medium`, `high`, `xhigh`, `max`, and `ultra`; a selected model may
 support only a subset. `--fast` requests Codex's faster service tier for these
 runs without changing the global CLI configuration; Fast mode consumes credits
-at a higher rate.
+at a higher rate. Use `--ultrafast` for the Ultrafast service tier, where the
+selected model and account support it. `--fast` and `--ultrafast` are mutually
+exclusive. Automatic critics inherit the primary tier unless overridden with
+`--review-fast` or `--review-ultrafast`. The workbench exposes Standard, Fast,
+and Ultrafast under **Model and web-search settings → Speed / service tier**.
 
 Codex writes in a temporary workspace beneath the paper's `analysis/`
 directory. The runner stages disposable copies of `paper.pdf` and `source/`

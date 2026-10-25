@@ -485,6 +485,7 @@ def _install_review(
                 "requested_model": options.model,
                 "requested_reasoning_effort": options.reasoning_effort,
                 "requested_fast_mode": options.fast,
+                "requested_service_tier": options.service_tier,
                 "requested_web_search": web_search,
                 "correctness": result["correctness"],
                 "reviewed_coverage": result["reviewed_coverage"],
@@ -551,6 +552,7 @@ def _write_work_record(
             "requested_model": options.model,
             "requested_reasoning_effort": options.reasoning_effort,
             "requested_fast_mode": options.fast,
+            "requested_service_tier": options.service_tier,
             "requested_web_search": web_search,
         },
     )

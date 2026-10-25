@@ -457,6 +457,7 @@ def _install_literature(
             "requested_model": options.model,
             "requested_reasoning_effort": options.reasoning_effort,
             "requested_fast_mode": options.fast,
+            "requested_service_tier": options.service_tier,
             "requested_web_search": web_search,
             "resolution_status": entry["resolution_status"],
             "confidence": entry["confidence"],
@@ -524,6 +525,7 @@ def _write_work_record(
             "requested_model": options.model,
             "requested_reasoning_effort": options.reasoning_effort,
             "requested_fast_mode": options.fast,
+            "requested_service_tier": options.service_tier,
             "requested_web_search": web_search,
         },
     )

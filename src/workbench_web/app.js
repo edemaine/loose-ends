@@ -54,6 +54,8 @@ const state = {
   expandedTranscriptPanels: new Set(),
   expandedJobScopes: new Set(),
   expandedProblemBackgrounds: new Set(),
+  usageCache: new Map(),
+  usageLoads: new Map(),
   dialog: null,
 };
 
@@ -878,10 +880,214 @@ function renderSelectionBar() {
   if ([...kinds].every(kind => ["paper", "problem", "attempt"].includes(kind))) {
     selectionBar.append(button("Write", () => openTask("write", values)));
   }
+  selectionBar.append(button("Cost", () => openCostDialog(values)));
   selectionBar.append(button("Clear", () => {
     state.selection.clear();
     render();
   }));
+}
+
+function usagePanel(scopes) {
+  const panel = node("section", "panel usage-panel");
+  panel.append(node("h2", "", "Usage"));
+  const totals = node("div", "usage-totals");
+  scopes.forEach(({ label, targets }) => totals.append(usageSummary(targets, label)));
+  panel.append(totals);
+  return panel;
+}
+
+function usageSummary(targets, label) {
+  const element = node("article", "usage-summary");
+  element.dataset.usageTargets = JSON.stringify(targets.map(({ kind, path }) => ({ kind, path })));
+  element.dataset.usageLabel = label;
+  element.append(node("strong", "", label), node("p", "muted", "Loading usage…"));
+  queueMicrotask(() => refreshUsageElement(element));
+  return element;
+}
+
+function costButton(scopes) {
+  const control = button("Cost", () => openCostDialog(scopes[0].targets, scopes), "button");
+  control.dataset.usageTargets = JSON.stringify(scopes[0].targets.map(({ kind, path }) => ({ kind, path })));
+  control.dataset.usageLabel = scopes[0].label;
+  control.dataset.usageDisplay = "button";
+  control.title = "Show tokens and estimated API cost";
+  queueMicrotask(() => refreshUsageElement(control));
+  return control;
+}
+
+async function requestUsage(targets, force = false) {
+  const key = JSON.stringify(targets);
+  const cached = state.usageCache.get(key);
+  if (!force && cached && Date.now() - cached.time < 15000) return cached.value;
+  if (!state.usageLoads.has(key)) {
+    const load = api("/api/usage", { method: "POST", body: { targets } })
+      .then(value => {
+        state.usageCache.set(key, { time: Date.now(), value });
+        // Selections can produce many distinct combinations over a session.
+        if (state.usageCache.size > 100) state.usageCache.delete(state.usageCache.keys().next().value);
+        return value;
+      })
+      .finally(() => state.usageLoads.delete(key));
+    state.usageLoads.set(key, load);
+  }
+  return state.usageLoads.get(key);
+}
+
+function usageCostLabel(value) {
+  if (value.estimatedCost === null) return value.invocations ? "Cost unavailable" : "No recorded usage";
+  const dollars = value.estimatedCost > 0 && value.estimatedCost < .01
+    ? "<$0.01" : `≈${value.estimatedCost.toLocaleString("en-US", { style: "currency", currency: "USD" })}`;
+  return `${dollars}${value.missingUsage || value.unpriced ? " (partial)" : ""}`;
+}
+
+function usageTable(value, label) {
+  const table = node("table", "usage-stage-table");
+  table.append(node("caption", "", label));
+  const head = node("thead");
+  const header = node("tr");
+  for (const [label, title] of [
+    ["Stage", "Pipeline stage"], ["Turns", "Recorded Codex turns"],
+    ["Input", "All input tokens, including cache reads and writes"],
+    ["Cache read", "Cached tokens within input"],
+    ["Cache write", "Cache-write tokens within input"],
+    ["Output", "All output tokens, including reasoning"],
+    ["Reasoning", "Reasoning tokens within output"],
+    ["Est. API cost", "Estimated API-equivalent token cost"],
+  ]) {
+    const cell = node("th", "", label);
+    cell.scope = "col";
+    cell.title = title;
+    header.append(cell);
+  }
+  head.append(header);
+  const rowFor = (item, label) => {
+    const row = node("tr");
+    const heading = node("th", "", label);
+    heading.scope = "row";
+    row.append(heading, node("td", "", item.invocations.toLocaleString()));
+    for (const key of ["input_tokens", "cached_input_tokens", "cache_write_input_tokens", "output_tokens", "reasoning_output_tokens"]) {
+      const reported = item.reported[key];
+      const known = item.invocations - item.missingUsage;
+      const partial = reported > 0 && reported < known;
+      const cell = node("td", "", reported ? `${item.tokens[key].toLocaleString()}${partial ? "*" : ""}` : "—");
+      cell.title = reported ? partial ? `Reported for ${reported} of ${known} turns with usage` : "Reported tokens" : "Unreported";
+      row.append(cell);
+    }
+    row.append(node("td", "", usageCostLabel(item)));
+    return row;
+  };
+  const body = node("tbody");
+  value.stages.forEach(stage => body.append(rowFor(stage, stage.stage)));
+  const foot = node("tfoot");
+  foot.append(rowFor(value, "Total"));
+  table.append(head, body, foot);
+  const scroll = node("div", "usage-table-scroll");
+  scroll.append(table);
+  return scroll;
+}
+
+function usagePricingTable(pricing) {
+  const table = node("table", "usage-stage-table");
+  table.append(node("caption", "", "Assumed rates · USD per 1M tokens"));
+  const head = node("thead");
+  const header = node("tr");
+  for (const label of ["Model", "Service tier", "Uncached input", "Cache read", "Cache write (30m)", "Output"]) {
+    const cell = node("th", "", label);
+    cell.scope = "col";
+    header.append(cell);
+  }
+  head.append(header);
+  const body = node("tbody");
+  for (const item of pricing) {
+    const row = node("tr");
+    const model = node("th", "", item.model || "Unknown model");
+    model.scope = "row";
+    row.append(model, node("td", "", item.tier || "Unknown tier"));
+    for (const key of ["input", "cachedInput", "cacheWrite", "output"]) {
+      const rate = item.rates?.[key];
+      const cell = node("td", "", rate == null ? "—" : rate.toLocaleString("en-US", {
+        style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 6,
+      }));
+      if (rate == null) cell.title = "No assumed pricing; excluded from the cost estimate";
+      row.append(cell);
+    }
+    body.append(row);
+  }
+  table.append(head, body);
+  const scroll = node("div", "usage-table-scroll");
+  scroll.append(table);
+  return scroll;
+}
+
+async function refreshUsageElement(element, force = false) {
+  if (!element.isConnected) return;
+  const targets = JSON.parse(element.dataset.usageTargets);
+  try {
+    const value = await requestUsage(targets, force);
+    if (!element.isConnected) return;
+    if (element.usageValue === value) return;
+    element.usageValue = value;
+    if (element.dataset.usageDisplay === "button") {
+      element.textContent = value.estimatedCost !== null ? `Cost: ${usageCostLabel(value)}`
+        : value.invocations ? "Cost: unavailable" : value.indexing ? "Cost: indexing…" : "Cost: no usage";
+      element.title = `${element.dataset.usageLabel}. Estimated API cost; click for tokens and stage breakdown.`
+        + (value.missingUsage ? ` ${value.missingUsage} turn(s) missing usage.` : "")
+        + (value.unpriced ? ` ${value.unpriced} turn(s) without known pricing.` : "")
+        + (value.indexing ? " Usage index is updating." : "")
+        + (value.indexError ? ` Index update failed: ${value.indexError}` : "");
+      return;
+    }
+    const expanded = element.querySelector("details")?.open || false;
+    element.replaceChildren(usageTable(value, element.dataset.usageLabel));
+    const coverage = [];
+    if (value.indexing) coverage.push("Indexing saved logs; totals may grow.");
+    if (value.indexError) coverage.push(`Index update failed: ${value.indexError}`);
+    if (value.missingUsage) coverage.push(`${value.missingUsage} invocation(s) missing usage.`);
+    if (value.unpriced) coverage.push(`${value.unpriced} invocation(s) without known pricing.`);
+    if (coverage.length) element.append(node("p", "usage-coverage muted", coverage.join(" ")));
+    const details = node("details", "usage-breakdown");
+    details.open = expanded;
+    details.append(node("summary", "", "Pricing details"));
+    details.append(node("p", "muted", "Cache columns are included in input; reasoning is included in output. — means unreported; * means partially reported. Manuscript work is counted separately from source papers and problems."));
+    if (value.pricingRates?.length) details.append(usagePricingTable(value.pricingRates));
+    else if (value.models.length) details.append(node("p", "muted", value.models.join(", ")));
+    details.append(node("p", "muted", value.assumptions));
+    const pricing = node("a", "", `Pricing: ${value.pricingVersion}`);
+    pricing.href = value.pricingUrl;
+    pricing.target = "_blank";
+    pricing.rel = "noopener noreferrer";
+    details.append(pricing);
+    if (value.updatedAt) details.append(node("p", "muted", `Index updated ${formatTime(value.updatedAt)}`));
+    element.append(details);
+  } catch (error) {
+    if (!element.isConnected) return;
+    if (element.dataset.usageDisplay === "button") {
+      element.textContent = "Cost";
+      element.title = `Could not load usage: ${error.message}. Click to retry.`;
+      return;
+    }
+    element.replaceChildren(node("strong", "", element.dataset.usageLabel), node("p", "error-box", error.message));
+  }
+}
+
+function refreshVisibleUsage(force = false) {
+  document.querySelectorAll("[data-usage-targets]").forEach(element => refreshUsageElement(element, force));
+}
+
+function openCostDialog(values, scopes = null) {
+  state.dialog = { kind: "cost" };
+  dialogEyebrow.textContent = scopes ? "Usage" : "Selected items";
+  dialogTitle.textContent = "Tokens and estimated cost";
+  dialogBody.replaceChildren(
+    node("p", "muted", "Includes descendants. Overlapping selections count each turn once."),
+    ...(scopes || [{ targets: values, label: `${values.length.toLocaleString()} selected item${values.length === 1 ? "" : "s"}` }])
+      .map(({ targets, label }) => usageSummary(targets, label)),
+  );
+  dialogFooter.replaceChildren(
+    button("Refresh", () => refreshVisibleUsage(true)),
+    button("Close", () => dialog.close()),
+  );
+  showTaskDialog();
 }
 
 function problemsForPapers(papers) {
@@ -2085,6 +2291,10 @@ function renderReviewDetail(item) {
     addAction(solutionActions, item.attemptStatus === "reviewed" ? "Review again" : "Review", "review", [attempt]);
     addAction(solutionActions, "Write this result", "write", [attempt]);
   }
+  solutionActions.append(costButton([
+    { label: "Problem total · all attempts", targets: [problem] },
+    ...(attempt ? [{ label: `${item.attemptName} · solve and review`, targets: [attempt] }] : []),
+  ]));
   attemptHeading.append(attemptLabel, relatedTaskHost({
     paperPath: item.paperDirectory,
     problemPath: `${item.paperDirectory}/${item.problemId}`,
@@ -2348,6 +2558,7 @@ function renderPapers() {
     addAction(actions, "Solve problems", "solve", problems, paper.analyzed);
     addAction(actions, "Write from latest results", "write", [paperTarget(paper)]);
   }
+  actions.append(costButton([{ label: "Paper total · analysis and all problems", targets: [paperTarget(paper)] }]));
   shell.append(actions);
   shell.append(relatedTasksPanel({
     paperPath: paper.path,
@@ -3004,6 +3215,10 @@ function renderManuscripts() {
   const downloadZip = node("a", "button", "Download ZIP");
   downloadZip.href = manuscriptZipUrl(draft.path);
   actions.append(downloadZip);
+  actions.append(costButton([
+    { label: "Manuscript total · all drafts", targets: [target("manuscript", manuscript.path, manuscript.name)] },
+    { label: `${draft.name} · writing and review`, targets: [draftTarget(draft)] },
+  ]));
   shell.append(actions);
   shell.append(relatedTasksPanel({
     manuscriptPath: manuscript.path,
@@ -3351,6 +3566,7 @@ function renderJobDetail(job) {
   shell.append(hero);
   const attention = runAttentionPanel(job);
   if (attention) shell.append(attention);
+  shell.append(usagePanel([{ label: "Job total · including retries", targets: [target("job", job.id, "Job")] }]));
   job.runs.forEach((run, index) => {
     const section = node("section", `run-card panel status-${taskStatus(run.status).tone}`);
     section.id = `run-${run.id}`;
@@ -3365,6 +3581,7 @@ function renderJobDetail(job) {
     appendRunTargetSummary(headingCopy, presentation);
     headingCopy.append(runTiming(run));
     const actions = node("div", "run-actions");
+    actions.append(button("Cost", () => openCostDialog([target("run", run.id, "Run")]), "button"));
     if (["queued", "starting", "running", "cancel_requested"].includes(run.status)) {
       actions.append(button("Cancel", () => mutateRun(run.id, "cancel"), "button danger"));
     }
@@ -3683,6 +3900,7 @@ function refreshVisibleRunElapsed(job) {
 
 function refreshLiveActivity() {
   if (!navigationReady || document.hidden) return;
+  refreshVisibleUsage();
   if (state.tab === "activity") {
     const job = state.jobDetails.get(state.selectedJob);
     if (job) refreshVisibleRunElapsed(job);
@@ -4674,7 +4892,10 @@ function renderTaskConfiguration(errorMessage = "") {
     type: "select", value: options.reasoningEffort || "",
     options: [["", `Default (${taskDefaults.reasoningEffort || "unavailable"})`], ...["low", "medium", "high", "xhigh", "max", "ultra"].map(value => [value, value])],
   }));
-  advancedGrid.append(checkbox("fast", "Fast service tier", "Uses additional credits.", options.fast));
+  advancedGrid.append(field("serviceTier", "Speed / service tier", {
+    type: "select", value: options.serviceTier || (options.fast ? "fast" : "standard"),
+    options: [["standard", "Standard"], ["fast", "Fast (higher cost)"], ["ultrafast", "Ultrafast (highest cost; requires model/account support)"]],
+  }));
   if (["literature", "solve", "review", "write", "revise"].includes(task.action)) {
     advancedGrid.append(field("webSearch", "Web search", {
       type: "select", value: options.webSearch || "",
@@ -5012,6 +5233,10 @@ function connectEvents() {
       }
       if (value.type === "tasks.changed") {
         scheduleJobsRefresh();
+      }
+      if (value.type === "usage.changed") {
+        state.usageCache.clear();
+        refreshVisibleUsage(true);
       }
       if (value.type === "settings.changed") {
         state.settings = { ...state.settings, ...value };

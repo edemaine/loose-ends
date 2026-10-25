@@ -419,6 +419,24 @@ button { color: inherit; }
 .selection-bar .button:hover, .selection-bar .button:focus-visible { border-color: rgba(255,255,255,.9); background: rgba(255,255,255,.22); transform: translateY(-1px); outline: none; }
 .selection-bar .button:active { background: rgba(255,255,255,.3); transform: translateY(0); }
 .selection-bar strong { margin-right: auto; }
+.usage-panel h2 { margin: 0 0 10px; }
+.usage-totals { display: grid; gap: 12px; }
+.usage-summary { min-width: 0; }
+.usage-summary > strong { font-size: 12px; color: var(--heading); }
+.usage-summary p { margin: 5px 0; font-size: 12px; }
+.usage-breakdown { margin-top: 5px; font-size: 11px; }
+.usage-breakdown > summary { cursor: pointer; color: var(--accent); }
+.usage-breakdown .usage-table-scroll { margin: 10px 0; }
+.usage-table-scroll { overflow-x: auto; }
+.usage-stage-table { width: 100%; border-collapse: collapse; font-size: 11px; font-variant-numeric: tabular-nums; }
+.usage-stage-table caption { padding-bottom: 7px; text-align: left; color: var(--heading); font-weight: 750; }
+.usage-stage-table th, .usage-stage-table td { padding: 6px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; }
+.usage-stage-table th:first-child, .usage-stage-table td:first-child { text-align: left; }
+.usage-stage-table tbody th { font-weight: 400; }
+.usage-stage-table thead { color: var(--muted); }
+.usage-stage-table tfoot { color: var(--heading); font-weight: 750; }
+.usage-stage-table tfoot th, .usage-stage-table tfoot td { border-bottom: 0; border-top: 2px solid var(--line); }
+.usage-breakdown > a { overflow-wrap: anywhere; }
 
 .task-dialog { width: min(850px, calc(100vw - 30px)); max-height: calc(100vh - 34px); border: 0; border-radius: 16px; padding: 0; background: var(--panel); color: var(--ink); box-shadow: 0 35px 90px var(--dialog-shadow); }
 .task-dialog::backdrop { background: var(--backdrop); backdrop-filter: blur(3px); }

@@ -776,6 +776,7 @@ def _install_attempt(
             "requested_model": options.model,
             "requested_reasoning_effort": options.reasoning_effort,
             "requested_fast_mode": options.fast,
+            "requested_service_tier": options.service_tier,
             "requested_web_search": web_search,
             "claimed_result_type": result["claimed_result_type"],
             "claim_count": len(result["checkable_claims"]),
@@ -844,6 +845,7 @@ def _write_work_record(
             "requested_model": options.model,
             "requested_reasoning_effort": options.reasoning_effort,
             "requested_fast_mode": options.fast,
+            "requested_service_tier": options.service_tier,
             "requested_web_search": web_search,
         },
     )
@@ -1109,7 +1111,8 @@ def _inherit_review_options(
     return codex_cli.ModelOptions(
         review_options.model or solver_options.model,
         review_options.reasoning_effort or solver_options.reasoning_effort,
-        review_options.fast or solver_options.fast,
+        review_options.fast or (solver_options.fast and not review_options.ultrafast),
+        review_options.ultrafast or (solver_options.ultrafast and not review_options.fast),
     )
 
 

@@ -105,6 +105,15 @@ class ModelOptions:
     model: str | None = None
     reasoning_effort: str | None = None
     fast: bool = False
+    ultrafast: bool = False
+
+    def __post_init__(self):
+        if self.fast and self.ultrafast:
+            raise ValueError("Fast and Ultrafast are mutually exclusive")
+
+    @property
+    def service_tier(self) -> str:
+        return "ultrafast" if self.ultrafast else "fast" if self.fast else "standard"
 
 
 @dataclass(frozen=True)
@@ -268,7 +277,8 @@ def add_model_arguments(
             f"extra-high is xhigh (default: {reasoning_default_help})"
         ),
     )
-    parser.add_argument(
+    speed = parser.add_mutually_exclusive_group()
+    speed.add_argument(
         f"--{option_prefix}fast",
         dest=f"{destination_prefix}fast",
         action="store_true",
@@ -280,6 +290,12 @@ def add_model_arguments(
                 else "(default: use the CLI configuration)"
             )
         ),
+    )
+    speed.add_argument(
+        f"--{option_prefix}ultrafast",
+        dest=f"{destination_prefix}ultrafast",
+        action="store_true",
+        help="request Codex Ultrafast mode (higher cost; requires model/account support)",
     )
 
 
@@ -321,6 +337,7 @@ def model_options_from_args(
             f"{destination_prefix}reasoning_effort",
         ),
         fast=getattr(args, f"{destination_prefix}fast"),
+        ultrafast=getattr(args, f"{destination_prefix}ultrafast", False),
     )
 
 
@@ -339,6 +356,8 @@ def semantic_config_digest(
         "reasoning_effort": options.reasoning_effort,
         "schema": schema_text,
     }
+    if options.ultrafast:
+        payload["ultrafast"] = True
     # Preserve existing disabled-search digests for analysis and triage.
     if web_search != "disabled":
         payload["web_search"] = web_search
@@ -1193,13 +1212,13 @@ def build_exec_command(
                 f'model_reasoning_effort="{options.reasoning_effort}"',
             )
         )
-    if options.fast:
+    if options.fast or options.ultrafast:
         command.extend(
             (
                 "--config",
                 "features.fast_mode=true",
                 "--config",
-                'service_tier="fast"',
+                f'service_tier="{options.service_tier}"',
             )
         )
     # Windows has a comparatively small process command-line limit.  Prompts
