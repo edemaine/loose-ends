@@ -15,6 +15,8 @@ Eventually, the idea is for humans and LLMs to work together on open problems.
 
 Loose Ends enables the following research workflow:
 
+![Loose Ends workflow: survey papers and problems, iterate on solution attempts and independent reviews, then write and review manuscripts for expert human review.](docs/workflow.svg)
+
 1. **Fetch papers.** Download PDFs, source, and metadata from arXiv, either by
    paper ID or author.
 2. **Analyze papers.** Build a technical summary and extract the important
