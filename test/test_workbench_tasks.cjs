@@ -394,6 +394,56 @@ test("only the checked writing mode is collected", () => {
   assert.equal(context.collectDialogOptions().writeMode, "separate");
 });
 
+test("editing existing Write settings reviews one fixed task and keeps pinned targets", async () => {
+  const { context, task, requests } = harness({ model: "new-model", codexHome: "/accounts/work" }, [
+    { kind: "attempt", path: "/paper/OP-001/attempt-001" },
+    { kind: "problem", path: "/paper/OP-002" },
+  ]);
+  task.editJob = { id: "existing", runIds: ["pending"], settingsVersion: 4 };
+  await context.reviewTask();
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].path, "/api/jobs/existing/edit-plan");
+  assert.deepEqual(JSON.parse(JSON.stringify(requests[0].body)), {
+    id: "existing", runIds: ["pending"], settingsVersion: 4,
+    options: { model: "new-model", codexHome: "/accounts/work" },
+  });
+  assert.equal(context.separateWriteTasks(task), false);
+  assert.equal(context.taskTargetsForRequest(task)[0].kind, "attempt");
+});
+
+test("saving a conflicting edit retains input and never starts a replacement task", async () => {
+  const { context, task } = harness({ model: "new-model" });
+  task.editJob = { id: "existing", runIds: ["pending"], settingsVersion: 0 };
+  task.plan = { id: "reviewed-edit" };
+  const editFunctions = ["confirmJobEdit", "shellQuote", "runCommandDisplay"].map(name =>
+    source.match(new RegExp(`^(?:async )?function ${name}\\([^]*?^}`, "m"))[0],
+  ).join("\n");
+  vm.runInContext(editFunctions, context);
+  context.api = async (path) => {
+    assert.equal(path, "/api/jobs/existing/settings");
+    throw new Error("Pending runs or settings changed; reopen Edit settings and review again.");
+  };
+  await context.confirmJobEdit();
+  assert.equal(context.state.dialog, task);
+  assert.equal(task.options.model, "new-model");
+  assert.equal(task.plan, null);
+  assert.match(context.error, /Pending runs or settings changed/);
+
+  context.state.jobDetails = new Map();
+  context.loadJob = async id => { context.loaded = id; };
+  context.api = async () => ({ id: "existing" });
+  task.plan = { id: "newly-reviewed-edit" };
+  await context.confirmJobEdit();
+  assert.equal(context.state.dialog, null);
+  assert.equal(context.loaded, "existing");
+  assert.equal(context.state.selection.size, 2);
+  const job = { plan: { options: { codexHome: "/accounts/new" } } };
+  assert.equal(context.runCommandDisplay(job, {
+    argv: ["codex"], options: { codexHome: "/accounts/old account" },
+  }), "CODEX_HOME='/accounts/old account' codex");
+  assert.equal(context.runCommandDisplay(job, { argv: ["codex"], options: {} }), "codex");
+});
+
 function jobsHarness(api) {
   const timers = new Map();
   let nextTimer = 0;

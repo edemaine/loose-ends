@@ -44,6 +44,7 @@ from workbench_memory import QUEUE_JOB_ENV, QueueMemoryController
 from workbench_worker import recover_run_artifacts
 from workbench_tasks import (
     PlanError,
+    build_edit_plan,
     build_plan,
     populate_dry_run_previews,
     task_cli_defaults,
@@ -1583,6 +1584,20 @@ class WorkbenchApplication:
             catalog_version=self.catalog.version,
             paper_roots=self.paper_output_roots,
         )
+        return self._save_plan(request, plan)
+
+    def create_job_edit_plan(self, job_id: str, request: dict) -> dict:
+        plan = build_edit_plan(
+            self.store.get_job(job_id), request,
+            project_root=PROJECT_ROOT,
+            allowed_roots=self.allowed_roots,
+            manuscripts=self.manuscripts,
+            catalog_version=self.catalog.version,
+            paper_roots=self.paper_output_roots,
+        )
+        return self._save_plan(request, plan)
+
+    def _save_plan(self, request: dict, plan: dict) -> dict:
         populate_dry_run_previews(plan)
         with self.plan_lock:
             self.plans[plan["id"]] = {
@@ -1601,10 +1616,26 @@ class WorkbenchApplication:
 
     def confirm_plan(self, plan_id: str) -> dict:
         with self.plan_lock:
-            saved = self.plans.pop(plan_id, None)
+            saved = self.plans.get(plan_id)
+            if saved is not None and saved["plan"].get("jobId"):
+                raise PlanError("this plan edits an existing task")
+            self.plans.pop(plan_id, None)
         if saved is None:
             raise PlanError("this plan expired; review the task again")
         job = self.store.create_job(saved["request"], saved["plan"])
+        self.scheduler.schedule()
+        self.hub.publish("tasks.changed")
+        return job
+
+    def confirm_job_edit(self, job_id: str, plan_id: str) -> dict:
+        with self.plan_lock:
+            saved = self.plans.get(plan_id)
+            if saved is None:
+                raise PlanError("this plan expired; review the settings again")
+            if saved["plan"].get("jobId") != job_id:
+                raise PlanError("this plan does not edit this task")
+            self.plans.pop(plan_id)
+        job = self.store.edit_queued_runs(job_id, saved["plan"])
         self.scheduler.schedule()
         self.hub.publish("tasks.changed")
         return job
@@ -2298,6 +2329,13 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                 if not isinstance(plan_id, str):
                     raise PlanError("planId is required")
                 self.send_json(self.app.confirm_plan(plan_id), 201)
+            elif match := re.fullmatch(r"/api/jobs/([0-9a-f-]+)/edit-plan", parsed.path):
+                self.send_json(self.app.create_job_edit_plan(match.group(1), body))
+            elif match := re.fullmatch(r"/api/jobs/([0-9a-f-]+)/settings", parsed.path):
+                plan_id = body.get("planId")
+                if not isinstance(plan_id, str):
+                    raise PlanError("planId is required")
+                self.send_json(self.app.confirm_job_edit(match.group(1), plan_id))
             elif parsed.path == "/api/scheduler":
                 changes = {}
                 if "workerLimit" in body:

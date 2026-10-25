@@ -173,7 +173,7 @@ def run_worker(database: Path, run_id: str) -> int:
     )
     environment = os.environ.copy()
     plan = store.get_job(run["job_id"])["plan"]
-    options = plan.get("options", {})
+    options = run["options"]
     if options.get("codexHome"):
         environment["CODEX_HOME"] = options["codexHome"]
     environment["PYTHONUNBUFFERED"] = "1"

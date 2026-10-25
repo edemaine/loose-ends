@@ -1857,6 +1857,195 @@ class WorkbenchPlanningTests(unittest.TestCase):
             self.assertFalse((root / "missing account").exists())
 
 
+class WorkbenchEditTests(unittest.TestCase):
+    def setUp(self):
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.papers = [make_paper(self.root / str(index)) for index in range(3)]
+        self.app = object.__new__(workbench.WorkbenchApplication)
+        self.app.store = WorkbenchStore(self.root / "state" / "workbench.sqlite3")
+        self.app.allowed_roots = [self.root]
+        self.app.paper_output_roots = [self.root]
+        self.app.manuscripts = self.root / "manuscripts"
+        self.app.catalog = SimpleNamespace(version=1)
+        self.app.plan_lock = threading.Lock()
+        self.app.plans = {}
+        self.app.scheduler = Mock()
+        self.app.hub = Mock()
+        preview = patch("workbench.populate_dry_run_previews")
+        self.preview = preview.start()
+        self.addCleanup(preview.stop)
+
+    def create_job(self, action="analyze", targets=None, options=None):
+        request = {
+            "action": action,
+            "targets": targets if targets is not None else [
+                {"kind": "paper", "path": str(paper)} for paper in self.papers
+            ],
+            "options": options if options is not None else {
+                "codexHome": str(self.root / "old account"), "model": "old-model", "prompt": "Old direction",
+            },
+        }
+        plan = build_plan(
+            request, project_root=PROJECT_ROOT, allowed_roots=self.app.allowed_roots,
+            manuscripts=self.app.manuscripts, catalog_version=1,
+            paper_roots=self.app.paper_output_roots,
+        )
+        return self.app.store.create_job(request, plan)
+
+    def preview_edit(self, job, options):
+        return self.app.create_job_edit_plan(job["id"], {
+            "options": options, "settingsVersion": job["settings_version"],
+            "runIds": [run["id"] for run in job["runs"] if run["status"] == "queued"],
+        })
+
+    def test_edit_preserves_started_history_and_retry_settings(self):
+        job = self.create_job()
+        store = self.app.store
+        first, second, third = job["runs"]
+        store.mark_starting(first["id"])
+        store.update_run(second["id"], status="succeeded")
+        before = store.get_job(job["id"])
+        options = {"codexHome": str(self.root / "new account"), "model": "new-model",
+                   "reasoningEffort": "high", "prompt": "New direction", "fast": True}
+        plan = self.preview_edit(before, options)
+        self.assertEqual(len(plan["units"]), 1)
+        self.assertEqual(plan["units"][0]["runId"], third["id"])
+        # Reviewing the edit does not change the queue.
+        self.assertEqual(store.get_job(job["id"]), before)
+        changed = self.app.confirm_job_edit(job["id"], plan["id"])
+        self.assertEqual(changed["runs"][:2], before["runs"][:2])
+        pending = changed["runs"][2]
+        self.assertEqual(pending["options"], options)
+        self.assertIn("new-model", pending["argv"])
+        self.assertIn("New direction", pending["argv"])
+        self.assertNotIn("old-model", pending["argv"])
+        self.assertEqual(pending["targets"], third["targets"])
+        self.assertEqual(pending["resources"], third["resources"])
+        self.assertEqual(changed["settings_version"], 1)
+        self.app.scheduler.schedule.assert_called_once()
+        self.app.hub.publish.assert_called_once_with("tasks.changed")
+        store.initialize()
+        self.assertEqual(store.get_run(first["id"])["options"], first["options"])
+        store.update_run(first["id"], status="failed")
+        store.update_run(third["id"], status="failed")
+        retry = store.retry_job(job["id"])
+        self.assertEqual([run["options"] for run in retry["runs"]], [first["options"], options])
+        self.assertEqual(store.retry_run(first["id"])["options"], first["options"])
+
+    def test_save_rejects_started_or_canceled_runs_without_partial_changes(self):
+        for status in ("starting", "canceled"):
+            with self.subTest(status=status):
+                job = self.create_job()
+                plan = self.preview_edit(job, {"model": "new-model"})
+                self.app.store.update_run(job["runs"][0]["id"], status=status)
+                before = self.app.store.get_job(job["id"])
+                with self.assertRaisesRegex(ValueError, "Pending runs or settings changed"):
+                    self.app.confirm_job_edit(job["id"], plan["id"])
+                self.assertEqual(self.app.store.get_job(job["id"]), before)
+                with self.assertRaisesRegex(ValueError, "Pending runs or settings changed"):
+                    self.preview_edit(job, {})
+
+    def test_save_rejects_another_editor_and_new_retries(self):
+        job = self.create_job()
+        first = self.preview_edit(job, {"model": "first-model"})
+        second = self.preview_edit(job, {"model": "second-model"})
+        self.app.confirm_job_edit(job["id"], first["id"])
+        before = self.app.store.get_job(job["id"])
+        with self.assertRaisesRegex(ValueError, "Pending runs or settings changed"):
+            self.app.confirm_job_edit(job["id"], second["id"])
+        self.assertEqual(self.app.store.get_job(job["id"]), before)
+        self.app.store.update_run(job["runs"][0]["id"], status="failed")
+        job = self.app.store.get_job(job["id"])
+        plan = self.preview_edit(job, {})
+        self.app.store.retry_run(job["runs"][0]["id"])
+        with self.assertRaisesRegex(ValueError, "Pending runs or settings changed"):
+            self.app.confirm_job_edit(job["id"], plan["id"])
+
+    def test_clear_overrides_returns_to_defaults(self):
+        job = self.create_job()
+        plan = self.preview_edit(job, {})
+        updated = self.app.confirm_job_edit(job["id"], plan["id"])
+        for run in updated["runs"]:
+            self.assertEqual(run["options"], {})
+            self.assertNotIn("--model", run["argv"])
+            self.assertNotIn("--prompt", run["argv"])
+            self.assertNotIn("Old direction", run["argv"])
+
+    def test_edit_plan_cannot_be_started_as_a_new_job_or_applied_to_another(self):
+        job = self.create_job()
+        plan = self.preview_edit(job, {})
+        with self.assertRaisesRegex(PlanError, "existing task"):
+            self.app.confirm_plan(plan["id"])
+        with self.assertRaisesRegex(PlanError, "does not edit this task"):
+            self.app.confirm_job_edit("another-job", plan["id"])
+        self.app.confirm_job_edit(job["id"], plan["id"])
+        with self.assertRaisesRegex(PlanError, "expired"):
+            self.app.confirm_job_edit(job["id"], plan["id"])
+
+    def test_edit_rejects_changes_to_task_structure(self):
+        job = self.create_job()
+        for options in ({"name": "new"}, {"papers": "1234.5678"}, {"priorityLevel": 2}):
+            with self.subTest(options=options), self.assertRaisesRegex(PlanError, "targets are fixed"):
+                self.preview_edit(job, options)
+
+    def test_download_keeps_ids_and_original_default_destination(self):
+        job = self.create_job("download", targets=[], options={"papers": "1706.03762\n2303.08774"})
+        self.app.paper_output_roots.insert(0, self.root / "new default")
+        plan = self.preview_edit(job, {"force": True})
+        updated = self.app.confirm_job_edit(job["id"], plan["id"])
+        original = job["runs"][0]
+        run = updated["runs"][0]
+        self.assertEqual(run["argv"], [*original["argv"], "--force"])
+        self.assertEqual(run["resources"], original["resources"])
+        self.app.store.update_run(run["id"], status="failed")
+        retry = self.app.store.retry_job(job["id"])
+        plan = self.preview_edit(retry, {"force": False})
+        changed_retry = self.app.confirm_job_edit(retry["id"], plan["id"])
+        self.assertEqual(changed_retry["runs"][0]["argv"], original["argv"])
+
+    def test_write_preserves_pinned_targets_and_manuscript_name(self):
+        attempt = self.papers[0] / "OP-001" / "attempt-001"
+        attempt.mkdir(parents=True)
+        common.write_json(attempt / "solver-result.json", {})
+        targets = [{"kind": "attempt", "path": str(attempt)},
+                   {"kind": "paper", "path": str(self.papers[1])}]
+        job = self.create_job("write", targets=targets, options={"name": "fixed-name"})
+        plan = self.preview_edit(job, {"model": "new-model", "reviewPrompt": "New critic direction"})
+        updated = self.app.confirm_job_edit(job["id"], plan["id"])
+        self.assertEqual(updated["runs"][0]["targets"], job["runs"][0]["targets"])
+        self.assertEqual(updated["runs"][0]["options"]["name"], "fixed-name")
+        self.assertIn("fixed-name", updated["runs"][0]["argv"])
+
+    def test_migration_snapshots_legacy_settings_once(self):
+        job = self.create_job()
+        store = self.app.store
+        with store.connect() as connection:
+            connection.execute("DROP TRIGGER runs_task_revision_UPDATE")
+            connection.execute("DROP TRIGGER jobs_task_revision_UPDATE")
+            connection.execute("ALTER TABLE runs DROP COLUMN options_json")
+            connection.execute("ALTER TABLE jobs DROP COLUMN settings_version")
+        store.initialize()
+        migrated = store.get_job(job["id"])
+        self.assertEqual(migrated["settings_version"], 0)
+        self.assertTrue(all(run["options"] == job["plan"]["options"] for run in migrated["runs"]))
+        plan = self.preview_edit(migrated, {"model": "new-model"})
+        self.app.confirm_job_edit(job["id"], plan["id"])
+        store.initialize()
+        self.assertEqual(store.get_run(job["runs"][0]["id"])["options"], {"model": "new-model"})
+
+    def test_worker_uses_run_account_instead_of_latest_job_settings(self):
+        account = str(self.root / "original account")
+        plan = fake_plan([sys.executable, "-c", "import os; print(os.environ['CODEX_HOME'])"])
+        plan["options"] = {"codexHome": str(self.root / "new account")}
+        plan["units"][0]["options"] = {"codexHome": account}
+        job = self.app.store.create_job({"action": "solve"}, plan)
+        run = job["runs"][0]
+        self.assertEqual(workbench_worker.run_worker(self.app.store.database, run["id"]), 0)
+        self.assertIn(account, Path(run["log_path"]).read_text(encoding="utf-8"))
+
+
 class WorkbenchStoreTests(unittest.TestCase):
     @staticmethod
     def _targeted_plan(

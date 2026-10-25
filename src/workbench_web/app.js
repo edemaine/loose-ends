@@ -661,7 +661,7 @@ function problemTargetForAttempt(value) {
 }
 
 function taskTargetsForRequest(task) {
-  if (task.action !== "write" || task.options.pinAttempts === true) {
+  if (task.editJob || task.action !== "write" || task.options.pinAttempts === true) {
     return task.targets;
   }
   const targets = task.targets.map(value =>
@@ -3144,6 +3144,7 @@ function jobRenderFingerprint(job) {
     status: job.status,
     priority_level: job.priority_level,
     scheduling_paused: job.scheduling_paused,
+    settings_version: job.settings_version,
     created_at: job.created_at,
     finished_at: job.finished_at,
     runs: job.runs.map(run => ({
@@ -3156,6 +3157,7 @@ function jobRenderFingerprint(job) {
       error: run.error,
       outputs: run.outputs,
       argv: run.argv,
+      options: run.options,
       cancel_requested: run.cancel_requested,
     })),
   });
@@ -3277,7 +3279,7 @@ function shellQuote(value) {
 
 function runCommandDisplay(job, run) {
   const command = run.argv.map(shellQuote).join(" ");
-  const home = job.plan?.options?.codexHome;
+  const home = (run.options ?? job.plan?.options)?.codexHome;
   return home ? `CODEX_HOME=${shellQuote(home)} ${command}` : command;
 }
 
@@ -3749,6 +3751,14 @@ function jobSchedulingControls(job) {
     ));
   }
   controls.append(row, node("small", "", "Proportion of workers assigned to this task"));
+  const queued = job.runs.filter(run => run.status === "queued");
+  if (queued.length) {
+    controls.append(button(
+      queued.length === job.runs.length ? "Edit settings" : "Edit remaining runs",
+      () => openJobSettings(job.id),
+      "button",
+    ));
+  }
   return controls;
 }
 
@@ -4332,6 +4342,26 @@ function openTask(action, targets) {
   showTaskDialog();
 }
 
+async function openJobSettings(jobId) {
+  try {
+    const job = await api(`/api/jobs/${jobId}`);
+    const runs = job.runs.filter(run => run.status === "queued");
+    if (!runs.length) throw new Error("This task has no remaining queued runs to edit.");
+    state.jobDetails.set(job.id, job);
+    state.dialog = {
+      action: job.action,
+      targets: job.action === "download" ? job.plan.targets : runs.flatMap(run => run.targets),
+      options: { ...runs[0].options },
+      editJob: { id: job.id, runIds: runs.map(run => run.id), settingsVersion: job.settings_version },
+      plan: null,
+    };
+    renderTaskConfiguration();
+    showTaskDialog();
+  } catch (error) {
+    showNotice(error.message, true);
+  }
+}
+
 function renderTaskTargetChips(task, container) {
   container.replaceChildren();
   taskTargetsForRequest(task).forEach(value => {
@@ -4446,8 +4476,16 @@ function renderTaskConfiguration(errorMessage = "") {
   dialogEyebrow.textContent = "Step 1 of 2 · Configure";
   dialogTitle.textContent = task.action === "write" && task.targets.length > 1
     ? "Write papers" : actionNames[task.action];
+  if (task.editJob) dialogTitle.textContent = "Edit settings";
   dialogBody.replaceChildren();
-  if (task.action === "write" && task.targets.length > 1) {
+  if (task.editJob) {
+    const count = task.editJob.runIds.length;
+    dialogBody.append(node("p", "", `Changes apply to ${count} queued run${count === 1 ? "" : "s"}. Running and completed runs keep their saved settings. The queue continues while you edit.`));
+    if (errorMessage) {
+      dialogBody.append(button("Reload pending runs", () => openJobSettings(task.editJob.id)));
+    }
+  }
+  if (!task.editJob && task.action === "write" && task.targets.length > 1) {
     const modes = node("fieldset", "write-modes");
     modes.append(node("legend", "", "Write as"));
     for (const [value, label] of [
@@ -4474,6 +4512,17 @@ function renderTaskConfiguration(errorMessage = "") {
   if (errorMessage) dialogBody.append(node("div", "error-box", errorMessage));
   const grid = node("div", "form-grid");
   const options = task.options;
+  if (task.action === "download" && task.editJob) {
+    grid.append(checkbox("force", "Force replacement", "Re-download files for arXiv directories that already exist.", options.force));
+    dialogBody.append(grid);
+    grid.querySelectorAll("input").forEach(input => input.addEventListener("input", saveDialogOptions));
+    dialogFooter.replaceChildren(
+      button("Cancel", () => dialog.close()),
+      button("Review changes", reviewTask, "button primary"),
+    );
+    dialogBody.scrollTop = scrollTop;
+    return;
+  }
   if (task.action === "download") {
     const roots = state.settings.paperRoots || [];
     const acquisition = options.acquisition || "ids";
@@ -4583,7 +4632,7 @@ function renderTaskConfiguration(errorMessage = "") {
     grid.append(checkbox("recoverComplete", "Recover completed workspace", "Install a preserved completed analysis without a new model turn.", options.recoverComplete));
   }
   if (task.action === "write") {
-    if (task.targets.some(value => value.kind === "attempt")) {
+    if (!task.editJob && task.targets.some(value => value.kind === "attempt")) {
       const pin = checkbox(
         "pinAttempts",
         "Pin to attempt",
@@ -4598,16 +4647,16 @@ function renderTaskConfiguration(errorMessage = "") {
     }
     grid.append(field("authors", "Authors", { type: "textarea", value: Array.isArray(options.authors) ? options.authors.join("\n") : options.authors || "", help: "One author per line." }));
     grid.append(field("title", "Title direction", { value: options.title || "" }));
-    if (!separateWriteTasks(task)) {
+    if (!task.editJob && !separateWriteTasks(task)) {
       grid.append(field("name", "Manuscript directory name", { value: options.name || "", help: "Leave blank for the derived name." }));
     }
   }
   if (task.action === "revise") {
     grid.append(field("authors", "Override authors", { type: "textarea", value: Array.isArray(options.authors) ? options.authors.join("\n") : options.authors || "", help: "Leave blank to inherit." }));
     grid.append(field("title", "Override title direction", { value: options.title || "" }));
-    grid.append(checkbox("refreshResults", "Refresh result selection", "Promote stored selectors to paper scope and use latest attempts.", options.refreshResults));
+    if (!task.editJob) grid.append(checkbox("refreshResults", "Refresh result selection", "Promote stored selectors to paper scope and use latest attempts.", options.refreshResults));
   }
-  grid.append(field("priorityLevel", "Scheduling weight", {
+  if (!task.editJob) grid.append(field("priorityLevel", "Scheduling weight", {
     type: "select",
     value: options.priorityLevel ?? "0",
     options: priorityOptions(),
@@ -4653,7 +4702,7 @@ function renderTaskConfiguration(errorMessage = "") {
   grid.querySelectorAll("input, textarea, select").forEach(input => input.addEventListener("input", saveDialogOptions));
   dialogFooter.replaceChildren(
     button("Cancel", () => dialog.close()),
-    button(separateWriteTasks(task) ? `Review ${task.targets.length} jobs` : "Review task", reviewTask, "button primary"),
+    button(task.editJob ? "Review changes" : separateWriteTasks(task) ? `Review ${task.targets.length} jobs` : "Review task", reviewTask, "button primary"),
   );
   dialogBody.scrollTop = scrollTop;
 }
@@ -4681,7 +4730,7 @@ function saveDialogOptions() {
     }
   }
   state.dialog.options = collected;
-  sessionStorage.setItem(state.dialog.storageKey, JSON.stringify(state.dialog.options));
+  if (state.dialog.storageKey) sessionStorage.setItem(state.dialog.storageKey, JSON.stringify(state.dialog.options));
 }
 
 function taskRequestOptions(task) {
@@ -4699,7 +4748,7 @@ function taskRequestOptions(task) {
 }
 
 function separateWriteTasks(task) {
-  return task.action === "write" && task.targets.length > 1 &&
+  return !task.editJob && task.action === "write" && task.targets.length > 1 &&
     task.options.writeMode !== "combined";
 }
 
@@ -4723,8 +4772,15 @@ async function reviewTask() {
   dialog.setAttribute("aria-busy", "true");
   try {
     task.plans = [];
-    for (const request of taskRequests(task)) {
-      task.plans.push(await api("/api/plans", { method: "POST", body: request }));
+    if (task.editJob) {
+      task.plans.push(await api(`/api/jobs/${task.editJob.id}/edit-plan`, {
+        method: "POST",
+        body: { ...task.editJob, options: task.options },
+      }));
+    } else {
+      for (const request of taskRequests(task)) {
+        task.plans.push(await api("/api/plans", { method: "POST", body: request }));
+      }
     }
     task.plan = {
       ...task.plans[0],
@@ -4750,13 +4806,15 @@ function renderTaskConfirmation() {
   const scope = task.plans.length > 1
     ? `${task.plans.length} separate Write jobs, each producing one paper,`
     : `${plan.units.length} managed run${plan.units.length === 1 ? "" : "s"}`;
-  const intro = node("p", "", `This will queue ${scope} with a ${priorityMultiplier(plan.priorityLevel)} scheduling weight. Nothing has started yet.`);
+  const intro = node("p", "", task.editJob
+    ? `Save settings for ${plan.units.length} queued run${plan.units.length === 1 ? "" : "s"}. Running and completed runs keep their saved settings.`
+    : `This will queue ${scope} with a ${priorityMultiplier(plan.priorityLevel)} scheduling weight. Nothing has started yet.`);
   dialogBody.append(intro);
   if (plan.warnings.length) plan.warnings.forEach(value => dialogBody.append(node("div", "warning", value)));
   if (plan.options?.codexHome) {
     const block = node("section", "confirm-block");
     block.append(node("h3", "", "Environment"));
-    block.append(node("p", "", "Applies to all dry-run previews and runs in this task."));
+    block.append(node("p", "", task.editJob ? "Applies to the queued runs shown below." : "Applies to all dry-run previews and runs in this task."));
     block.append(node("pre", "command", `CODEX_HOME=${plan.options.codexHome}`));
     dialogBody.append(block);
   }
@@ -4802,9 +4860,29 @@ function renderTaskConfirmation() {
   });
   dialogFooter.replaceChildren(
     button("Back", () => renderTaskConfiguration()),
-    button(task.plans.length > 1 ? `Start ${task.plans.length} jobs` : `Start ${plan.units.length} run${plan.units.length === 1 ? "" : "s"}`, confirmTask, "button primary"),
+    button(task.editJob ? "Save changes" : task.plans.length > 1 ? `Start ${task.plans.length} jobs` : `Start ${plan.units.length} run${plan.units.length === 1 ? "" : "s"}`, task.editJob ? confirmJobEdit : confirmTask, "button primary"),
   );
   dialogBody.scrollTop = scrollTop;
+}
+
+async function confirmJobEdit() {
+  const task = state.dialog;
+  dialogFooter.querySelectorAll("button").forEach(value => { value.disabled = true; });
+  try {
+    const job = await api(`/api/jobs/${task.editJob.id}/settings`, {
+      method: "POST", body: { planId: task.plan.id },
+    });
+    state.jobDetails.set(job.id, job);
+  } catch (error) {
+    task.plan = null;
+    task.plans = [];
+    renderTaskConfiguration(error.message);
+    return;
+  }
+  dialog.close();
+  state.dialog = null;
+  await refreshJobs().catch(error => showNotice(error.message, true));
+  await loadJob(task.editJob.id);
 }
 
 async function confirmTask() {

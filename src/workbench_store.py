@@ -134,6 +134,7 @@ class WorkbenchStore:
                     scheduling_paused INTEGER NOT NULL DEFAULT 0,
                     scheduler_credit REAL NOT NULL DEFAULT 0,
                     last_dispatched_at REAL,
+                    settings_version INTEGER NOT NULL DEFAULT 0,
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL,
                     finished_at REAL
@@ -146,6 +147,7 @@ class WorkbenchStore:
                     label TEXT NOT NULL,
                     status TEXT NOT NULL,
                     argv_json TEXT NOT NULL,
+                    options_json TEXT NOT NULL DEFAULT '{}',
                     cwd TEXT NOT NULL,
                     targets_json TEXT NOT NULL,
                     resources_json TEXT NOT NULL DEFAULT '[]',
@@ -189,6 +191,17 @@ class WorkbenchStore:
                 connection.execute(
                     "ALTER TABLE runs ADD COLUMN resources_json TEXT NOT NULL DEFAULT '[]'"
                 )
+            if "options_json" not in columns:
+                connection.execute(
+                    "ALTER TABLE runs ADD COLUMN options_json TEXT NOT NULL DEFAULT '{}'"
+                )
+                for job in connection.execute("SELECT id, plan_json FROM jobs").fetchall():
+                    options = json.loads(job["plan_json"]).get("options", {})
+                    connection.execute(
+                        "UPDATE runs SET options_json = ? WHERE job_id = ?",
+                        (json.dumps(options, ensure_ascii=False), job["id"]),
+                    )
+                connection.execute("DROP TRIGGER IF EXISTS runs_task_revision_UPDATE")
             job_columns = {
                 row["name"]
                 for row in connection.execute("PRAGMA table_info(jobs)")
@@ -198,12 +211,14 @@ class WorkbenchStore:
                 "scheduling_paused": "INTEGER NOT NULL DEFAULT 0",
                 "scheduler_credit": "REAL NOT NULL DEFAULT 0",
                 "last_dispatched_at": "REAL",
+                "settings_version": "INTEGER NOT NULL DEFAULT 0",
             }
             for name, declaration in job_migrations.items():
                 if name not in job_columns:
                     connection.execute(
                         f"ALTER TABLE jobs ADD COLUMN {name} {declaration}"
                     )
+                    connection.execute("DROP TRIGGER IF EXISTS jobs_task_revision_UPDATE")
             scheduler_columns = {
                 row["name"]
                 for row in connection.execute("PRAGMA table_info(scheduler_settings)")
@@ -337,9 +352,9 @@ class WorkbenchStore:
                     """
                     INSERT INTO runs (
                         id, job_id, unit_index, label, status, argv_json, cwd,
-                        targets_json, resources_json, probe_json, log_path,
+                        targets_json, resources_json, probe_json, log_path, options_json,
                         created_at, updated_at, retry_of
-                    ) VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         run_id,
@@ -352,6 +367,7 @@ class WorkbenchStore:
                         json.dumps(unit.get("resources", []), ensure_ascii=False),
                         json.dumps(unit.get("probe", {}), ensure_ascii=False),
                         str(log_path),
+                        json.dumps(unit.get("options", plan.get("options", {})), ensure_ascii=False),
                         now,
                         now,
                         unit.get("retryOf"),
@@ -370,6 +386,7 @@ class WorkbenchStore:
             row,
             (
                 "argv_json",
+                "options_json",
                 "targets_json",
                 "resources_json",
                 "probe_json",
@@ -394,6 +411,7 @@ class WorkbenchStore:
                 item,
                 (
                     "argv_json",
+                    "options_json",
                     "targets_json",
                     "resources_json",
                     "probe_json",
@@ -404,6 +422,46 @@ class WorkbenchStore:
         ]
         job["status"] = self._job_status(run_rows)
         return job
+
+    def edit_queued_runs(self, job_id: str, plan: dict) -> dict:
+        """Apply a reviewed edit atomically, before any affected run is claimed."""
+        now = time.time()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+            if row is None:
+                raise KeyError(job_id)
+            queued = connection.execute(
+                "SELECT id, unit_index FROM runs WHERE job_id = ? AND status = 'queued'",
+                (job_id,),
+            ).fetchall()
+            if (
+                row["settings_version"] != plan["settingsVersion"]
+                or not queued
+                or {run["id"] for run in queued} != set(plan["runIds"])
+            ):
+                raise ValueError("Pending runs or settings changed; reopen Edit settings and review again.")
+            units = {unit["runId"]: unit for unit in plan["units"]}
+            saved_plan = json.loads(row["plan_json"])
+            for run in queued:
+                unit = units[run["id"]]
+                connection.execute(
+                    "UPDATE runs SET argv_json = ?, options_json = ?, updated_at = ? WHERE id = ?",
+                    (json.dumps(unit["argv"], ensure_ascii=False),
+                     json.dumps(unit["options"], ensure_ascii=False), now, run["id"]),
+                )
+                saved_plan["units"][run["unit_index"]] = unit
+            saved_plan["options"] = plan["options"]
+            saved_plan["prompts"] = plan["prompts"]
+            request = json.loads(row["request_json"])
+            request["options"] = plan["options"]
+            connection.execute(
+                "UPDATE jobs SET plan_json = ?, request_json = ?, "
+                "settings_version = settings_version + 1, updated_at = ? WHERE id = ?",
+                (json.dumps(saved_plan, ensure_ascii=False),
+                 json.dumps(request, ensure_ascii=False), now, job_id),
+            )
+        return self.get_job(job_id)
 
     def list_jobs(self, *, limit: int = 1000) -> list[dict]:
         with self.connect() as connection:
@@ -886,7 +944,7 @@ class WorkbenchStore:
         units = [
             {
                 **{key: run[key] for key in (
-                    "label", "argv", "cwd", "targets", "resources", "probe",
+                    "label", "argv", "cwd", "targets", "resources", "probe", "options",
                 )},
                 "retryOf": run["id"],
             }
@@ -931,9 +989,9 @@ class WorkbenchStore:
                 """
                 INSERT INTO runs (
                     id, job_id, unit_index, label, status, argv_json, cwd,
-                    targets_json, resources_json, probe_json, log_path,
+                    targets_json, resources_json, probe_json, log_path, options_json,
                     created_at, updated_at, retry_of
-                ) VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     new_id,
@@ -946,6 +1004,7 @@ class WorkbenchStore:
                     json.dumps(original["resources"], ensure_ascii=False),
                     json.dumps(original["probe"], ensure_ascii=False),
                     str(log_path),
+                    json.dumps(original["options"], ensure_ascii=False),
                     now,
                     now,
                     run_id,

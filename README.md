@@ -144,7 +144,12 @@ review the exact commands and dry-run previews, and then start the runs. Once a
 task starts, the workbench switches automatically to **Activity**, where you
 can follow its status and console output; or use the back button to return.
 Use **Activity** at any time to revisit task history, logs, failures, and output
-paths. The **Workers** control in the top bar sets how many queued CLI runs may
+paths. **Edit settings** lets you change queued runs' account, model, prompts,
+and other execution options, then review updated commands and dry-run previews
+before saving. For a task that has started, **Edit remaining runs** applies only
+to its queued runs. Running and completed runs retain their settings, including
+when retried. If pending runs change while you edit, reload them and review again.
+The **Workers** control in the top bar sets how many queued CLI runs may
 execute concurrently. The same control sets a total memory allocation as a
 percentage of installed RAM, a fixed number of GB, or infinity. That allocation
 is divided by the maximum worker count to produce an independent limit for each
