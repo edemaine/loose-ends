@@ -1134,7 +1134,6 @@ function render() {
   if (state.catalog.error) showNotice(`Catalog update delayed: ${state.catalog.error}`, true);
   else if (state.catalog.loading) renderCatalogLoading();
   else showNotice("");
-  sidebar.classList.toggle("split-sidebar", ["research", "manuscripts"].includes(state.tab));
   if (state.tab === "research") renderResearch();
   else if (state.tab === "papers") renderPapers();
   else if (state.tab === "manuscripts") renderManuscripts();
@@ -1406,7 +1405,9 @@ function rememberSidebarScroll() {
   if (!(renderedTab in state.sidebarScroll)) return;
   const primarySelector = {
     research: ".problem-scroll",
+    papers: ".paper-scroll",
     manuscripts: ".manuscript-scroll",
+    activity: ".activity-scroll",
   }[renderedTab];
   const scrollingElement = primarySelector ? sidebar.querySelector(primarySelector) : sidebar;
   if (scrollingElement) state.sidebarScroll[renderedTab] = scrollingElement.scrollTop;
@@ -1450,7 +1451,9 @@ function restoreSidebarScroll(tab) {
   sidebar.dataset.tab = tab;
   const primarySelector = {
     research: ".problem-scroll",
+    papers: ".paper-scroll",
     manuscripts: ".manuscript-scroll",
+    activity: ".activity-scroll",
   }[tab];
   if (primarySelector) sidebar.scrollTop = 0;
   const scrollingElement = primarySelector ? sidebar.querySelector(primarySelector) : sidebar;
@@ -1559,8 +1562,6 @@ function appendSideCard(parent, {
   const titleRow = node("span", "side-card-title-row");
   const titleNode = node("strong", "", title);
   titleNode.title = title;
-  const metaNode = node("small", "", meta);
-  metaNode.title = meta;
   titleRow.append(titleNode);
   if (relatedTask || relatedProblem) {
     titleRow.append(relatedTaskHost(relatedTask || {
@@ -1571,7 +1572,11 @@ function appendSideCard(parent, {
   }
   copy.append(titleRow);
   if (tags) copy.append(tags);
-  copy.append(metaNode);
+  if (meta) {
+    const metaNode = node("small", "", meta);
+    metaNode.title = meta;
+    copy.append(metaNode);
+  }
   card.append(copy);
   card.addEventListener("click", onClick);
   card.addEventListener("keydown", event => {
@@ -1899,10 +1904,7 @@ function renderResearch() {
     group.problems.forEach(item => {
       appendSideCard(list, {
         title: `${item.problemId} · ${item.problemTitle}`,
-        meta: item.attemptName
-          ? `${reviewModel.statusLabel(item.attemptStatus)} · ${item.totalAttemptCount} total attempt${item.totalAttemptCount === 1 ? "" : "s"}`
-          : "Unattempted",
-        tags: attemptTagsNode(item, { includeKnown: true }),
+        tags: attemptTagsNode(item, { includeKnown: true, includeProblem: true }),
         active: state.selectedProblem === item.problemKey,
         selectedTarget: problemTarget(item),
         relatedProblem: item,
@@ -1937,9 +1939,6 @@ function renderResearch() {
   attempts.forEach(item => {
     appendSideCard(attemptList, {
       title: item.attemptName || "No attempts yet",
-      meta: item.attemptDirectory
-        ? reviewModel.statusLabel(item.attemptStatus)
-        : "Open problem",
       tags: attemptTagsNode(item),
       active: state.selectedReview === item.itemKey,
       selectedTarget: item.attemptDirectory ? attemptTarget(item) : null,
@@ -2493,7 +2492,9 @@ function renderPapers() {
     },
     onClick: () => { state.selectedPaper = paper.key; syncNavigation(); },
   }));
-  sidebar.append(node("div", "sidebar-heading", `${papers.length} papers`), list);
+  const paperScroll = node("div", "paper-scroll");
+  paperScroll.append(node("div", "sidebar-heading", `${papers.length} papers`), list);
+  sidebar.append(paperScroll);
   const paper = state.catalog.papers.find(value => value.key === state.selectedPaper);
   if (!paper) {
     main.replaceChildren(document.getElementById("empty-template").content.cloneNode(true));
@@ -2611,12 +2612,9 @@ function paperProblemsPanel(paper) {
       "",
       "entity-card",
     );
-    const attemptStatus = problem.attemptDirectory
-      ? reviewModel.statusLabel(problem.attemptStatus)
-      : "Unattempted";
     link.append(
       node("strong", "", `${problem.problemId} · ${problem.problemTitle}`),
-      node("small", "", `${humanize(problem.explicitness)} · ${attemptStatus}`),
+      attemptTagsNode(problem, { includeKnown: true, includeProblem: true }),
     );
     grid.append(link);
   });
@@ -3329,7 +3327,9 @@ function renderActivity({ preserveDetail = false } = {}) {
       syncNavigation();
     },
   }));
-  sidebar.append(node("div", "sidebar-heading", `${jobs.length} tasks`), list);
+  const activityScroll = node("div", "activity-scroll");
+  activityScroll.append(node("div", "sidebar-heading", `${jobs.length} tasks`), list);
+  sidebar.append(activityScroll);
   if (!state.selectedJob) {
     main.replaceChildren(document.getElementById("empty-template").content.cloneNode(true));
     return;

@@ -160,7 +160,7 @@ button { color: inherit; }
 .filter-toggle input { width: 11px; height: 11px; margin: 0; accent-color: var(--accent); }
 .filter-footer { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--muted); font-size: 9px; }
 .filter-reset { border: 0; background: transparent; color: var(--accent); padding: 2px; font-size: 9px; font-weight: 800; cursor: pointer; }
-.problem-scroll, .manuscript-scroll { flex: 1 1 auto; min-height: 100px; overflow: auto; margin-top: 4px; padding-right: 2px; scrollbar-gutter: stable; }
+.problem-scroll, .paper-scroll, .manuscript-scroll, .activity-scroll { flex: 1 1 auto; min-height: 100px; overflow: auto; margin-top: 4px; padding-right: 2px; scrollbar-gutter: stable; }
 .paper-heading { display: flex; align-items: center; justify-content: space-between; gap: 5px; margin-top: 9px; color: var(--accent); letter-spacing: .04em; text-transform: none; }
 .paper-heading-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .attempt-switcher, .draft-switcher { flex: none; max-height: 155px; overflow: hidden; margin-top: 5px; padding-top: 2px; border-top: 1px solid var(--line); }
@@ -300,6 +300,8 @@ button { color: inherit; }
 .related-tasks[hidden] { display: none; }
 .problem-manuscripts { margin: 0 0 16px; box-shadow: none; }
 .paper-problems { margin: 0 0 16px; box-shadow: none; }
+.paper-problems .attempt-tags { margin-top: 6px; gap: 4px; }
+.paper-problems .attempt-tag { padding: 2px 6px; font-size: 10px; }
 .related-tasks-heading { display: flex; align-items: center; gap: 6px; margin-bottom: 7px; }
 .related-tasks-heading h2 { margin: 0; font-size: 14px; }
 .related-task-list { display: grid; gap: 4px; }
