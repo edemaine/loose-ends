@@ -1321,7 +1321,8 @@ function renderSchedulerControl() {
 
 async function updateScheduler(changes) {
   try {
-    state.settings = await api("/api/scheduler", { method: "POST", body: changes });
+    const settings = await api("/api/scheduler", { method: "POST", body: changes });
+    state.settings = { ...state.settings, ...settings };
     renderSchedulerControl();
   } catch (error) {
     showNotice(error.message, true);
@@ -1341,10 +1342,11 @@ function adjustWorkerLimit(delta) {
     workerLimitSaving = true;
     renderSchedulerControl();
     try {
-      state.settings = await api("/api/scheduler", {
+      const settings = await api("/api/scheduler", {
         method: "POST",
         body: { workerLimit: limit },
       });
+      state.settings = { ...state.settings, ...settings };
       workerLimitDraft = null;
     } catch (error) {
       workerLimitDraft = null;
@@ -1379,10 +1381,11 @@ function scheduleMemoryLimit(memory) {
     memoryLimitSaving = true;
     renderSchedulerControl();
     try {
-      state.settings = await api("/api/scheduler", {
+      const settings = await api("/api/scheduler", {
         method: "POST",
         body: { memoryLimit: limit },
       });
+      state.settings = { ...state.settings, ...settings };
       memoryLimitDraft = null;
     } catch (error) {
       memoryLimitDraft = null;

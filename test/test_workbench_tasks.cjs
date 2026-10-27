@@ -97,6 +97,45 @@ test("memory control distinguishes unsupported-platform warnings from enforcemen
   }
 });
 
+test("scheduler changes preserve task defaults and configured paper roots", async () => {
+  const schedulerFunctions = ["updateScheduler", "adjustWorkerLimit", "scheduleMemoryLimit"].map(name =>
+    source.match(new RegExp(`^(?:async )?function ${name}\\([^]*?^}`, "m"))[0],
+  ).join("\n");
+  for (const change of ["queue", "workers", "memory"]) {
+    const taskDefaults = { analyze: { model: "default-model", reasoningEffort: "high" } };
+    const paperRoots = ["/papers"];
+    let scheduled;
+    const requests = [];
+    const context = vm.createContext({
+      state: { settings: { taskDefaults, paperRoots, projectRoot: "/project", workerLimit: 2 } },
+      workerLimitDraft: null, workerLimitSaving: false, workerLimitTimer: null,
+      memoryLimitDraft: null, memoryLimitSaving: false, memoryLimitTimer: null,
+      renderSchedulerControl() {}, showNotice: message => assert.fail(message),
+      clearTimeout() {}, setTimeout: callback => { scheduled = callback; return 1; },
+      api: async (path, { body }) => {
+        assert.equal(path, "/api/scheduler");
+        requests.push(JSON.parse(JSON.stringify(body)));
+        return { workerLimit: 3, queuePaused: true, memoryLimit: { mode: "gb", value: 8 } };
+      },
+    });
+    vm.runInContext(schedulerFunctions, context);
+    if (change === "queue") await context.updateScheduler({ queuePaused: true });
+    else {
+      if (change === "workers") context.adjustWorkerLimit(1);
+      else context.scheduleMemoryLimit({ mode: "gb", value: 8 });
+      await scheduled();
+    }
+    assert.deepEqual(requests, [change === "queue" ? { queuePaused: true }
+      : change === "workers" ? { workerLimit: 3 } : { memoryLimit: { mode: "gb", value: 8 } }]);
+    assert.equal(context.state.settings.taskDefaults, taskDefaults);
+    assert.equal(context.state.settings.paperRoots, paperRoots);
+    assert.equal(context.state.settings.projectRoot, "/project");
+    assert.equal(context.state.settings.workerLimit, 3);
+    assert.equal(context.state.settings.queuePaused, true);
+    assert.equal(context.state.settings.memoryLimit.value, 8);
+  }
+});
+
 function problemEditorHarness(api, refreshCatalog = async () => {}) {
   const controls = [{ disabled: false }, { disabled: false, textContent: "Add problem" }];
   const attributes = new Map();
