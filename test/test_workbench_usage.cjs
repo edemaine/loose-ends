@@ -4,7 +4,7 @@ const { test } = require("node:test");
 const vm = require("node:vm");
 
 const source = readFileSync(`${__dirname}/../src/workbench_web/app.js`, "utf8");
-const functions = ["requestUsage", "usageCostLabel", "usagePricingTable", "setUsageModelIncluded", "refreshUsageElement", "openCostDialog"]
+const functions = ["formatDuration", "requestUsage", "usageCostLabel", "usageElapsedLabel", "usageTable", "usagePricingTable", "setUsageModelIncluded", "refreshUsageElement", "openCostDialog"]
   .map(name => source.match(new RegExp(`^(?:async )?function ${name}\\([^]*?^}`, "m"))[0]).join("\n");
 
 test("usage queries share in-flight requests, reuse cached totals, and can be refreshed", async () => {
@@ -95,6 +95,43 @@ test("missing prices and usage never appear as a zero dollar estimate", () => {
   assert.equal(context.usageCostLabel({ estimatedCost: .001, invocations: 1 }), "<$0.01");
   assert.equal(context.usageCostLabel({ estimatedCost: 1.5, missingUsage: 2 }), "≈$1.50 (partial)");
   assert.equal(context.usageCostLabel({ estimatedCost: 1.5, unpriced: 1 }), "≈$1.50 (partial)");
+});
+
+test("elapsed labels distinguish precise, fallback, live, partial, and missing timing", () => {
+  const context = vm.createContext({});
+  vm.runInContext(functions, context);
+  assert.equal(context.usageElapsedLabel({ elapsedSeconds: 3661 }), "1h 1m 1s");
+  assert.equal(context.usageElapsedLabel({ elapsedSeconds: 90, elapsedFallbackRuns: 1, runningElapsed: 1, missingElapsed: 2 }), "≈1m 30s+*");
+  assert.equal(context.usageElapsedLabel({ elapsedSeconds: null }), "—");
+  assert.equal(context.usageElapsedLabel({ elapsedSeconds: 0 }), "0s");
+});
+
+test("usage table shows an elapsed total and unassigned time without inventing token counts", () => {
+  const context = vm.createContext({
+    node: (tag, className, text) => ({ tag, text, children: [], append(...children) { this.children.push(...children); } }),
+  });
+  vm.runInContext(functions, context);
+  const fields = ["input_tokens", "cached_input_tokens", "cache_write_input_tokens", "output_tokens", "reasoning_output_tokens"];
+  const row = {
+    invocations: 1, tokens: Object.fromEntries(fields.map(key => [key, 100])),
+    reported: Object.fromEntries(fields.map(key => [key, 1])),
+    missingUsage: 0, estimatedCost: 1, elapsedSeconds: 20, stage: "Solve",
+  };
+  const remainder = { ...row, stage: "Run time · stage unavailable", invocations: 0,
+    reported: Object.fromEntries(fields.map(key => [key, 0])),
+    timingOnly: true, elapsedSeconds: 80, elapsedFallbackRuns: 1 };
+  const other = { ...remainder, stage: "Other run time", elapsedSeconds: 10 };
+  const table = context.usageTable({ ...row, elapsedSeconds: 110, elapsedFallbackRuns: 1,
+    stages: [remainder, row, other] }, "Total").children[0];
+  const body = table.children[2].children;
+  assert.equal(body.length, 2);
+  assert.equal(body[0].children[0].text, "Solve");
+  assert.equal(body[0].children[2].text, "20s");
+  assert.equal(body[1].children[0].text, "Unknown");
+  assert.equal(body[1].children[2].text, "≈1m 30s");
+  assert.equal(body[1].children[1].text, "—");
+  assert.ok(body[1].children.slice(3).every(cell => cell.text === "—"));
+  assert.equal(table.children[3].children[0].children[2].text, "≈1m 50s");
 });
 
 test("pricing table preserves fractional rates and distinguishes unknown prices", () => {

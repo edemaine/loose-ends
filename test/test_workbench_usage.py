@@ -1,6 +1,7 @@
 from pathlib import Path
 import json
 import os
+import sqlite3
 import sys
 from tempfile import TemporaryDirectory
 import unittest
@@ -62,6 +63,155 @@ class UsageTests(unittest.TestCase):
     def total(self, *targets):
         return self.index.summary([{"kind": kind, "path": str(path)} for kind, path in
                                    (targets or [("paper", self.paper)])])
+
+    def managed_run(self, *, started=100, finished=200, status="succeeded", action="solve"):
+        job = self.store.create_job({}, {"action": action, "title": "Timing", "units": [{
+            "label": "Problem", "argv": ["python", "solve.py", "--model", "gpt-6.1-sol"],
+            "cwd": str(self.root), "targets": [{"kind": "problem", "path": str(self.problem)}],
+        }]})
+        run = job["runs"][0]
+        self.store.update_run(run["id"], status=status, started_at=started, finished_at=finished)
+        return run
+
+    def archive(self, run, thread, *, stage="Solve", model="gpt-6.1-sol", elapsed=None, directory=None):
+        archive = Path(run["log_path"]).parent / "codex" / ("turn-" + thread)
+        archive.mkdir(parents=True)
+        (archive / "events").write_text(events(thread))
+        sources = {"events": str((directory or self.attempt) / "events.jsonl"),
+                   "stage": stage, "model": model, "service_tier": "standard"}
+        if elapsed is not None:
+            sources["elapsed_seconds"] = elapsed
+        (archive / "source.json").write_text(json.dumps(sources))
+        return archive
+
+    def test_precise_elapsed_breakdown_and_run_remainder_are_counted_once(self):
+        run = self.managed_run()
+        self.archive(run, "solve", elapsed=30)
+        self.archive(run, "review", stage="Review", model="gpt-6-astra", elapsed=20)
+        self.index.refresh()
+        # Installed copies enrich scope but do not add the same invocation twice.
+        self.source("installed-copy", events("solve"))
+        total = self.total(("paper", self.paper), ("problem", self.problem), ("attempt", self.attempt))
+        self.assertEqual(total["elapsedSeconds"], 100)
+        self.assertEqual(total["fallbackElapsedSeconds"], 50)
+        self.assertEqual(total["invocations"], 2)
+        stages = {row["stage"]: row for row in total["stages"]}
+        self.assertEqual(stages["Solve"]["elapsedSeconds"], 30)
+        self.assertEqual(stages["Review"]["elapsedSeconds"], 20)
+        self.assertEqual(stages["Other run time"]["elapsedSeconds"], 50)
+        self.assertTrue(stages["Other run time"]["timingOnly"])
+        filtered = self.index.summary([{"kind": "paper", "path": str(self.paper)}],
+                                      exclude_models=["gpt-6-astra", None])
+        self.assertEqual(filtered["elapsedSeconds"], 30)
+        self.assertEqual(filtered["elapsedFallbackRuns"], 0)
+
+    def test_historical_mixed_models_show_unassigned_time_instead_of_inventing_a_split(self):
+        run = self.managed_run()
+        self.archive(run, "solve")
+        self.archive(run, "review", stage="Review", model="gpt-6-astra")
+        self.index.refresh()
+        total = self.total()
+        self.assertEqual(total["elapsedSeconds"], 100)
+        self.assertEqual(total["missingElapsed"], 0)
+        stages = {row["stage"]: row for row in total["stages"]}
+        self.assertIsNone(stages["Solve"]["elapsedSeconds"])
+        self.assertIsNone(stages["Review"]["elapsedSeconds"])
+        self.assertEqual(stages["Run time · stage unavailable"]["elapsedSeconds"], 100)
+        self.assertEqual(self.index.summary([{"kind": "paper", "path": str(self.paper)}],
+                                           exclude_models=[None])["elapsedSeconds"], 100)
+        filtered = self.index.summary([{"kind": "paper", "path": str(self.paper)}],
+                                      exclude_models=["gpt-6-astra"])
+        self.assertIsNone(filtered["elapsedSeconds"])
+        self.assertEqual(filtered["missingElapsed"], 1)
+
+    def test_partial_timing_uses_only_the_remaining_run_time(self):
+        run = self.managed_run()
+        self.archive(run, "solve", elapsed=30)
+        self.archive(run, "review", stage="Review", model="gpt-6-astra")
+        self.index.refresh()
+        total = self.total()
+        self.assertEqual(total["elapsedSeconds"], 100)
+        self.assertEqual(total["fallbackElapsedSeconds"], 70)
+        self.assertEqual({row["stage"]: row["elapsedSeconds"] for row in total["stages"]},
+                         {"Review": 70, "Solve": 30})
+        filtered = self.index.summary([{"kind": "paper", "path": str(self.paper)}],
+                                      exclude_models=["gpt-6.1-sol"])
+        self.assertEqual(filtered["elapsedSeconds"], 70)
+        self.assertEqual(filtered["missingElapsed"], 0)
+
+    def test_overlapping_run_durations_are_summed_and_survive_activity_removal(self):
+        self.managed_run(started=100, finished=160, action="analyze")
+        self.managed_run(started=120, finished=180, action="analyze")
+        self.index.refresh()
+        self.assertEqual(self.total()["elapsedSeconds"], 120)
+        with self.store.connect() as db:
+            db.execute("DELETE FROM runs")
+            db.execute("DELETE FROM jobs")
+        reopened = UsageIndex(self.store, [self.papers], self.manuscripts)
+        with patch.object(Path, "open", side_effect=AssertionError("summary read logs")):
+            result = reopened.summary([{"kind": "paper", "path": str(self.paper)}])
+        self.assertEqual(result["elapsedSeconds"], 120)
+
+    def test_running_elapsed_excludes_queue_waiting_and_uses_current_database_finish_time(self):
+        running = self.managed_run(started=100, finished=None, status="running")
+        self.managed_run(started=None, finished=None, status="queued")
+        self.index.refresh()
+        with patch("workbench_usage.time.time", return_value=130):
+            self.assertEqual(self.total()["elapsedSeconds"], 30)
+            self.assertEqual(self.total()["runningElapsed"], 1)
+        self.store.update_run(running["id"], finished_at=140, status="succeeded")
+        with patch("workbench_usage.time.time", return_value=180):
+            self.assertEqual(self.total()["elapsedSeconds"], 40)
+            self.assertEqual(self.total()["runningElapsed"], 0)
+
+    def test_failed_launch_without_events_keeps_its_precise_timing(self):
+        run = self.managed_run(finished=110, status="failed")
+        folder = self.archive(run, "failed", elapsed=5)
+        (folder / "events").unlink()
+        self.index.refresh()
+        result = self.total()
+        self.assertEqual(result["invocations"], 1)
+        self.assertEqual(result["missingUsage"], 1)
+        self.assertEqual(result["elapsedSeconds"], 10)
+        self.assertEqual({row["stage"]: row["elapsedSeconds"] for row in result["stages"]},
+                         {"Solve": 5, "Other run time": 5})
+        self.assertEqual(self.index.refresh(), 0)
+
+    def test_manuscript_run_fallback_is_not_charged_to_source_problem_or_one_draft(self):
+        run = self.managed_run(action="write")
+        manuscript = self.manuscripts / "new-result"
+        draft = manuscript / "draft-001"
+        draft.mkdir(parents=True)
+        self.store.append_run_output(run["id"], str(draft / "main.tex"))
+        self.index.refresh()
+        self.assertIsNone(self.total()["elapsedSeconds"])
+        self.assertEqual(self.total(("manuscript", manuscript))["elapsedSeconds"], 100)
+        self.assertIsNone(self.total(("draft", draft))["elapsedSeconds"])
+
+    def test_a_partial_attempt_selection_does_not_inherit_a_multi_attempt_run(self):
+        run = self.managed_run()
+        self.archive(run, "first", elapsed=20)
+        self.archive(run, "second", directory=self.problem / "attempt-002")
+        self.index.refresh()
+        self.assertEqual(self.total()["elapsedSeconds"], 100)
+        self.assertEqual(self.total(("attempt", self.attempt))["elapsedSeconds"], 20)
+
+    def test_old_usage_database_migrates_without_losing_tokens(self):
+        database = self.root / "old.sqlite3"
+        with sqlite3.connect(database) as db:
+            db.execute("""CREATE TABLE usage_invocations (id TEXT PRIMARY KEY, stage TEXT,
+                model TEXT, tier TEXT, quality INTEGER, usage_json TEXT, completed INTEGER)""")
+            db.execute("INSERT INTO usage_invocations VALUES ('old','Solve','gpt-6.1-sol','standard',2,?,1)",
+                       (json.dumps(USAGE),))
+        db.close()
+        store = WorkbenchStore(database)
+        migrated = UsageIndex(store, [self.papers], self.manuscripts)
+        with store.connect() as db:
+            db.execute("INSERT INTO usage_scopes VALUES ('old','paper',?)", (path_key(self.paper),))
+        total = migrated.summary([{"kind": "paper", "path": str(self.paper)}])
+        self.assertEqual(total["tokens"], USAGE)
+        self.assertIsNone(total["elapsedSeconds"])
+        self.assertEqual(total["missingElapsed"], 1)
 
     def test_union_of_parent_child_and_duplicate_logs_counts_each_turn_once(self):
         main = events("solve") + events("repair")

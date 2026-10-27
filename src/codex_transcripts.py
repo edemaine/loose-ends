@@ -87,10 +87,14 @@ def record_transcript(function):
                 "service_tier": options.service_tier,
             })
         (folder / "prompt.txt").write_text(kwargs["prompt"], encoding="utf-8")
+        sources["started_at"] = time.time()
+        started = time.monotonic()
         (folder / "source.json").write_text(json.dumps(sources), encoding="utf-8")
         try:
             return function(**kwargs)
         finally:
+            sources["finished_at"] = time.time()
+            sources["elapsed_seconds"] = max(0.0, time.monotonic() - started)
             # Snapshot before callers merge repair logs or move/delete workspaces.
             for name in ("events", "diagnostics"):
                 source = sources[name]
@@ -98,4 +102,7 @@ def record_transcript(function):
                     temporary = folder / f"{name}.tmp"
                     shutil.copyfile(source, temporary)
                     os.replace(temporary, folder / name)
+            temporary = folder / "source.tmp"
+            temporary.write_text(json.dumps(sources), encoding="utf-8")
+            os.replace(temporary, folder / "source.json")
     return recorded

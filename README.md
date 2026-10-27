@@ -163,12 +163,25 @@ Problem popups show both the lifetime problem total and the selected attempt
 (including its critic); manuscript popups show all drafts and the selected
 draft. Activity keeps its **Usage** section below **Needs attention**.
 The usage table shows stage and total
-rows with input, cache reads/writes, output, reasoning, and estimated cost. Reasoning
+rows with elapsed time, input, cache reads/writes, output, reasoning, and estimated cost. Reasoning
 is part of output, and cache reads/writes are part of input, so neither is
 added twice. Use **Cost** in the multiselect bar to total selected items;
 overlapping selections count each invocation once. Paper totals include
 analysis and all problems. Manuscript work is counted separately from its
 source papers and problems.
+
+Elapsed time sums wall-clock durations, counting overlapping work separately.
+New managed invocations record precise durations, including failed invocations.
+Historical runs use SQLite start/end timestamps as fallback, with precise
+invocation times subtracted before adding any remainder. `≈` marks run-time
+fallbacks, `+` includes active work, and `*` marks partial timing coverage.
+Time without an attributable stage (including setup and work outside timed
+calls) is combined in an **Unknown** row immediately before **Total**. It uses
+**Unknown model** for filtering when its model is also unassigned.
+Model filters include a fallback only when its model
+attribution supports the selected models; they never divide a mixed-model run
+arbitrarily. Logs without invocation timing or a corresponding managed run
+show elapsed time as unavailable. Queue waiting time is excluded.
 
 Usage is indexed in the workbench SQLite database. A background import starts
 automatically and checks for changed logs every 30 seconds; unchanged logs
@@ -186,11 +199,14 @@ account-specific discounts are excluded. **Pricing details** shows the assumed
 USD-per-million-token rates for each model and service tier in the total,
 including the Fast/Ultrafast multipliers. Unknown rates appear as dashes and
 are excluded from the price estimate. In Cost popups, checkboxes beside the
-models filter token counts, stages, and costs across the popup; a model's
+models filter token counts, elapsed time, stages, and costs across the popup; a model's
 service tiers are selected together. All models are included when opening a
 popup, and these selections do not change stored usage or the page's total.
 Raw tokens are stored independently
 of the rate table, so updating prices does not require reimporting logs.
+Cache-write zeros are preserved from Codex logs. Its usage schema permits a
+default zero, so these logs cannot distinguish a measured zero from an
+upstream counter that was not supplied.
 
 To use multiple Codex accounts, set **CODEX_HOME** at the bottom of a task's
 **Model and web-search settings** to the directory authenticated for the desired

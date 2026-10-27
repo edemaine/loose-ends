@@ -943,6 +943,12 @@ function usageCostLabel(value) {
   return `${dollars}${value.missingUsage || value.unpriced ? " (partial)" : ""}`;
 }
 
+function usageElapsedLabel(value) {
+  if (!Number.isFinite(value.elapsedSeconds)) return "—";
+  const duration = value.elapsedSeconds === 0 ? "0s" : formatDuration(0, value.elapsedSeconds);
+  return `${value.elapsedFallbackRuns ? "≈" : ""}${duration}${value.runningElapsed ? "+" : ""}${value.missingElapsed || value.missingElapsedRuns ? "*" : ""}`;
+}
+
 function usageTable(value, label) {
   const table = node("table", "usage-stage-table");
   table.append(node("caption", "", label));
@@ -950,9 +956,10 @@ function usageTable(value, label) {
   const header = node("tr");
   for (const [label, title] of [
     ["Stage", "Pipeline stage"], ["Turns", "Recorded Codex turns"],
+    ["Elapsed", "Sum of wall-clock durations; overlapping runs count separately"],
     ["Input", "All input tokens, including cache reads and writes"],
     ["Cache read", "Cached tokens within input"],
-    ["Cache write", "Cache-write tokens within input"],
+    ["Cache write", "Cache-write tokens reported by Codex; zero may be a default when upstream usage is unavailable"],
     ["Output", "All output tokens, including reasoning"],
     ["Reasoning", "Reasoning tokens within output"],
     ["Est. API cost", "Estimated API-equivalent token cost"],
@@ -967,21 +974,37 @@ function usageTable(value, label) {
     const row = node("tr");
     const heading = node("th", "", label);
     heading.scope = "row";
-    row.append(heading, node("td", "", item.invocations.toLocaleString()));
+    if (label === "Unknown") heading.title = "Run time without an attributable stage, including work outside timed invocations";
+    row.append(heading, node("td", "", item.timingOnly ? "—" : item.invocations.toLocaleString()));
+    const elapsed = node("td", "", usageElapsedLabel(item));
+    elapsed.title = "Summed wall-clock time. ≈ uses recorded run timestamps as fallback; + includes running work; * is partial.";
+    row.append(elapsed);
     for (const key of ["input_tokens", "cached_input_tokens", "cache_write_input_tokens", "output_tokens", "reasoning_output_tokens"]) {
       const reported = item.reported[key];
       const known = item.invocations - item.missingUsage;
       const partial = reported > 0 && reported < known;
-      const emptySelection = value.modelFilterApplied && !item.invocations;
+      const emptySelection = value.modelFilterApplied && !item.invocations && !item.timingOnly;
       const cell = node("td", "", reported ? `${item.tokens[key].toLocaleString()}${partial ? "*" : ""}` : emptySelection ? "0" : "—");
       cell.title = reported ? partial ? `Reported for ${reported} of ${known} turns with usage` : "Reported tokens" : emptySelection ? "No turns for selected models" : "Unreported";
       row.append(cell);
     }
-    row.append(node("td", "", usageCostLabel(item)));
+    row.append(node("td", "", item.timingOnly ? "—" : usageCostLabel(item)));
     return row;
   };
   const body = node("tbody");
-  value.stages.forEach(stage => body.append(rowFor(stage, stage.stage)));
+  const unassigned = value.stages.filter(stage => stage.timingOnly
+    && ["Other run time", "Run time · stage unavailable"].includes(stage.stage));
+  value.stages.filter(stage => !unassigned.includes(stage))
+    .forEach(stage => body.append(rowFor(stage, stage.stage)));
+  if (unassigned.length) {
+    const combined = { ...unassigned[0] };
+    const durations = unassigned.map(stage => stage.elapsedSeconds).filter(Number.isFinite);
+    combined.elapsedSeconds = durations.length ? durations.reduce((sum, seconds) => sum + seconds, 0) : null;
+    for (const key of ["elapsedFallbackRuns", "runningElapsed", "missingElapsed", "missingElapsedRuns"]) {
+      combined[key] = unassigned.reduce((sum, stage) => sum + (stage[key] || 0), 0);
+    }
+    body.append(rowFor(combined, "Unknown"));
+  }
   const foot = node("tfoot");
   foot.append(rowFor(value, "Total"));
   table.append(head, body, foot);
@@ -1075,11 +1098,15 @@ async function refreshUsageElement(element, force = false) {
     if (value.indexError) coverage.push(`Index update failed: ${value.indexError}`);
     if (value.missingUsage) coverage.push(`${value.missingUsage} invocation(s) missing usage.`);
     if (value.unpriced) coverage.push(`${value.unpriced} invocation(s) without known pricing.`);
+    if (value.missingElapsed) coverage.push(`${value.missingElapsed} invocation(s) without attributable elapsed time.`);
+    if (value.missingElapsedRuns) coverage.push(`${value.missingElapsedRuns} run(s) missing elapsed time.`);
     if (coverage.length) element.append(node("p", "usage-coverage muted", coverage.join(" ")));
     const details = node("details", "usage-breakdown");
     details.open = expanded;
     details.append(node("summary", "", "Pricing details"));
     details.append(node("p", "muted", "Cache columns are included in input; reasoning is included in output. — means unreported; * means partially reported. Manuscript work is counted separately from source papers and problems."));
+    details.append(node("p", "muted", "Elapsed sums wall-clock durations, counting parallel runs separately. ≈ includes time from run start/end timestamps; + includes running work. The Unknown row covers time without an attributable stage, including setup and work outside timed invocations. Unknown model also covers unassigned run time, which cannot be split by model."));
+    details.append(node("p", "muted", "Cache-write counts are copied from Codex logs. The CLI usage schema allows a default of zero; these logs cannot distinguish a measured zero from a missing upstream count."));
     if (element.usageModelFilter && value.pricingRates?.length) {
       details.append(node("p", "muted", "Select models to include in the totals (all service tiers)."));
     }
