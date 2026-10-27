@@ -166,6 +166,42 @@ class UsageTests(unittest.TestCase):
         for key, expected in {"input": 12, "cachedInput": .6, "cacheWrite": 15, "output": 60}.items():
             self.assertAlmostEqual(pricing["rates"][key], expected)
 
+    def test_model_filter_updates_totals_and_stages_across_tiers_without_losing_choices(self):
+        self.source("sol", events("sol"))
+        self.source("sol-duplicate", events("sol"))
+        self.source("sol-fast", events("sol-fast"), self.context(tier="fast"))
+        self.source("astra", events("astra"), self.context(model="gpt-6-astra", stage="Review"))
+        self.source("custom", events("custom"), self.context(model="custom-model"))
+        self.source("missing", events("missing", None), self.context(model=None))
+        targets = [{"kind": "paper", "path": str(self.paper)},
+                   {"kind": "problem", "path": str(self.problem)}]
+
+        astra = self.index.summary(targets, exclude_models=["gpt-6.1-sol", "custom-model", None])
+        self.assertEqual(astra["invocations"], 1)
+        self.assertEqual(astra["tokens"], USAGE)
+        self.assertAlmostEqual(astra["estimatedCost"], estimated_cost(USAGE, "gpt-6-astra", "standard"))
+        self.assertEqual([item["stage"] for item in astra["stages"]], ["Review"])
+        self.assertEqual((astra["unpriced"], astra["missingUsage"]), (0, 0))
+        self.assertTrue(astra["modelFilterApplied"])
+        self.assertEqual(len(astra["pricingRates"]), 5)
+
+        sol = self.index.summary(targets, exclude_models=["gpt-6-astra", "custom-model", None])
+        self.assertEqual(sol["invocations"], 2)
+        self.assertEqual(sol["tokens"]["input_tokens"], 2000)
+        self.assertAlmostEqual(sol["estimatedCost"], .00191 * 3)
+
+        unknown = self.index.summary(targets, exclude_models=["gpt-6.1-sol", "gpt-6-astra"])
+        self.assertEqual((unknown["invocations"], unknown["unpriced"], unknown["missingUsage"]), (2, 1, 1))
+        self.assertIsNone(unknown["estimatedCost"])
+
+        empty = self.index.summary(targets, exclude_models=["gpt-6.1-sol", "gpt-6-astra", "custom-model", None])
+        self.assertEqual(empty["invocations"], 0)
+        self.assertEqual(empty["estimatedCost"], 0)
+        self.assertFalse(any(empty["tokens"].values()))
+        self.assertEqual(empty["stages"], [])
+        self.assertEqual(empty["pricingRates"], astra["pricingRates"])
+        self.assertEqual(self.index.summary(targets)["invocations"], 5)
+
     def test_large_selection_uses_database_union_without_expression_depth_limit(self):
         self.source("events", events("selected"))
         targets = [{"kind": "problem", "path": str(self.paper / f"OP-{n:04d}")} for n in range(2000)]
@@ -192,6 +228,11 @@ class UsageTests(unittest.TestCase):
             with self.subTest(body=body), self.assertRaises(PlanError):
                 app.usage_summary(body)
         self.assertEqual(app.usage_summary({"targets": [{"kind": "paper", "path": str(self.paper)}]})["invocations"], 0)
+        targets = [{"kind": "paper", "path": str(self.paper)}]
+        for excluded in ("gpt-6.1-sol", {}, [7], [[]], ["m"] * 1001):
+            with self.subTest(excluded=excluded), self.assertRaises(PlanError):
+                app.usage_summary({"targets": targets, "excludeModels": excluded})
+        self.assertTrue(app.usage_summary({"targets": targets, "excludeModels": [None]})["modelFilterApplied"])
 
     @unittest.skipUnless(os.name == "nt", "Windows/Cygwin interoperability")
     def test_windows_and_cygwin_paths_share_a_scope_key(self):

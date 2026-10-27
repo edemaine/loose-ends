@@ -896,10 +896,11 @@ function usagePanel(scopes) {
   return panel;
 }
 
-function usageSummary(targets, label) {
+function usageSummary(targets, label, modelFilter = null) {
   const element = node("article", "usage-summary");
   element.dataset.usageTargets = JSON.stringify(targets.map(({ kind, path }) => ({ kind, path })));
   element.dataset.usageLabel = label;
+  element.usageModelFilter = modelFilter;
   element.append(node("strong", "", label), node("p", "muted", "Loading usage…"));
   queueMicrotask(() => refreshUsageElement(element));
   return element;
@@ -915,12 +916,14 @@ function costButton(scopes) {
   return control;
 }
 
-async function requestUsage(targets, force = false) {
-  const key = JSON.stringify(targets);
+async function requestUsage(targets, force = false, excludedModels = []) {
+  const excluded = [...excludedModels].sort((a, b) => (a ?? "").localeCompare(b ?? ""));
+  const body = excluded.length ? { targets, excludeModels: excluded } : { targets };
+  const key = JSON.stringify(excluded.length ? body : targets);
   const cached = state.usageCache.get(key);
   if (!force && cached && Date.now() - cached.time < 15000) return cached.value;
   if (!state.usageLoads.has(key)) {
-    const load = api("/api/usage", { method: "POST", body: { targets } })
+    const load = api("/api/usage", { method: "POST", body })
       .then(value => {
         state.usageCache.set(key, { time: Date.now(), value });
         // Selections can produce many distinct combinations over a session.
@@ -969,8 +972,9 @@ function usageTable(value, label) {
       const reported = item.reported[key];
       const known = item.invocations - item.missingUsage;
       const partial = reported > 0 && reported < known;
-      const cell = node("td", "", reported ? `${item.tokens[key].toLocaleString()}${partial ? "*" : ""}` : "—");
-      cell.title = reported ? partial ? `Reported for ${reported} of ${known} turns with usage` : "Reported tokens" : "Unreported";
+      const emptySelection = value.modelFilterApplied && !item.invocations;
+      const cell = node("td", "", reported ? `${item.tokens[key].toLocaleString()}${partial ? "*" : ""}` : emptySelection ? "0" : "—");
+      cell.title = reported ? partial ? `Reported for ${reported} of ${known} turns with usage` : "Reported tokens" : emptySelection ? "No turns for selected models" : "Unreported";
       row.append(cell);
     }
     row.append(node("td", "", usageCostLabel(item)));
@@ -986,7 +990,7 @@ function usageTable(value, label) {
   return scroll;
 }
 
-function usagePricingTable(pricing) {
+function usagePricingTable(pricing, modelFilter = null) {
   const table = node("table", "usage-stage-table");
   table.append(node("caption", "", "Assumed rates · USD per 1M tokens"));
   const head = node("thead");
@@ -1002,6 +1006,19 @@ function usagePricingTable(pricing) {
     const row = node("tr");
     const model = node("th", "", item.model || "Unknown model");
     model.scope = "row";
+    if (modelFilter) {
+      const label = node("label", "usage-model-filter");
+      const input = node("input");
+      input.type = "checkbox";
+      input.checked = !modelFilter.excludedModels.has(item.model);
+      input.dataset.usageModel = JSON.stringify([item.model, item.tier]);
+      input.setAttribute("aria-label", `Include ${item.model || "Unknown model"} (${item.tier || "unknown tier"})`);
+      input.title = "Include this model across all service tiers";
+      input.addEventListener("change", () => setUsageModelIncluded(modelFilter, item.model, input.checked));
+      label.append(input, node("span", "", item.model || "Unknown model"));
+      model.replaceChildren(label);
+      row.classList.toggle("usage-model-excluded", !input.checked);
+    }
     row.append(model, node("td", "", item.tier || "Unknown tier"));
     for (const key of ["input", "cachedInput", "cacheWrite", "output"]) {
       const rate = item.rates?.[key];
@@ -1019,12 +1036,24 @@ function usagePricingTable(pricing) {
   return scroll;
 }
 
+function setUsageModelIncluded(modelFilter, model, included) {
+  if (included) modelFilter.excludedModels.delete(model);
+  else modelFilter.excludedModels.add(model);
+  dialogBody.querySelectorAll("[data-usage-targets]").forEach(element => {
+    if (element.usageModelFilter === modelFilter) {
+      element.usageValue = null; // Also synchronize duplicate model rows across tiers.
+      refreshUsageElement(element);
+    }
+  });
+}
+
 async function refreshUsageElement(element, force = false) {
   if (!element.isConnected) return;
   const targets = JSON.parse(element.dataset.usageTargets);
+  const requestId = element.usageRequestId = (element.usageRequestId || 0) + 1;
   try {
-    const value = await requestUsage(targets, force);
-    if (!element.isConnected) return;
+    const value = await requestUsage(targets, force, element.usageModelFilter?.excludedModels);
+    if (!element.isConnected || element.usageRequestId !== requestId) return;
     if (element.usageValue === value) return;
     element.usageValue = value;
     if (element.dataset.usageDisplay === "button") {
@@ -1037,8 +1066,10 @@ async function refreshUsageElement(element, force = false) {
         + (value.indexError ? ` Index update failed: ${value.indexError}` : "");
       return;
     }
+    const focusedModel = element.querySelector("input:focus")?.dataset.usageModel;
     const expanded = element.querySelector("details")?.open || false;
-    element.replaceChildren(usageTable(value, element.dataset.usageLabel));
+    const label = element.dataset.usageLabel + (value.modelFilterApplied ? " · selected models" : "");
+    element.replaceChildren(usageTable(value, label));
     const coverage = [];
     if (value.indexing) coverage.push("Indexing saved logs; totals may grow.");
     if (value.indexError) coverage.push(`Index update failed: ${value.indexError}`);
@@ -1049,7 +1080,10 @@ async function refreshUsageElement(element, force = false) {
     details.open = expanded;
     details.append(node("summary", "", "Pricing details"));
     details.append(node("p", "muted", "Cache columns are included in input; reasoning is included in output. — means unreported; * means partially reported. Manuscript work is counted separately from source papers and problems."));
-    if (value.pricingRates?.length) details.append(usagePricingTable(value.pricingRates));
+    if (element.usageModelFilter && value.pricingRates?.length) {
+      details.append(node("p", "muted", "Select models to include in the totals (all service tiers)."));
+    }
+    if (value.pricingRates?.length) details.append(usagePricingTable(value.pricingRates, element.usageModelFilter));
     else if (value.models.length) details.append(node("p", "muted", value.models.join(", ")));
     details.append(node("p", "muted", value.assumptions));
     const pricing = node("a", "", `Pricing: ${value.pricingVersion}`);
@@ -1059,8 +1093,13 @@ async function refreshUsageElement(element, force = false) {
     details.append(pricing);
     if (value.updatedAt) details.append(node("p", "muted", `Index updated ${formatTime(value.updatedAt)}`));
     element.append(details);
+    if (focusedModel !== undefined) {
+      [...element.querySelectorAll("[data-usage-model]")]
+        .find(input => input.dataset.usageModel === focusedModel)?.focus({ preventScroll: true });
+    }
   } catch (error) {
-    if (!element.isConnected) return;
+    if (!element.isConnected || element.usageRequestId !== requestId) return;
+    element.usageValue = null;
     if (element.dataset.usageDisplay === "button") {
       element.textContent = "Cost";
       element.title = `Could not load usage: ${error.message}. Click to retry.`;
@@ -1075,13 +1114,14 @@ function refreshVisibleUsage(force = false) {
 }
 
 function openCostDialog(values, scopes = null) {
-  state.dialog = { kind: "cost" };
+  const modelFilter = { kind: "cost", excludedModels: new Set() };
+  state.dialog = modelFilter;
   dialogEyebrow.textContent = scopes ? "Usage" : "Selected items";
   dialogTitle.textContent = "Tokens and estimated cost";
   dialogBody.replaceChildren(
     node("p", "muted", "Includes descendants. Overlapping selections count each turn once."),
     ...(scopes || [{ targets: values, label: `${values.length.toLocaleString()} selected item${values.length === 1 ? "" : "s"}` }])
-      .map(({ targets, label }) => usageSummary(targets, label)),
+      .map(({ targets, label }) => usageSummary(targets, label, modelFilter)),
   );
   dialogFooter.replaceChildren(
     button("Refresh", () => refreshVisibleUsage(true)),

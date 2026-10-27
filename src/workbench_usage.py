@@ -362,7 +362,7 @@ class UsageIndex:
                           "state_json": json.dumps(state), "tail": tail_digest}
         return 1
 
-    def summary(self, targets):
+    def summary(self, targets, *, exclude_models=()):
         """All accounting on this path reads SQLite only."""
         selected = set()
         for target in targets:
@@ -376,12 +376,18 @@ class UsageIndex:
                 SELECT * FROM usage_invocations WHERE id IN (
                     SELECT invocation_id FROM usage_scopes JOIN selected USING (kind, path)
                 )""", parameters).fetchall() if selected else []
+        pricing_rows = rows
+        excluded = set(exclude_models)
+        rows = [row for row in rows if row["model"] not in excluded]
         total = self._totals(rows)
+        if excluded and not rows:
+            total["estimatedCost"] = 0.0
         stages = defaultdict(list)
         for row in rows:
             stages[row["stage"]].append(row)
         pricing = []
-        for model, tier in sorted({(row["model"], row["tier"]) for row in rows},
+        # Keep excluded models visible so the popup can include them again.
+        for model, tier in sorted({(row["model"], row["tier"]) for row in pricing_rows},
                                   key=lambda pair: (pair[0] or "", pair[1] or "")):
             rates = model_rates(model, tier)
             pricing.append({"model": model, "tier": tier,
@@ -392,6 +398,7 @@ class UsageIndex:
                 "indexing": self.indexing, "indexError": self.error, "updatedAt": self.updated_at,
                 "pricingVersion": PRICING_VERSION, "pricingUrl": PRICING_URL,
                 "pricingRates": pricing,
+                "modelFilterApplied": bool(excluded),
                 "assumptions": "API-equivalent token estimate at current short-context rates; "
                 "30-minute cache writes; unreported cache writes use ordinary input rates. "
                 "Excludes tool fees and long-context premiums. "

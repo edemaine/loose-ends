@@ -2045,7 +2045,12 @@ class WorkbenchApplication:
                 Path(target["path"]), self.allowed_roots,
             ):
                 raise PlanError("usage target is outside allowed roots")
-        return self.usage.summary(targets)
+        excluded = body.get("excludeModels", [])
+        if not isinstance(excluded, list) or len(excluded) > 1000 or any(
+            model is not None and not isinstance(model, str) for model in excluded
+        ):
+            raise PlanError("excludeModels must be a list of model names (or null for unknown models)")
+        return self.usage.summary(targets, exclude_models=excluded)
 
 
 def _is_allowed_file(path: Path, roots: Iterable[Path]) -> bool:

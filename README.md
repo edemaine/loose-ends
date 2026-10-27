@@ -185,7 +185,11 @@ cache writes use ordinary input rates. Tool fees, long-context premiums, and
 account-specific discounts are excluded. **Pricing details** shows the assumed
 USD-per-million-token rates for each model and service tier in the total,
 including the Fast/Ultrafast multipliers. Unknown rates appear as dashes and
-are excluded from the price estimate. Raw tokens are stored independently
+are excluded from the price estimate. In Cost popups, checkboxes beside the
+models filter token counts, stages, and costs across the popup; a model's
+service tiers are selected together. All models are included when opening a
+popup, and these selections do not change stored usage or the page's total.
+Raw tokens are stored independently
 of the rate table, so updating prices does not require reimporting logs.
 
 To use multiple Codex accounts, set **CODEX_HOME** at the bottom of a task's

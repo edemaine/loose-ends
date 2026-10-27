@@ -429,6 +429,9 @@ button { color: inherit; }
 .usage-breakdown { margin-top: 5px; font-size: 11px; }
 .usage-breakdown > summary { cursor: pointer; color: var(--accent); }
 .usage-breakdown .usage-table-scroll { margin: 10px 0; }
+.usage-model-filter { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+.usage-model-filter input { margin: 0; accent-color: var(--accent); }
+.usage-model-excluded { color: var(--muted); }
 .usage-table-scroll { overflow-x: auto; }
 .usage-stage-table { width: 100%; border-collapse: collapse; font-size: 11px; font-variant-numeric: tabular-nums; }
 .usage-stage-table caption { padding-bottom: 7px; text-align: left; color: var(--heading); font-weight: 750; }
