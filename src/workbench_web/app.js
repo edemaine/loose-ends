@@ -1659,7 +1659,7 @@ function appendSideCard(parent, {
   else card.append(node("span"));
   const copy = node("span");
   const titleRow = node("span", "side-card-title-row");
-  const titleNode = node("strong", "", title);
+  const titleNode = inlineMarkdown("strong", "", title);
   titleNode.title = title;
   titleRow.append(titleNode);
   if (relatedTask || relatedProblem) {
@@ -1992,7 +1992,7 @@ function renderResearch() {
       group.paperTitle,
       group.publicationTimestamp,
     );
-    const paperHeadingTitle = node("span", "paper-heading-title", paperHeadingLabel);
+    const paperHeadingTitle = inlineMarkdown("span", "paper-heading-title", paperHeadingLabel);
     paperHeadingTitle.title = paperHeadingLabel;
     paperHeading.append(
       paperHeadingTitle,
@@ -2111,6 +2111,14 @@ function loadReviewDetail(summary) {
         state.detailLoads.delete(summary.itemKey);
       }
     });
+}
+
+function inlineMarkdown(tag, className, value) {
+  const element = node(tag, `${className} inline-markdown`.trim(), value);
+  if (markdownRenderer && value) {
+    element.innerHTML = markdownRenderer.renderInline(value, { latexProse: true });
+  }
+  return element;
 }
 
 function markdown(value, missing = "No content available.", env = {}) {
@@ -2237,7 +2245,7 @@ function problemManuscriptsPanel(item) {
       ? draft.name
       : `${matchingDraftCount} matching drafts · latest match ${draft.name}`;
     link.append(
-      node("strong", "", draft.title),
+      inlineMarkdown("strong", "", draft.title),
       node("small", "", `${manuscript.name} · ${draftSummary}`),
     );
     grid.append(link);
@@ -2326,8 +2334,8 @@ function renderReviewDetail(item) {
   const hero = node("section", "hero");
   const copy = node("div");
   const paperTitle = reviewModel.paperTitleWithYear(item.paperTitle, item.paperPublished);
-  copy.append(node("div", "eyebrow", `${paperTitle} · ${item.problemId}`));
-  copy.append(node("h1", "", item.problemTitle));
+  copy.append(inlineMarkdown("div", "eyebrow", `${paperTitle} · ${item.problemId}`));
+  copy.append(inlineMarkdown("h1", "", item.problemTitle));
   copy.append(node("p", "", item.paperAuthors?.join(", ") || "Authors unavailable"));
   hero.append(copy);
   shell.append(hero);
@@ -2603,7 +2611,7 @@ function renderPapers() {
   const hero = node("section", "hero");
   const copy = node("div");
   copy.append(node("div", "eyebrow", paper.name));
-  copy.append(node("h1", "", paper.title));
+  copy.append(inlineMarkdown("h1", "", paper.title));
   copy.append(node("p", "", paper.authors.join(", ") || "Authors unavailable"));
   if (paper.published || (paper.updated && paper.updated !== paper.published)) {
     const dates = node("div", "paper-dates");
@@ -2712,7 +2720,7 @@ function paperProblemsPanel(paper) {
       "entity-card",
     );
     link.append(
-      node("strong", "", `${problem.problemId} · ${problem.problemTitle}`),
+      inlineMarkdown("strong", "", `${problem.problemId} · ${problem.problemTitle}`),
       attemptTagsNode(problem, { includeKnown: true, includeProblem: true }),
     );
     grid.append(link);
@@ -3270,7 +3278,7 @@ function renderManuscripts() {
   const hero = node("section", "hero");
   const copy = node("div");
   copy.append(node("div", "eyebrow", `${manuscript.name} · ${draft.name}`));
-  copy.append(node("h1", "", draft.title));
+  copy.append(inlineMarkdown("h1", "", draft.title));
   const badges = node("div", "badges");
   badges.append(badge(draft.status || "draft", "neutral"));
   badges.append(badge(draft.verdict, draft.verdict === "ready_for_expert_review" ? "succeeded" : "warn"));

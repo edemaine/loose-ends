@@ -203,6 +203,7 @@ button { color: inherit; }
 .attempt-tag.known { background: var(--known-bg); color: var(--known); }
 
 .eyebrow { color: var(--accent); font-size: 10px; font-weight: 850; letter-spacing: .15em; text-transform: uppercase; }
+.inline-markdown .katex { letter-spacing: normal; text-transform: none; }
 .hero { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 16px; }
 .hero-copy { min-width: 0; }
 .hero h1 { margin: 5px 0 6px; color: var(--heading); font: 760 clamp(26px, 3.5vw, 39px)/1.08 ui-serif, Georgia, serif; letter-spacing: -.03em; }

@@ -11,6 +11,7 @@ const functions = [
   "paperFilterControl", "renderPaperFilters", "filteredPapers", "renderPapers",
   "manuscriptFilterControl", "renderManuscriptFilters", "filteredManuscripts", "renderManuscripts",
   "sidebarSearch", "renderActivity",
+  "inlineMarkdown",
   "syncListNavigation", "rememberSidebarScroll", "restoreSidebarScroll", "revealIfHidden", "revealCentered",
   "paperSortControl", "manuscriptSortControl", "normalizeManuscriptSort",
   "olderVersionWarning", "olderAttemptWarning", "openRoute",
@@ -89,7 +90,7 @@ function harness(view, sort = "alphabetical") {
     };
   }
   const context = vm.createContext({
-    state, reviewModel, node, renderScrollTarget: null,
+    state, reviewModel, node, markdownRenderer: null, renderScrollTarget: null,
     manuscriptSortOptions: [["latest", "Latest drafts"], ["alphabetical", "Alphabetical"]],
     document: { createTextNode: text => text, getElementById: () => ({ content: { cloneNode() {} } }) },
     button: (text, handler) => ({ text, handler }),
