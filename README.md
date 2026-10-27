@@ -202,6 +202,12 @@ are excluded from the price estimate. In Cost popups, checkboxes beside the
 models filter token counts, elapsed time, stages, and costs across the popup; a model's
 service tiers are selected together. All models are included when opening a
 popup, and these selections do not change stored usage or the page's total.
+The **Successful runs only** checkbox in **Pricing details** filters tokens,
+costs, and elapsed time to succeeded runs, excluding unsuccessful and active
+runs. For older logs without a managed run status, it uses completed turns.
+It combines with model selections and resets when opening a Cost popup.
+Successful runs can still have missing usage or unknown pricing, so their
+cost estimate may remain partial.
 Raw tokens are stored independently
 of the rate table, so updating prices does not require reimporting logs.
 Cache-write zeros are preserved from Codex logs. Its usage schema permits a

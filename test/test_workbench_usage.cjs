@@ -4,7 +4,7 @@ const { test } = require("node:test");
 const vm = require("node:vm");
 
 const source = readFileSync(`${__dirname}/../src/workbench_web/app.js`, "utf8");
-const functions = ["formatDuration", "requestUsage", "usageCostLabel", "usageElapsedLabel", "usageTable", "usagePricingTable", "setUsageModelIncluded", "refreshUsageElement", "openCostDialog"]
+const functions = ["formatDuration", "requestUsage", "usageCostLabel", "usageElapsedLabel", "usageTable", "usagePricingTable", "setUsageModelIncluded", "usageRunFilter", "refreshUsageFilters", "refreshUsageElement", "openCostDialog"]
   .map(name => source.match(new RegExp(`^(?:async )?function ${name}\\([^]*?^}`, "m"))[0]).join("\n");
 
 test("usage queries share in-flight requests, reuse cached totals, and can be refreshed", async () => {
@@ -73,7 +73,7 @@ test("model checkbox changes update all popup scopes while preserving page total
   const pageButton = { usageValue: { estimatedCost: 3 } };
   const calls = [];
   const context = vm.createContext({
-    dialogBody: { querySelectorAll: () => [problem, attempt, pageButton] },
+    document: { querySelectorAll: () => [problem, attempt, pageButton] },
   });
   vm.runInContext(functions, context);
   context.refreshUsageElement = element => calls.push(element);
@@ -85,6 +85,61 @@ test("model checkbox changes update all popup scopes while preserving page total
   assert.equal(pageButton.usageValue.estimatedCost, 3);
   context.setUsageModelIncluded(modelFilter, "gpt-6.1-sol", true);
   assert.equal(modelFilter.excludedModels.size, 0);
+});
+
+test("successful-run queries compose with model filters and keep page cache totals separate", async () => {
+  const requests = [];
+  const context = vm.createContext({
+    state: { usageCache: new Map(), usageLoads: new Map() },
+    api: async (_path, { body }) => {
+      requests.push(JSON.parse(JSON.stringify(body)));
+      return { estimatedCost: body.successfulRunsOnly ? 1 : 3 };
+    },
+  });
+  vm.runInContext(functions, context);
+  const targets = [{ kind: "problem", path: "/problem" }];
+  await context.requestUsage(targets);
+  await context.requestUsage(targets, false, [], true);
+  await context.requestUsage(targets, false, ["b", "a"], true);
+  await context.requestUsage(targets, false, ["a", "b"], true);
+  assert.equal((await context.requestUsage(targets)).estimatedCost, 3);
+  assert.equal(requests.length, 3);
+  assert.equal(requests[1].successfulRunsOnly, true);
+  assert.deepEqual(requests[2].excludeModels, ["a", "b"]);
+  assert.equal(requests[2].successfulRunsOnly, true);
+  assert.equal(requests[0].successfulRunsOnly, undefined);
+});
+
+test("successful-run checkbox synchronizes all scopes while preserving model selections and page totals", () => {
+  const filter = { excludedModels: new Set(["gpt-6-astra"]), successfulRunsOnly: false };
+  const problem = { usageModelFilter: filter, usageValue: {} };
+  const attempt = { usageModelFilter: filter, usageValue: {} };
+  const page = { usageValue: { estimatedCost: 3 } };
+  const calls = [];
+  const context = vm.createContext({
+    node: (tag, className, text) => ({
+      tag, text, dataset: {}, children: [], handlers: {},
+      append(...children) { this.children.push(...children); },
+      addEventListener(event, handler) { this.handlers[event] = handler; },
+    }),
+    document: { querySelectorAll: () => [problem, attempt, page] },
+  });
+  vm.runInContext(functions, context);
+  context.refreshUsageElement = element => calls.push(element);
+  const label = context.usageRunFilter(filter);
+  const input = label.children[0];
+  assert.equal(label.children[1].text, "Successful runs only");
+  assert.equal(input.checked, false);
+  input.checked = true;
+  input.handlers.change();
+  assert.equal(filter.successfulRunsOnly, true);
+  assert.deepEqual(calls, [problem, attempt]);
+  assert.equal(page.usageValue.estimatedCost, 3);
+  assert.ok(filter.excludedModels.has("gpt-6-astra"));
+  assert.equal(context.usageRunFilter(filter).children[0].checked, true);
+  input.checked = false;
+  input.handlers.change();
+  assert.equal(filter.successfulRunsOnly, false);
 });
 
 test("missing prices and usage never appear as a zero dollar estimate", () => {
@@ -162,7 +217,7 @@ test("pricing checkboxes select a model across its tiers and include unknown mod
       addEventListener(name, handler) { this.handlers[name] = handler; },
       classList: { toggle() {} },
     }),
-    dialogBody: { querySelectorAll: () => [] },
+    document: { querySelectorAll: () => [] },
   });
   vm.runInContext(functions, context);
   const filter = { excludedModels: new Set() };
@@ -202,16 +257,16 @@ test("late usage responses do not overwrite an abandoned detail panel", async ()
   await pending;
 });
 
-test("an older model-filter response cannot overwrite the latest selection", async () => {
+test("older filter responses cannot overwrite the latest model and successful-run selection", async () => {
   const finishes = [];
   const selections = [];
   const element = {
     isConnected: true, dataset: { usageTargets: "[]", usageDisplay: "button", usageLabel: "Test" },
-    usageModelFilter: { excludedModels: new Set() },
+    usageModelFilter: { excludedModels: new Set(), successfulRunsOnly: false },
   };
   const context = vm.createContext({
-    requestUsage: (_targets, _force, excluded) => {
-      selections.push([...excluded]);
+    requestUsage: (_targets, _force, excluded, successfulOnly) => {
+      selections.push([[...excluded], successfulOnly]);
       return new Promise(resolve => finishes.push(resolve));
     },
   });
@@ -219,12 +274,16 @@ test("an older model-filter response cannot overwrite the latest selection", asy
   const first = context.refreshUsageElement(element);
   element.usageModelFilter.excludedModels.add("gpt-6.1-sol");
   const second = context.refreshUsageElement(element);
+  element.usageModelFilter.successfulRunsOnly = true;
+  const third = context.refreshUsageElement(element);
+  finishes[2]({ estimatedCost: .5 });
+  await third;
   finishes[1]({ estimatedCost: 1 });
   await second;
   finishes[0]({ estimatedCost: 3 });
   await first;
-  assert.equal(element.textContent, "Cost: ≈$1.00");
-  assert.deepEqual(selections, [[], ["gpt-6.1-sol"]]);
+  assert.equal(element.textContent, "Cost: ≈$0.50");
+  assert.deepEqual(selections, [[[], false], [["gpt-6.1-sol"], false], [["gpt-6.1-sol"], true]]);
 });
 
 test("Cost opens a read-only dialog using the selection without clearing it", () => {
@@ -246,7 +305,9 @@ test("Cost opens a read-only dialog using the selection without clearing it", ()
   const firstFilter = context.state.dialog;
   assert.equal(context.dialogBody.children[1].modelFilter, firstFilter);
   firstFilter.excludedModels.add("gpt-6.1-sol");
+  firstFilter.successfulRunsOnly = true;
   context.openCostDialog([...selection.values()]);
   assert.notEqual(context.state.dialog, firstFilter);
   assert.equal(context.state.dialog.excludedModels.size, 0);
+  assert.equal(context.state.dialog.successfulRunsOnly, false);
 });

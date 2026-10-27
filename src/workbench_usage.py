@@ -558,7 +558,7 @@ class UsageIndex:
                 covered_stages[name].update(ids)
         return pricing_hints
 
-    def summary(self, targets, *, exclude_models=()):
+    def summary(self, targets, *, exclude_models=(), successful_runs_only=False):
         """All accounting on this path reads SQLite only."""
         selected = set()
         for target in targets:
@@ -569,22 +569,32 @@ class UsageIndex:
         with self.store.connect() as db:
             rows = db.execute("WITH selected(kind, path) AS (VALUES "
                 + ",".join("(?,?)" for _ in selected) + """ )
-                SELECT * FROM usage_invocations WHERE id IN (
+                SELECT i.*, COALESCE((
+                    SELECT MAX(CASE WHEN COALESCE(r.status, t.status)='succeeded' THEN 1 ELSE 0 END)
+                    FROM usage_scopes s LEFT JOIN runs r ON r.id=s.path
+                    LEFT JOIN usage_run_times t ON t.id=s.path
+                    WHERE s.invocation_id=i.id AND s.kind='run'
+                ), i.completed) AS successful
+                FROM usage_invocations i WHERE i.id IN (
                     SELECT invocation_id FROM usage_scopes JOIN selected USING (kind, path)
                 )""", parameters).fetchall() if selected else []
             run_times, run_members = self._run_timing_rows(db, selected, parameters)
         pricing_rows = rows
+        if successful_runs_only:
+            rows = [row for row in rows if row["successful"]]
+            run_times = [run for run in run_times if run["status"] == "succeeded"]
+        eligible_rows = rows
         excluded = set(exclude_models)
         rows = [row for row in rows if row["model"] not in excluded]
         total = self._totals(rows)
-        if excluded and not rows:
+        if (excluded or successful_runs_only) and not rows:
             total["estimatedCost"] = 0.0
         stage_rows = defaultdict(list)
         for row in rows:
             stage_rows[row["stage"]].append(row)
         stages = {stage: {"stage": stage, **self._totals(values)} for stage, values in stage_rows.items()}
-        hints = self._add_run_elapsed(total, stages, pricing_rows, rows, run_times, run_members, excluded)
-        if excluded and not rows and total["elapsedSeconds"] is None:
+        hints = self._add_run_elapsed(total, stages, eligible_rows, rows, run_times, run_members, excluded)
+        if (excluded or successful_runs_only) and not rows and total["elapsedSeconds"] is None:
             total["elapsedSeconds"] = 0.0
         if not rows and total["elapsedFallbackRuns"]:
             total["estimatedCost"] = None
@@ -604,6 +614,7 @@ class UsageIndex:
                 "pricingVersion": PRICING_VERSION, "pricingUrl": PRICING_URL,
                 "pricingRates": pricing,
                 "modelFilterApplied": bool(excluded),
+                "successfulRunsOnly": successful_runs_only,
                 "assumptions": "API-equivalent token estimate at current short-context rates; "
                 "30-minute cache writes; unreported cache writes use ordinary input rates. "
                 "Excludes tool fees and long-context premiums. "

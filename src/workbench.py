@@ -2050,7 +2050,10 @@ class WorkbenchApplication:
             model is not None and not isinstance(model, str) for model in excluded
         ):
             raise PlanError("excludeModels must be a list of model names (or null for unknown models)")
-        return self.usage.summary(targets, exclude_models=excluded)
+        successful_only = body.get("successfulRunsOnly", False)
+        if type(successful_only) is not bool:
+            raise PlanError("successfulRunsOnly must be a boolean")
+        return self.usage.summary(targets, exclude_models=excluded, successful_runs_only=successful_only)
 
 
 def _is_allowed_file(path: Path, roots: Iterable[Path]) -> bool:

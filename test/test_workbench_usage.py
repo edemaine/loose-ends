@@ -177,6 +177,74 @@ class UsageTests(unittest.TestCase):
                          {"Solve": 5, "Other run time": 5})
         self.assertEqual(self.index.refresh(), 0)
 
+    def test_successful_runs_filter_excludes_all_work_in_unsuccessful_and_active_runs(self):
+        succeeded = self.managed_run(started=100, finished=160)
+        self.archive(succeeded, "success", elapsed=30)
+        for status in ("partial", "failed", "canceled", "interrupted", "running"):
+            run = self.managed_run(status=status, finished=None if status == "running" else 200)
+            self.archive(run, status, elapsed=20, model="gpt-6-astra", stage="Review")
+        self.index.refresh()
+        # An installed copy must not let a failed run back into the result.
+        self.source("failed-installed-copy", events("failed"))
+        targets = [{"kind": "paper", "path": str(self.paper)},
+                   {"kind": "problem", "path": str(self.problem)}]
+        total = self.index.summary(targets, successful_runs_only=True)
+        self.assertEqual(total["invocations"], 1)
+        self.assertEqual(total["tokens"], USAGE)
+        self.assertAlmostEqual(total["estimatedCost"], .00191)
+        self.assertEqual(total["elapsedSeconds"], 60)
+        self.assertTrue(total["successfulRunsOnly"])
+        self.assertNotIn("Review", [stage["stage"] for stage in total["stages"]])
+        self.assertEqual(len(total["pricingRates"]), 3)  # Keep model and overhead choices.
+        filtered = self.index.summary(targets, successful_runs_only=True,
+                                      exclude_models=["gpt-6.1-sol", None])
+        self.assertEqual(filtered["invocations"], 0)
+        self.assertEqual(filtered["estimatedCost"], 0)
+        self.assertEqual(filtered["elapsedSeconds"], 0)
+        self.assertEqual(filtered["stages"], [])
+        self.assertEqual(self.index.summary(targets)["invocations"], 6)
+
+    def test_successful_filter_uses_live_status_then_retained_status_after_activity_deletion(self):
+        run = self.managed_run(status="running", finished=None)
+        self.archive(run, "live", elapsed=20)
+        self.index.refresh()
+        targets = [{"kind": "paper", "path": str(self.paper)}]
+        self.assertEqual(self.index.summary(targets, successful_runs_only=True)["invocations"], 0)
+        self.store.update_run(run["id"], status="succeeded", finished_at=150)
+        self.assertEqual(self.index.summary(targets, successful_runs_only=True)["elapsedSeconds"], 50)
+        self.index.refresh()
+        with self.store.connect() as db:
+            db.execute("DELETE FROM runs")
+            db.execute("DELETE FROM jobs")
+        reopened = UsageIndex(self.store, [self.papers], self.manuscripts)
+        with patch.object(Path, "open", side_effect=AssertionError("summary read logs")):
+            total = reopened.summary(targets, successful_runs_only=True)
+        self.assertEqual(total["invocations"], 1)
+        self.assertEqual(total["elapsedSeconds"], 50)
+
+    def test_successful_filter_for_legacy_turns_and_successful_runs_with_missing_usage(self):
+        self.source("complete", events("complete"))
+        self.source("incomplete", events("incomplete", None))
+        run = self.managed_run()
+        folder = self.archive(run, "missing")
+        (folder / "events").write_text(events("missing", None))
+        self.index.refresh()
+        total = self.index.summary([{"kind": "paper", "path": str(self.paper)}],
+                                   successful_runs_only=True)
+        self.assertEqual(total["invocations"], 2)
+        self.assertEqual(total["missingUsage"], 1)
+        self.assertEqual(total["elapsedSeconds"], 100)
+        self.assertEqual(total["missingElapsed"], 1)  # Legacy completed turn has no timing.
+
+    def test_successful_filter_keeps_successful_timing_only_runs(self):
+        self.managed_run(started=100, finished=140, action="analyze")
+        self.managed_run(status="failed", action="analyze")
+        self.index.refresh()
+        total = self.index.summary([{"kind": "paper", "path": str(self.paper)}],
+                                   successful_runs_only=True)
+        self.assertEqual(total["elapsedSeconds"], 40)
+        self.assertIsNone(total["estimatedCost"])
+
     def test_manuscript_run_fallback_is_not_charged_to_source_problem_or_one_draft(self):
         run = self.managed_run(action="write")
         manuscript = self.manuscripts / "new-result"
@@ -383,6 +451,10 @@ class UsageTests(unittest.TestCase):
             with self.subTest(excluded=excluded), self.assertRaises(PlanError):
                 app.usage_summary({"targets": targets, "excludeModels": excluded})
         self.assertTrue(app.usage_summary({"targets": targets, "excludeModels": [None]})["modelFilterApplied"])
+        for invalid in (None, "true", 1, [], {}):
+            with self.subTest(successfulRunsOnly=invalid), self.assertRaises(PlanError):
+                app.usage_summary({"targets": targets, "successfulRunsOnly": invalid})
+        self.assertTrue(app.usage_summary({"targets": targets, "successfulRunsOnly": True})["successfulRunsOnly"])
 
     @unittest.skipUnless(os.name == "nt", "Windows/Cygwin interoperability")
     def test_windows_and_cygwin_paths_share_a_scope_key(self):

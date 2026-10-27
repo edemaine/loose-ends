@@ -891,7 +891,8 @@ function usagePanel(scopes) {
   const panel = node("section", "panel usage-panel");
   panel.append(node("h2", "", "Usage"));
   const totals = node("div", "usage-totals");
-  scopes.forEach(({ label, targets }) => totals.append(usageSummary(targets, label)));
+  const modelFilter = { excludedModels: new Set(), successfulRunsOnly: false };
+  scopes.forEach(({ label, targets }) => totals.append(usageSummary(targets, label, modelFilter)));
   panel.append(totals);
   return panel;
 }
@@ -916,10 +917,12 @@ function costButton(scopes) {
   return control;
 }
 
-async function requestUsage(targets, force = false, excludedModels = []) {
+async function requestUsage(targets, force = false, excludedModels = [], successfulRunsOnly = false) {
   const excluded = [...excludedModels].sort((a, b) => (a ?? "").localeCompare(b ?? ""));
-  const body = excluded.length ? { targets, excludeModels: excluded } : { targets };
-  const key = JSON.stringify(excluded.length ? body : targets);
+  const body = { targets };
+  if (excluded.length) body.excludeModels = excluded;
+  if (successfulRunsOnly) body.successfulRunsOnly = true;
+  const key = JSON.stringify(excluded.length || successfulRunsOnly ? body : targets);
   const cached = state.usageCache.get(key);
   if (!force && cached && Date.now() - cached.time < 15000) return cached.value;
   if (!state.usageLoads.has(key)) {
@@ -983,9 +986,9 @@ function usageTable(value, label) {
       const reported = item.reported[key];
       const known = item.invocations - item.missingUsage;
       const partial = reported > 0 && reported < known;
-      const emptySelection = value.modelFilterApplied && !item.invocations && !item.timingOnly;
+      const emptySelection = (value.modelFilterApplied || value.successfulRunsOnly) && !item.invocations && !item.timingOnly;
       const cell = node("td", "", reported ? `${item.tokens[key].toLocaleString()}${partial ? "*" : ""}` : emptySelection ? "0" : "—");
-      cell.title = reported ? partial ? `Reported for ${reported} of ${known} turns with usage` : "Reported tokens" : emptySelection ? "No turns for selected models" : "Unreported";
+      cell.title = reported ? partial ? `Reported for ${reported} of ${known} turns with usage` : "Reported tokens" : emptySelection ? "No turns match the selected filters" : "Unreported";
       row.append(cell);
     }
     row.append(node("td", "", item.timingOnly ? "—" : usageCostLabel(item)));
@@ -1062,7 +1065,26 @@ function usagePricingTable(pricing, modelFilter = null) {
 function setUsageModelIncluded(modelFilter, model, included) {
   if (included) modelFilter.excludedModels.delete(model);
   else modelFilter.excludedModels.add(model);
-  dialogBody.querySelectorAll("[data-usage-targets]").forEach(element => {
+  refreshUsageFilters(modelFilter);
+}
+
+function usageRunFilter(modelFilter) {
+  const label = node("label", "usage-model-filter");
+  const input = node("input");
+  input.type = "checkbox";
+  input.checked = modelFilter.successfulRunsOnly;
+  input.dataset.usageSuccessfulRuns = "true";
+  input.addEventListener("change", () => {
+    modelFilter.successfulRunsOnly = input.checked;
+    refreshUsageFilters(modelFilter);
+  });
+  label.title = "Exclude unsuccessful and active runs. Older logs without run status use completed turns.";
+  label.append(input, node("span", "", "Successful runs only"));
+  return label;
+}
+
+function refreshUsageFilters(modelFilter) {
+  document.querySelectorAll("[data-usage-targets]").forEach(element => {
     if (element.usageModelFilter === modelFilter) {
       element.usageValue = null; // Also synchronize duplicate model rows across tiers.
       refreshUsageElement(element);
@@ -1075,7 +1097,8 @@ async function refreshUsageElement(element, force = false) {
   const targets = JSON.parse(element.dataset.usageTargets);
   const requestId = element.usageRequestId = (element.usageRequestId || 0) + 1;
   try {
-    const value = await requestUsage(targets, force, element.usageModelFilter?.excludedModels);
+    const value = await requestUsage(targets, force, element.usageModelFilter?.excludedModels,
+      element.usageModelFilter?.successfulRunsOnly);
     if (!element.isConnected || element.usageRequestId !== requestId) return;
     if (element.usageValue === value) return;
     element.usageValue = value;
@@ -1089,9 +1112,12 @@ async function refreshUsageElement(element, force = false) {
         + (value.indexError ? ` Index update failed: ${value.indexError}` : "");
       return;
     }
-    const focusedModel = element.querySelector("input:focus")?.dataset.usageModel;
+    const focusedInput = element.querySelector("input:focus");
+    const focusedModel = focusedInput?.dataset.usageModel;
+    const focusedRunFilter = focusedInput?.dataset.usageSuccessfulRuns;
     const expanded = element.querySelector("details")?.open || false;
-    const label = element.dataset.usageLabel + (value.modelFilterApplied ? " · selected models" : "");
+    const label = element.dataset.usageLabel + (value.modelFilterApplied ? " · selected models" : "")
+      + (value.successfulRunsOnly ? " · successful runs only" : "");
     element.replaceChildren(usageTable(value, label));
     const coverage = [];
     if (value.indexing) coverage.push("Indexing saved logs; totals may grow.");
@@ -1104,6 +1130,7 @@ async function refreshUsageElement(element, force = false) {
     const details = node("details", "usage-breakdown");
     details.open = expanded;
     details.append(node("summary", "", "Pricing details"));
+    if (element.usageModelFilter) details.append(usageRunFilter(element.usageModelFilter));
     details.append(node("p", "muted", "Cache columns are included in input; reasoning is included in output. — means unreported; * means partially reported. Manuscript work is counted separately from source papers and problems."));
     details.append(node("p", "muted", "Elapsed sums wall-clock durations, counting parallel runs separately. ≈ includes time from run start/end timestamps; + includes running work. The Unknown row covers time without an attributable stage, including setup and work outside timed invocations. Unknown model also covers unassigned run time, which cannot be split by model."));
     details.append(node("p", "muted", "Cache-write counts are copied from Codex logs. The CLI usage schema allows a default of zero; these logs cannot distinguish a measured zero from a missing upstream count."));
@@ -1123,6 +1150,8 @@ async function refreshUsageElement(element, force = false) {
     if (focusedModel !== undefined) {
       [...element.querySelectorAll("[data-usage-model]")]
         .find(input => input.dataset.usageModel === focusedModel)?.focus({ preventScroll: true });
+    } else if (focusedRunFilter) {
+      element.querySelector("[data-usage-successful-runs]")?.focus({ preventScroll: true });
     }
   } catch (error) {
     if (!element.isConnected || element.usageRequestId !== requestId) return;
@@ -1141,7 +1170,7 @@ function refreshVisibleUsage(force = false) {
 }
 
 function openCostDialog(values, scopes = null) {
-  const modelFilter = { kind: "cost", excludedModels: new Set() };
+  const modelFilter = { kind: "cost", excludedModels: new Set(), successfulRunsOnly: false };
   state.dialog = modelFilter;
   dialogEyebrow.textContent = scopes ? "Usage" : "Selected items";
   dialogTitle.textContent = "Tokens and estimated cost";
