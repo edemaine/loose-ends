@@ -27,6 +27,10 @@ JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
 _WORKER_JOB_HANDLE = None
 
 
+def _memory_enforcement_supported() -> bool:
+    return os.name == "nt" or sys.platform.startswith("linux")
+
+
 class _IO_COUNTERS(ctypes.Structure):
     _fields_ = [
         ("ReadOperationCount", ctypes.c_ulonglong),
@@ -275,10 +279,6 @@ class QueueMemoryController:
                 )
             return
         if os.name != "nt":
-            self.error = (
-                "worker memory enforcement requires Windows Job Objects or "
-                "a delegated Linux cgroup v2"
-            )
             return
         try:
             self._kernel32 = _configure_kernel32()
@@ -568,7 +568,7 @@ class QueueMemoryController:
             per_worker_limit_bytes(settings, self.physical_bytes)
         )
         if not self.available:
-            if desired is None:
+            if desired is None or not _memory_enforcement_supported():
                 return None
             raise OSError(self.error or "worker memory enforcement is unavailable")
         try:
@@ -612,9 +612,16 @@ class QueueMemoryController:
             "peakBytes": self._observed_peak or None,
             "pending": False,
             "error": self.error,
+            "warning": None,
         }
         if not self.available:
-            if (os.name == "nt" or sys.platform.startswith("linux")) and desired is not None:
+            if not _memory_enforcement_supported():
+                platform = "macOS" if sys.platform == "darwin" else "this platform"
+                snapshot["warning"] = (
+                    f"Worker memory limits are unavailable on {platform}; "
+                    "workers will run without a memory limit."
+                )
+            elif desired is not None:
                 snapshot["pending"] = True
             return snapshot
         try:

@@ -1,0 +1,112 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="704" viewBox="0 0 960 704" role="img" aria-labelledby="title description">
+  <title id="title">Loose Ends research workflow</title>
+  <desc id="description">Fetch or import papers and analyze them. Optionally triage open problems to prioritize them and suggest approaches, and search later literature for solutions, useful techniques, and leads. Attempt solutions and independently review them, repeating with prior attempts and critiques. Select full or partial results from one or more problems to write a LaTeX manuscript with an introduction, related work, and results summary. Independently review and revise the manuscript until the critic says it is ready for expert human review.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#f2c66d"/>
+    </marker>
+    <style>
+      text { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #1c2c3b; }
+      .stage { font-size: 16px; font-weight: 700; letter-spacing: 1.5px; fill: #f0e4ff; }
+      .heading { font-size: 21px; font-weight: bold; }
+      .detail { font-size: 17px; fill: #4a5c6e; }
+      .optional { font-size: 14px; fill: #4a5c6e; }
+      .note { font-size: 16px; fill: #e1d4ed; }
+      .box { fill: #eee3fa; stroke: #b8a7cb; stroke-width: 1.5; }
+      .optional-border { fill: none; stroke: #f2c66d; stroke-width: 1.5; stroke-dasharray: 5 5; stroke-dashoffset: 5; }
+      .flow, .bridge-inside, .bridge-outside { fill: none; stroke: #f2c66d; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+      .flow { marker-end: url(#arrow); }
+      .bridge-outside { stroke: #8a5a12; }
+    </style>
+  </defs>
+
+  <rect width="960" height="704" rx="12" fill="#fff"/>
+
+  <!-- Survey: paper-level context becomes problem-level research. -->
+  <rect x="12" y="12" width="936" height="188" rx="12" fill="#3e2b56"/>
+  <text class="stage" x="32" y="43">1 · SURVEY</text>
+  <g text-anchor="middle">
+    <rect class="box" x="32" y="64" width="200" height="108" rx="10"/>
+    <text class="heading" x="132" y="98">Fetch / import</text>
+    <text class="detail" x="132" y="128">PDF, source,</text>
+    <text class="detail" x="132" y="151">and metadata</text>
+
+    <rect class="box" x="264" y="64" width="200" height="108" rx="10"/>
+    <text class="heading" x="364" y="98">Analyze paper</text>
+    <text class="detail" x="364" y="128">Results, techniques,</text>
+    <text class="detail" x="364" y="151">and open problems</text>
+
+    <rect class="box" x="496" y="64" width="200" height="108" rx="10" stroke-dasharray="5 5"/>
+    <rect class="optional-border" x="496" y="64" width="200" height="108" rx="10"/>
+    <text class="heading" x="596" y="98">Triage problems</text>
+    <text class="detail" x="596" y="125">Prioritize problems</text>
+    <text class="detail" x="596" y="146">Suggest approaches</text>
+    <text class="optional" x="596" y="164">(optional)</text>
+
+    <rect class="box" x="728" y="64" width="200" height="108" rx="10" stroke-dasharray="5 5"/>
+    <rect class="optional-border" x="728" y="64" width="200" height="108" rx="10"/>
+    <text class="heading" x="828" y="98">Literature search</text>
+    <text class="detail" x="828" y="125">Check for later solutions</text>
+    <text class="detail" x="828" y="146">Find techniques / leads</text>
+    <text class="optional" x="828" y="164">(optional)</text>
+  </g>
+  <path class="flow" d="M232 118 H262"/>
+  <path class="flow" d="M464 118 H494"/>
+  <path class="flow" d="M696 118 H726"/>
+
+  <!-- Research: every new attempt can use the complete history. -->
+  <rect x="12" y="238" width="936" height="206" rx="12" fill="#3e2b56"/>
+  <text class="stage" x="32" y="266">2 · SOLVE</text>
+  <path class="bridge-inside" d="M828 172 V200"/>
+  <path class="bridge-outside" d="M828 200 V216 H184 V238"/>
+  <path class="flow" d="M184 238 V278"/>
+  <g text-anchor="middle">
+    <rect class="box" x="64" y="280" width="240" height="100" rx="10"/>
+    <text class="heading" x="184" y="315">Attempt solution</text>
+    <text class="detail" x="184" y="345">Prove, disprove, compute,</text>
+    <text class="detail" x="184" y="368">or change approach</text>
+
+    <rect class="box" x="392" y="280" width="240" height="100" rx="10"/>
+    <text class="heading" x="512" y="315">Solution review</text>
+    <text class="detail" x="512" y="345">Correctness, coverage,</text>
+    <text class="detail" x="512" y="368">importance, and gaps</text>
+
+    <rect class="box" x="720" y="280" width="208" height="100" rx="10"/>
+    <text class="heading" x="824" y="315">Select results</text>
+    <text class="detail" x="824" y="345">One or more problems</text>
+    <text class="detail" x="824" y="368">(full or partial results)</text>
+  </g>
+  <path class="flow" d="M304 330 H390"/>
+  <path class="flow" d="M632 330 H718"/>
+  <path class="flow" d="M512 380 V420 H184 V382"/>
+  <text class="note" text-anchor="middle" x="348" y="407">Try again with prior attempts + critiques</text>
+
+  <!-- Manuscripts: presentation revisions loop; research gaps stop the run. -->
+  <rect x="12" y="486" width="936" height="206" rx="12" fill="#3e2b56"/>
+  <text class="stage" x="32" y="514">3 · WRITE</text>
+  <path class="bridge-inside" d="M824 380 V444"/>
+  <path class="bridge-outside" d="M824 444 V464 H184 V486"/>
+  <path class="flow" d="M184 486 V526"/>
+  <g text-anchor="middle">
+    <rect class="box" x="64" y="528" width="240" height="100" rx="10"/>
+    <text class="heading" x="184" y="553">Write / revise</text>
+    <text class="detail" x="184" y="578">LaTeX manuscript with</text>
+    <text class="detail" x="184" y="599">intro, related work,</text>
+    <text class="detail" x="184" y="620">and results summary</text>
+
+    <rect class="box" x="392" y="528" width="240" height="100" rx="10"/>
+    <text class="heading" x="512" y="563">Manuscript review</text>
+    <text class="detail" x="512" y="593">Proofs, novelty, citations,</text>
+    <text class="detail" x="512" y="616">and presentation</text>
+
+    <rect class="box" x="720" y="528" width="208" height="100" rx="10"/>
+    <text class="heading" x="824" y="553">Expert human</text>
+    <text class="heading" x="824" y="576">review</text>
+    <text class="detail" x="824" y="600">When critic says</text>
+    <text class="detail" x="824" y="620">manuscript is ready</text>
+  </g>
+  <path class="flow" d="M304 578 H390"/>
+  <path class="flow" d="M632 578 H718"/>
+  <path class="flow" d="M512 628 V668 H184 V630"/>
+  <text class="note" text-anchor="middle" x="348" y="655">Revise using the critique</text>
+</svg>
