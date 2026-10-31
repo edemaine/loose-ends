@@ -403,6 +403,7 @@ def paper_timeline(
             _modified_timestamp(paper),
             _modified_timestamp(paper / "metadata.json"),
             _modified_timestamp(paper / "analysis" / "manifest.json"),
+            _modified_timestamp(paper / "references" / "references.json"),
         ),
     }
 
