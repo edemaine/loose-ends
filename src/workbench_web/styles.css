@@ -160,7 +160,7 @@ button { color: inherit; }
 .filter-toggle input { width: 11px; height: 11px; margin: 0; accent-color: var(--accent); }
 .filter-footer { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--muted); font-size: 9px; }
 .filter-reset { border: 0; background: transparent; color: var(--accent); padding: 2px; font-size: 9px; font-weight: 800; cursor: pointer; }
-.problem-scroll, .manuscript-scroll { flex: 1 1 auto; min-height: 100px; overflow: auto; margin-top: 4px; padding-right: 2px; scrollbar-gutter: stable; }
+.problem-scroll, .paper-scroll, .manuscript-scroll, .activity-scroll { flex: 1 1 auto; min-height: 100px; overflow: auto; margin-top: 4px; padding-right: 2px; scrollbar-gutter: stable; }
 .paper-heading { display: flex; align-items: center; justify-content: space-between; gap: 5px; margin-top: 9px; color: var(--accent); letter-spacing: .04em; text-transform: none; }
 .paper-heading-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .attempt-switcher, .draft-switcher { flex: none; max-height: 155px; overflow: hidden; margin-top: 5px; padding-top: 2px; border-top: 1px solid var(--line); }
@@ -203,6 +203,7 @@ button { color: inherit; }
 .attempt-tag.known { background: var(--known-bg); color: var(--known); }
 
 .eyebrow { color: var(--accent); font-size: 10px; font-weight: 850; letter-spacing: .15em; text-transform: uppercase; }
+.inline-markdown .katex { letter-spacing: normal; text-transform: none; }
 .hero { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 16px; }
 .hero-copy { min-width: 0; }
 .hero h1 { margin: 5px 0 6px; color: var(--heading); font: 760 clamp(26px, 3.5vw, 39px)/1.08 ui-serif, Georgia, serif; letter-spacing: -.03em; }
@@ -300,6 +301,8 @@ button { color: inherit; }
 .related-tasks[hidden] { display: none; }
 .problem-manuscripts { margin: 0 0 16px; box-shadow: none; }
 .paper-problems { margin: 0 0 16px; box-shadow: none; }
+.paper-problems .attempt-tags { margin-top: 6px; gap: 4px; }
+.paper-problems .attempt-tag { padding: 2px 6px; font-size: 10px; }
 .related-tasks-heading { display: flex; align-items: center; gap: 6px; margin-bottom: 7px; }
 .related-tasks-heading h2 { margin: 0; font-size: 14px; }
 .related-task-list { display: grid; gap: 4px; }
@@ -419,6 +422,27 @@ button { color: inherit; }
 .selection-bar .button:hover, .selection-bar .button:focus-visible { border-color: rgba(255,255,255,.9); background: rgba(255,255,255,.22); transform: translateY(-1px); outline: none; }
 .selection-bar .button:active { background: rgba(255,255,255,.3); transform: translateY(0); }
 .selection-bar strong { margin-right: auto; }
+.usage-panel h2 { margin: 0 0 10px; }
+.usage-totals { display: grid; gap: 12px; }
+.usage-summary { min-width: 0; }
+.usage-summary > strong { font-size: 12px; color: var(--heading); }
+.usage-summary p { margin: 5px 0; font-size: 12px; }
+.usage-breakdown { margin-top: 5px; font-size: 11px; }
+.usage-breakdown > summary { cursor: pointer; color: var(--accent); }
+.usage-breakdown .usage-table-scroll { margin: 10px 0; }
+.usage-model-filter { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+.usage-model-filter input { margin: 0; accent-color: var(--accent); }
+.usage-model-excluded { color: var(--muted); }
+.usage-table-scroll { overflow-x: auto; }
+.usage-stage-table { width: 100%; border-collapse: collapse; font-size: 11px; font-variant-numeric: tabular-nums; }
+.usage-stage-table caption { padding-bottom: 7px; text-align: left; color: var(--heading); font-weight: 750; }
+.usage-stage-table th, .usage-stage-table td { padding: 6px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; }
+.usage-stage-table th:first-child, .usage-stage-table td:first-child { text-align: left; }
+.usage-stage-table tbody th { font-weight: 400; }
+.usage-stage-table thead { color: var(--muted); }
+.usage-stage-table tfoot { color: var(--heading); font-weight: 750; }
+.usage-stage-table tfoot th, .usage-stage-table tfoot td { border-bottom: 0; border-top: 2px solid var(--line); }
+.usage-breakdown > a { overflow-wrap: anywhere; }
 
 .task-dialog { width: min(850px, calc(100vw - 30px)); max-height: calc(100vh - 34px); border: 0; border-radius: 16px; padding: 0; background: var(--panel); color: var(--ink); box-shadow: 0 35px 90px var(--dialog-shadow); }
 .task-dialog::backdrop { background: var(--backdrop); backdrop-filter: blur(3px); }

@@ -56,9 +56,29 @@ class TranscriptTests(unittest.TestCase):
             self.assertEqual((folder / "events").read_text(encoding="utf-8"), '工具\n')
             self.assertEqual((folder / "prompt.txt").read_text(), "Do the task")
             self.assertEqual(json.loads((folder / "source.json").read_text())["stage"], "Review")
+            timing = json.loads((folder / "source.json").read_text())
+            self.assertGreaterEqual(timing["elapsed_seconds"], 0)
+            self.assertGreaterEqual(timing["finished_at"], timing["started_at"])
             handler = self.handler(root, {"log_path": str(root / "console.log"), "status": "failed"})
             handler._send_codex("id", "")
             self.assertEqual(handler.result["transcripts"][0]["label"], "Codex 1 · Review")
+
+    def test_elapsed_uses_monotonic_time_and_preserves_return_value(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+
+            @record_transcript
+            def invoke(**kwargs):
+                (root / "events.jsonl").write_text('{"type":"turn.completed"}\n')
+                return "result"
+
+            with patch.dict(os.environ, {TRANSCRIPT_ENV: str(root / "codex")}), \
+                 patch("codex_transcripts.time.time", side_effect=[100, 200]), \
+                 patch("codex_transcripts.time.monotonic", side_effect=[10, 15]):
+                self.assertEqual(invoke(workspace=root, prompt="p"), "result")
+            folder = next((root / "codex").iterdir())
+            timing = json.loads((folder / "source.json").read_text())
+            self.assertEqual((timing["started_at"], timing["finished_at"], timing["elapsed_seconds"]), (100, 200, 5))
 
     def handler(self, root, run):
         handler = object.__new__(WorkbenchHandler)

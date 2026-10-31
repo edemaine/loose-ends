@@ -2,11 +2,13 @@ from contextlib import redirect_stderr, redirect_stdout
 from io import BytesIO, StringIO
 from pathlib import Path
 import json
+import ssl
 import sys
 import tarfile
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
+from urllib.error import HTTPError, URLError
 import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -218,6 +220,78 @@ class RequestPacerTests(unittest.TestCase):
     def test_rejects_negative_interval(self):
         with self.assertRaises(ValueError):
             RequestPacer(-1)
+
+
+class OpenArxivUrlTests(unittest.TestCase):
+    def test_macos_certificate_failure_has_version_specific_install_hint(self):
+        url = "https://arxiv.org/pdf/1706.03762"
+        certificate_error = ssl.SSLCertVerificationError(
+            1, "certificate verify failed: unable to get local issuer certificate"
+        )
+        for error in (
+            certificate_error,
+            URLError(certificate_error),
+            URLError("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed"),
+        ):
+            with (
+                self.subTest(error=error),
+                patch.object(download_arxiv.sys, "platform", "darwin"),
+                patch.object(download_arxiv, "urlopen", side_effect=error),
+                self.assertRaises(download_arxiv.DownloadError) as caught,
+            ):
+                download_arxiv.open_arxiv_url(url, pacer=RequestPacer(0))
+            message = str(caught.exception)
+            self.assertIn(url, message)
+            self.assertIn(str(error), message)
+            self.assertIn("HTTPS certificate verification failed", message)
+            version = f"{sys.version_info.major}.{sys.version_info.minor}"
+            self.assertIn(
+                f"/Applications/Python {version}/Install Certificates.command",
+                message,
+            )
+            self.assertIn("If you installed Python from python.org", message)
+            self.assertIn("If that file is absent", message)
+            self.assertIs(caught.exception.__cause__, error)
+
+    def test_non_macos_certificate_failure_has_generic_certificate_hint(self):
+        error = URLError(ssl.SSLCertVerificationError(1, "untrusted certificate"))
+        with (
+            patch.object(download_arxiv.sys, "platform", "linux"),
+            patch.object(download_arxiv, "urlopen", side_effect=error),
+            self.assertRaises(download_arxiv.DownloadError) as caught,
+        ):
+            download_arxiv.open_arxiv_url(
+                download_arxiv.API_URL, pacer=RequestPacer(0)
+            )
+        self.assertIn("trusted CA certificates", str(caught.exception))
+        self.assertNotIn("Install Certificates.command", str(caught.exception))
+
+    def test_other_network_errors_keep_original_message(self):
+        url = download_arxiv.API_URL
+        for error in (
+            URLError("name resolution failed"),
+            TimeoutError("timed out"),
+            ssl.SSLError(1, "TLS handshake failed"),
+        ):
+            with (
+                self.subTest(error=error),
+                patch.object(download_arxiv.sys, "platform", "darwin"),
+                patch.object(download_arxiv, "urlopen", side_effect=error),
+                self.assertRaises(download_arxiv.DownloadError) as caught,
+            ):
+                download_arxiv.open_arxiv_url(url, pacer=RequestPacer(0))
+            self.assertEqual(str(caught.exception), f"could not download {url}: {error}")
+
+    def test_http_errors_keep_status_for_version_fallback(self):
+        url = "https://arxiv.org/src/1706.03762v7"
+        error = HTTPError(url, 404, "Not Found", {}, None)
+        with (
+            patch.object(download_arxiv, "urlopen", side_effect=error),
+            self.assertRaises(download_arxiv.ArxivHTTPError) as caught,
+        ):
+            download_arxiv.open_arxiv_url(url, pacer=RequestPacer(0))
+        self.assertEqual(caught.exception.status, 404)
+        self.assertEqual(str(caught.exception), f"arXiv returned HTTP 404 for {url}: Not Found")
 
 
 class MetadataTests(unittest.TestCase):

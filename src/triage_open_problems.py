@@ -290,6 +290,7 @@ def _install_triage(
             "requested_model": options.model,
             "requested_reasoning_effort": options.reasoning_effort,
             "requested_fast_mode": options.fast,
+            "requested_service_tier": options.service_tier,
             "classification": entry["classification"],
             "suggestion_count": len(entry["suggested_approaches"]),
         }
@@ -612,6 +613,8 @@ def main(argv: list[str] | None = None) -> int:
             stale.append(problem)
 
     if args.dry_run:
+        if stale:
+            codex_cli.report_codex_home_warnings()
         for problem in stale:
             print(
                 f"Would triage: {problem.paper_directory} {problem.id}: "
@@ -730,6 +733,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         if options.fast:
             solver_arguments.append("--fast")
+        if options.ultrafast:
+            solver_arguments.append("--ultrafast")
         print(
             f"Feeding {len(selected)} current triage item(s) into the solver."
         )

@@ -9,6 +9,8 @@ from unittest.mock import call, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import codex_cli
+import open_problem_common
+from validation import common as validation_common
 from validation import solver as solver_validation
 
 
@@ -33,6 +35,69 @@ def solver_result(claim_id: str = "C-001", artifacts=None) -> dict:
 
 
 class ValidationTests(unittest.TestCase):
+    def test_rejects_control_characters_in_markdown_and_nested_json(self):
+        controls = [chr(code) for code in range(0xA0)
+                    if code < 0x20 or code >= 0x7F]
+        with TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            markdown = workspace / "attempt.md"
+            result_path = workspace / "agent-result.json"
+            for control in controls:
+                if control in "\t\n\r":
+                    continue
+                with self.subTest(code=f"U+{ord(control):04X}"):
+                    text = f"# Attempt\n\n## C-001\n\n{control}arepsilon\n"
+                    markdown.write_text(text, encoding="utf-8")
+                    result = solver_result()
+                    result["checkable_claims"][0]["support"] = f"{control}arepsilon"
+                    result_path.write_text(json.dumps(result), encoding="utf-8")
+
+                    report = solver_validation.validate(workspace=workspace, expectations={})
+
+                    self.assertFalse(report.valid)
+                    issues = [issue for issue in report.issues
+                              if issue.code == "E_CONTROL_CHARACTER"]
+                    self.assertEqual({issue.path for issue in issues}, {
+                        "attempt.md", "agent-result.json#/checkable_claims/0/support",
+                    })
+                    self.assertTrue(all(f"U+{ord(control):04X}" in issue.message
+                                        for issue in issues))
+                    self.assertTrue(report.repairable)
+                    with self.assertRaisesRegex(codex_cli.CodexError, "E_CONTROL_CHARACTER"):
+                        open_problem_common.read_json(result_path)
+                    with self.assertRaisesRegex(codex_cli.CodexError, "E_CONTROL_CHARACTER"):
+                        open_problem_common.validate_markdown(markdown, description="attempt")
+
+    def test_preserves_latex_backslashes_and_normal_text_whitespace(self):
+        text = "# Attempt\r\n\r\n## C-001\r\n\r\n\t" + (
+            r"\(\varepsilon + \theta + \beta + \frac{a}{b} + \rho\)"
+        ) + "\n"
+        with TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            markdown = workspace / "attempt.md"
+            markdown.write_bytes(text.encode("utf-8"))
+            result = solver_result()
+            result["checkable_claims"][0]["support"] = text
+            result_path = workspace / "agent-result.json"
+            result_path.write_text(json.dumps(result), encoding="utf-8")
+
+            report = solver_validation.validate(workspace=workspace, expectations={})
+
+            self.assertTrue(report.valid, report.failure_message())
+            self.assertEqual(open_problem_common.read_json(result_path), result)
+            self.assertIn(r"\varepsilon", open_problem_common.validate_markdown(
+                markdown, description="attempt",
+            ))
+
+    def test_reports_control_characters_in_json_keys(self):
+        reporter = validation_common.Reporter()
+        validation_common.validate_control_characters(
+            {"bad\vkey": "text"}, reporter, path="agent-result.json#",
+        )
+        self.assertEqual(len(reporter.issues), 1)
+        self.assertIn("U+000B", reporter.issues[0].message)
+        self.assertNotIn("\v", reporter.issues[0].render())
+
     def test_shared_validation_prompt_is_appended(self):
         instructions = codex_cli.DEFAULT_VALIDATION_PROMPT_PATH.read_text(
             encoding="utf-8"
