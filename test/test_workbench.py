@@ -2539,7 +2539,8 @@ class WorkbenchStoreTests(unittest.TestCase):
                 container = controller.prepare_run("run-1", settings)
 
         self.assertFalse(controller.available)
-        self.assertIn("requires Windows Job Objects", controller.error)
+        self.assertIsNone(controller.error)
+        self.assertIn("Worker memory limits are unavailable on macOS", snapshot["warning"])
         self.assertFalse(snapshot["pending"])
         self.assertIsNone(container)
 
