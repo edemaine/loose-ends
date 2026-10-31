@@ -1863,6 +1863,244 @@ class WorkbenchPlanningTests(unittest.TestCase):
         self.assertEqual(preview["exitCode"], 2)
         self.assertIn("Standard error:\ninvalid target", preview["output"])
 
+    @patch("workbench_tasks.subprocess.run")
+    def test_plan_preview_reports_home_warnings_before_start(self, run):
+        run.return_value = Mock(returncode=0, stdout="Would run.\n", stderr="")
+        with TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            (home / ".codex").mkdir()
+            for action, inherited, selected, expected in (
+                ("solve", "", None, None),
+                ("solve", str(home), None, None),
+                ("solve", "", str(home), None),
+                ("solve", str(home), str(home / "missing"), "not an existing directory"),
+                ("download", "", None, None),
+            ):
+                with self.subTest(action=action, inherited=inherited, selected=selected):
+                    plan = fake_plan([sys.executable, "tool.py"])
+                    plan["action"] = action
+                    plan["warnings"] = ["Existing warning"]
+                    plan["options"] = {"codexHome": selected} if selected else {}
+                    with (
+                        patch.dict(os.environ, {"CODEX_HOME": inherited, "USERPROFILE": ""}),
+                        patch("codex_cli.Path.home", return_value=home),
+                    ):
+                        populate_dry_run_previews(plan)
+                    self.assertEqual(plan["warnings"][0], "Existing warning")
+                    warnings = plan["warnings"][1:]
+                    if expected:
+                        self.assertTrue(any(expected in warning for warning in warnings))
+                    else:
+                        self.assertEqual(warnings, [])
+                    self.assertEqual(plan["units"][0]["dryRun"]["status"], "ok")
+
+    def test_metadata_preview_captures_missing_home_warning_from_cli(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = make_paper(root)
+            plan = build_plan(
+                {"action": "metadata", "targets": [{"kind": "paper", "path": str(paper)}],
+                 "options": {"codexHome": str(root / "missing account")}},
+                project_root=PROJECT_ROOT, allowed_roots=[root],
+                manuscripts=root / "manuscripts", catalog_version=1,
+            )
+            populate_dry_run_previews(plan)
+            preview = plan["units"][0]["dryRun"]
+            self.assertEqual(preview["status"], "ok")
+            self.assertIn("Would ask Codex", preview["output"])
+            self.assertIn("Warning: Codex home is not an existing directory", preview["output"])
+            self.assertIn(str(root / "missing account"), preview["output"])
+            self.assertFalse((root / "missing account").exists())
+
+
+class WorkbenchEditTests(unittest.TestCase):
+    def setUp(self):
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.papers = [make_paper(self.root / str(index)) for index in range(3)]
+        self.app = object.__new__(workbench.WorkbenchApplication)
+        self.app.store = WorkbenchStore(self.root / "state" / "workbench.sqlite3")
+        self.app.allowed_roots = [self.root]
+        self.app.paper_output_roots = [self.root]
+        self.app.manuscripts = self.root / "manuscripts"
+        self.app.catalog = SimpleNamespace(version=1)
+        self.app.plan_lock = threading.Lock()
+        self.app.plans = {}
+        self.app.scheduler = Mock()
+        self.app.hub = Mock()
+        preview = patch("workbench.populate_dry_run_previews")
+        self.preview = preview.start()
+        self.addCleanup(preview.stop)
+
+    def create_job(self, action="analyze", targets=None, options=None):
+        request = {
+            "action": action,
+            "targets": targets if targets is not None else [
+                {"kind": "paper", "path": str(paper)} for paper in self.papers
+            ],
+            "options": options if options is not None else {
+                "codexHome": str(self.root / "old account"), "model": "old-model", "prompt": "Old direction",
+            },
+        }
+        plan = build_plan(
+            request, project_root=PROJECT_ROOT, allowed_roots=self.app.allowed_roots,
+            manuscripts=self.app.manuscripts, catalog_version=1,
+            paper_roots=self.app.paper_output_roots,
+        )
+        return self.app.store.create_job(request, plan)
+
+    def preview_edit(self, job, options):
+        return self.app.create_job_edit_plan(job["id"], {
+            "options": options, "settingsVersion": job["settings_version"],
+            "runIds": [run["id"] for run in job["runs"] if run["status"] == "queued"],
+        })
+
+    def test_edit_preserves_started_history_and_retry_settings(self):
+        job = self.create_job()
+        store = self.app.store
+        first, second, third = job["runs"]
+        store.mark_starting(first["id"])
+        store.update_run(second["id"], status="succeeded")
+        before = store.get_job(job["id"])
+        options = {"codexHome": str(self.root / "new account"), "model": "new-model",
+                   "reasoningEffort": "high", "prompt": "New direction", "fast": True}
+        plan = self.preview_edit(before, options)
+        self.assertEqual(len(plan["units"]), 1)
+        self.assertEqual(plan["units"][0]["runId"], third["id"])
+        # Reviewing the edit does not change the queue.
+        self.assertEqual(store.get_job(job["id"]), before)
+        changed = self.app.confirm_job_edit(job["id"], plan["id"])
+        self.assertEqual(changed["runs"][:2], before["runs"][:2])
+        pending = changed["runs"][2]
+        self.assertEqual(pending["options"], options)
+        self.assertIn("new-model", pending["argv"])
+        self.assertIn("New direction", pending["argv"])
+        self.assertNotIn("old-model", pending["argv"])
+        self.assertEqual(pending["targets"], third["targets"])
+        self.assertEqual(pending["resources"], third["resources"])
+        self.assertEqual(changed["settings_version"], 1)
+        self.app.scheduler.schedule.assert_called_once()
+        self.app.hub.publish.assert_called_once_with("tasks.changed")
+        store.initialize()
+        self.assertEqual(store.get_run(first["id"])["options"], first["options"])
+        store.update_run(first["id"], status="failed")
+        store.update_run(third["id"], status="failed")
+        retry = store.retry_job(job["id"])
+        self.assertEqual([run["options"] for run in retry["runs"]], [first["options"], options])
+        self.assertEqual(store.retry_run(first["id"])["options"], first["options"])
+
+    def test_save_rejects_started_or_canceled_runs_without_partial_changes(self):
+        for status in ("starting", "canceled"):
+            with self.subTest(status=status):
+                job = self.create_job()
+                plan = self.preview_edit(job, {"model": "new-model"})
+                self.app.store.update_run(job["runs"][0]["id"], status=status)
+                before = self.app.store.get_job(job["id"])
+                with self.assertRaisesRegex(ValueError, "Pending runs or settings changed"):
+                    self.app.confirm_job_edit(job["id"], plan["id"])
+                self.assertEqual(self.app.store.get_job(job["id"]), before)
+                with self.assertRaisesRegex(ValueError, "Pending runs or settings changed"):
+                    self.preview_edit(job, {})
+
+    def test_save_rejects_another_editor_and_new_retries(self):
+        job = self.create_job()
+        first = self.preview_edit(job, {"model": "first-model"})
+        second = self.preview_edit(job, {"model": "second-model"})
+        self.app.confirm_job_edit(job["id"], first["id"])
+        before = self.app.store.get_job(job["id"])
+        with self.assertRaisesRegex(ValueError, "Pending runs or settings changed"):
+            self.app.confirm_job_edit(job["id"], second["id"])
+        self.assertEqual(self.app.store.get_job(job["id"]), before)
+        self.app.store.update_run(job["runs"][0]["id"], status="failed")
+        job = self.app.store.get_job(job["id"])
+        plan = self.preview_edit(job, {})
+        self.app.store.retry_run(job["runs"][0]["id"])
+        with self.assertRaisesRegex(ValueError, "Pending runs or settings changed"):
+            self.app.confirm_job_edit(job["id"], plan["id"])
+
+    def test_clear_overrides_returns_to_defaults(self):
+        job = self.create_job()
+        plan = self.preview_edit(job, {})
+        updated = self.app.confirm_job_edit(job["id"], plan["id"])
+        for run in updated["runs"]:
+            self.assertEqual(run["options"], {})
+            self.assertNotIn("--model", run["argv"])
+            self.assertNotIn("--prompt", run["argv"])
+            self.assertNotIn("Old direction", run["argv"])
+
+    def test_edit_plan_cannot_be_started_as_a_new_job_or_applied_to_another(self):
+        job = self.create_job()
+        plan = self.preview_edit(job, {})
+        with self.assertRaisesRegex(PlanError, "existing task"):
+            self.app.confirm_plan(plan["id"])
+        with self.assertRaisesRegex(PlanError, "does not edit this task"):
+            self.app.confirm_job_edit("another-job", plan["id"])
+        self.app.confirm_job_edit(job["id"], plan["id"])
+        with self.assertRaisesRegex(PlanError, "expired"):
+            self.app.confirm_job_edit(job["id"], plan["id"])
+
+    def test_edit_rejects_changes_to_task_structure(self):
+        job = self.create_job()
+        for options in ({"name": "new"}, {"papers": "1234.5678"}, {"priorityLevel": 2}):
+            with self.subTest(options=options), self.assertRaisesRegex(PlanError, "targets are fixed"):
+                self.preview_edit(job, options)
+
+    def test_download_keeps_ids_and_original_default_destination(self):
+        job = self.create_job("download", targets=[], options={"papers": "1706.03762\n2303.08774"})
+        self.app.paper_output_roots.insert(0, self.root / "new default")
+        plan = self.preview_edit(job, {"force": True})
+        updated = self.app.confirm_job_edit(job["id"], plan["id"])
+        original = job["runs"][0]
+        run = updated["runs"][0]
+        self.assertEqual(run["argv"], [*original["argv"], "--force"])
+        self.assertEqual(run["resources"], original["resources"])
+        self.app.store.update_run(run["id"], status="failed")
+        retry = self.app.store.retry_job(job["id"])
+        plan = self.preview_edit(retry, {"force": False})
+        changed_retry = self.app.confirm_job_edit(retry["id"], plan["id"])
+        self.assertEqual(changed_retry["runs"][0]["argv"], original["argv"])
+
+    def test_write_preserves_pinned_targets_and_manuscript_name(self):
+        attempt = self.papers[0] / "OP-001" / "attempt-001"
+        attempt.mkdir(parents=True)
+        common.write_json(attempt / "solver-result.json", {})
+        targets = [{"kind": "attempt", "path": str(attempt)},
+                   {"kind": "paper", "path": str(self.papers[1])}]
+        job = self.create_job("write", targets=targets, options={"name": "fixed-name"})
+        plan = self.preview_edit(job, {"model": "new-model", "reviewPrompt": "New critic direction"})
+        updated = self.app.confirm_job_edit(job["id"], plan["id"])
+        self.assertEqual(updated["runs"][0]["targets"], job["runs"][0]["targets"])
+        self.assertEqual(updated["runs"][0]["options"]["name"], "fixed-name")
+        self.assertIn("fixed-name", updated["runs"][0]["argv"])
+
+    def test_migration_snapshots_legacy_settings_once(self):
+        job = self.create_job()
+        store = self.app.store
+        with store.connect() as connection:
+            connection.execute("DROP TRIGGER runs_task_revision_UPDATE")
+            connection.execute("DROP TRIGGER jobs_task_revision_UPDATE")
+            connection.execute("ALTER TABLE runs DROP COLUMN options_json")
+            connection.execute("ALTER TABLE jobs DROP COLUMN settings_version")
+        store.initialize()
+        migrated = store.get_job(job["id"])
+        self.assertEqual(migrated["settings_version"], 0)
+        self.assertTrue(all(run["options"] == job["plan"]["options"] for run in migrated["runs"]))
+        plan = self.preview_edit(migrated, {"model": "new-model"})
+        self.app.confirm_job_edit(job["id"], plan["id"])
+        store.initialize()
+        self.assertEqual(store.get_run(job["runs"][0]["id"])["options"], {"model": "new-model"})
+
+    def test_worker_uses_run_account_instead_of_latest_job_settings(self):
+        account = str(self.root / "original account")
+        plan = fake_plan([sys.executable, "-c", "import os; print(os.environ['CODEX_HOME'])"])
+        plan["options"] = {"codexHome": str(self.root / "new account")}
+        plan["units"][0]["options"] = {"codexHome": account}
+        job = self.app.store.create_job({"action": "solve"}, plan)
+        run = job["runs"][0]
+        self.assertEqual(workbench_worker.run_worker(self.app.store.database, run["id"]), 0)
+        self.assertIn(account, Path(run["log_path"]).read_text(encoding="utf-8"))
+
 
 class WorkbenchStoreTests(unittest.TestCase):
     @staticmethod
@@ -2436,6 +2674,68 @@ class WorkbenchStoreTests(unittest.TestCase):
             (cgroup / "cgroup.procs").write_text("", encoding="ascii")
             self.assertFalse(controller.run_has_processes("run-1"))
 
+    def test_unsupported_platform_runs_without_memory_enforcement(self):
+        database = PROJECT_ROOT / "unused-memory-test.sqlite3"
+        for platform in ("darwin", "freebsd"):
+            with (
+                patch.object(workbench_memory.sys, "platform", platform),
+                patch.object(workbench_memory.os, "name", "posix"),
+                patch.object(
+                    workbench_memory,
+                    "physical_memory_bytes",
+                    return_value=16 * workbench_memory.GB_BYTES,
+                ),
+            ):
+                controller = workbench_memory.QueueMemoryController(database)
+                for mode, value in (("percent", 50), ("gb", 8), ("unlimited", None)):
+                    with self.subTest(platform=platform, mode=mode):
+                        settings = {"memoryLimit": {"mode": mode, "value": value}}
+                        snapshot = controller.reconcile(settings)
+                        self.assertFalse(snapshot["available"])
+                        self.assertFalse(snapshot["pending"])
+                        self.assertIsNone(snapshot["error"])
+                        self.assertIsNone(snapshot["appliedBytes"])
+                        self.assertIn("without a memory limit", snapshot["warning"])
+                        if platform == "darwin":
+                            self.assertIn("macOS", snapshot["warning"])
+                        self.assertIsNone(controller.prepare_run("test-run", settings))
+
+    def test_supported_platform_setup_failure_blocks_finite_memory_policies(self):
+        database = PROJECT_ROOT / "unused-memory-test.sqlite3"
+        for platform, os_name in (("linux", "posix"), ("win32", "nt")):
+            with (
+                patch.object(workbench_memory.sys, "platform", platform),
+                patch.object(workbench_memory.os, "name", os_name),
+                patch.object(
+                    workbench_memory,
+                    "physical_memory_bytes",
+                    return_value=16 * workbench_memory.GB_BYTES,
+                ),
+                patch.object(
+                    workbench_memory.QueueMemoryController,
+                    "_initialize_linux",
+                    side_effect=OSError("test setup failure"),
+                ),
+                patch.object(
+                    workbench_memory,
+                    "_configure_kernel32",
+                    side_effect=OSError("test setup failure"),
+                ),
+            ):
+                controller = workbench_memory.QueueMemoryController(database)
+                for mode, value in (("percent", 50), ("gb", 8)):
+                    with self.subTest(platform=platform, mode=mode):
+                        settings = {"memoryLimit": {"mode": mode, "value": value}}
+                        snapshot = controller.reconcile(settings)
+                        self.assertTrue(snapshot["pending"])
+                        self.assertIn("test setup failure", snapshot["error"])
+                        self.assertIsNone(snapshot["warning"])
+                        with self.assertRaisesRegex(OSError, "test setup failure"):
+                            controller.prepare_run("test-run", settings)
+                unlimited = {"memoryLimit": {"mode": "unlimited", "value": None}}
+                self.assertFalse(controller.reconcile(unlimited)["pending"])
+                self.assertIsNone(controller.prepare_run("test-run", unlimited))
+
     def test_linux_without_delegation_pauses_a_finite_policy(self):
         controller = object.__new__(workbench_memory.QueueMemoryController)
         controller.physical_bytes = 64 * workbench_memory.GB_BYTES
@@ -2486,6 +2786,89 @@ class WorkbenchStoreTests(unittest.TestCase):
                     "total": 1,
                 },
             )
+
+    def test_heartbeats_preserve_task_revision_and_summary(self):
+        with TemporaryDirectory() as temporary:
+            store = WorkbenchStore(Path(temporary) / "workbench.sqlite3")
+            job = store.create_job({"action": "solve"}, fake_plan(["python", "task.py"]))
+            run_id = job["runs"][0]["id"]
+            store.update_run(run_id, status="running", heartbeat_at=1)
+            revision = store.revision()
+            summary = store.list_jobs()
+            updated_at = store.get_run(run_id)["updated_at"]
+
+            store.update_run(run_id, heartbeat_at=2, worker_pid=123)
+
+            saved = store.get_run(run_id)
+            self.assertEqual(saved["heartbeat_at"], 2)
+            self.assertEqual(saved["worker_pid"], 123)
+            self.assertEqual(saved["updated_at"], updated_at)
+            self.assertEqual(store.revision(), revision)
+            self.assertEqual(store.list_jobs(), summary)
+
+            # Workers already running at upgrade still write updated_at and
+            # reconcile the job. Those writes must also leave revision alone.
+            with store.connect() as connection:
+                connection.execute(
+                    "UPDATE runs SET heartbeat_at = 3, updated_at = ? WHERE id = ?",
+                    (time.time(), run_id),
+                )
+            store.reconcile_job(job["id"])
+            self.assertEqual(store.revision(), revision)
+
+    def test_task_revision_tracks_changes_and_transaction_rollbacks(self):
+        with TemporaryDirectory() as temporary:
+            store = WorkbenchStore(Path(temporary) / "workbench.sqlite3")
+            revision = store.revision()
+            job = store.create_job({"action": "solve"}, fake_plan(["python", "task.py"]))
+            run_id = job["runs"][0]["id"]
+            self.assertGreater(store.revision(), revision)
+            for change in (
+                lambda: store.mark_starting(run_id),
+                lambda: store.update_run(run_id, status="running"),
+                lambda: store.append_run_output(run_id, Path(temporary) / "result.json"),
+                lambda: store.request_cancel(run_id),
+                lambda: store.update_run(run_id, status="partial", finished_at=time.time()),
+                lambda: store.update_scheduler_settings(queue_paused=True),
+            ):
+                revision = store.revision()
+                change()
+                self.assertGreater(store.revision(), revision)
+
+            revision = store.revision()
+            store.update_scheduler_settings(queue_paused=True)
+            store.initialize()
+            self.assertEqual(store.revision(), revision)
+            with self.assertRaisesRegex(RuntimeError, "rollback"):
+                with store.connect() as connection:
+                    connection.execute("UPDATE jobs SET priority_level = 2")
+                    raise RuntimeError("rollback")
+            self.assertEqual(store.revision(), revision)
+
+    def test_job_list_omits_commands_and_prompts_but_preserves_scope(self):
+        with TemporaryDirectory() as temporary:
+            store = WorkbenchStore(Path(temporary) / "workbench.sqlite3")
+            targets = [{"kind": "problem", "path": "/paper/OP-001", "label": "Problem"}]
+            request = {"action": "solve", "targets": targets, "options": {"prompt": "x" * 30_000}}
+            plan = fake_plan(["python", "task.py", "x" * 30_000], unit_count=2)
+            plan.update(targets=targets, singlePaperTitle="Test Paper")
+            job = store.create_job(request, plan)
+
+            summary = store.list_jobs()[0]
+            self.assertNotIn("request", summary)
+            self.assertEqual(summary["plan"], {"targets": targets, "singlePaperTitle": "Test Paper"})
+            self.assertEqual(summary["counts"]["total"], 2)
+            self.assertEqual(summary["liveRuns"][0]["label"], "Fake run 1")
+            self.assertLess(len(json.dumps(summary)), len(json.dumps(job)) / 10)
+            detail = store.get_job(job["id"])
+            self.assertEqual(detail["request"], request)
+            self.assertEqual(detail["plan"], plan)
+
+            # Legacy plans without targets still use request-level targets.
+            del plan["targets"]
+            legacy = store.create_job(request, plan)
+            summaries = {item["id"]: item for item in store.list_jobs()}
+            self.assertEqual(summaries[legacy["id"]]["plan"]["targets"], targets)
 
     def test_job_list_includes_only_latest_nonterminal_runs(self):
         with TemporaryDirectory() as temporary:
@@ -2581,6 +2964,57 @@ class WorkbenchStoreTests(unittest.TestCase):
             )
             self.assertEqual(store.get_job(job["id"])["status"], "succeeded")
 
+    def test_worker_shows_certificate_hint_in_failed_download_summary(self):
+        with TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            code = (
+                "import sys, ssl\n"
+                "from urllib.error import URLError\n"
+                "from unittest.mock import patch\n"
+                f"sys.path.insert(0, {str(PROJECT_ROOT / 'src')!r})\n"
+                "import download_arxiv\n"
+                "error = URLError(ssl.SSLCertVerificationError(1, 'untrusted certificate'))\n"
+                "with patch.object(sys, 'platform', 'darwin'), "
+                "patch.object(download_arxiv, 'urlopen', side_effect=error):\n"
+                f"    status = download_arxiv.main(['1706.03762', '--output-dir', {str(state / 'papers')!r}])\n"
+                "raise SystemExit(status)\n"
+            )
+            store = WorkbenchStore(state / "workbench.sqlite3", state)
+            plan = fake_plan([sys.executable, "-u", "-c", code])
+            plan["action"] = "download"
+            job = store.create_job({"action": "download"}, plan)
+            run = job["runs"][0]
+            store.mark_starting(run["id"])
+
+            self.assertEqual(workbench_worker.run_worker(store.database, run["id"]), 1)
+
+            saved = store.get_run(run["id"])
+            self.assertEqual(saved["status"], "failed")
+            self.assertEqual(saved["exit_code"], 1)
+            self.assertIn("1706.03762", saved["error"])
+            self.assertIn("HTTPS certificate verification failed", saved["error"])
+            self.assertIn("Install Certificates.command", saved["error"])
+            self.assertIn("and retry", saved["error"])
+            log = Path(saved["log_path"]).read_text(encoding="utf-8")
+            self.assertIn(saved["error"], log)
+
+    def test_failed_download_without_error_message_keeps_exit_code_summary(self):
+        with TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            store = WorkbenchStore(state / "workbench.sqlite3", state)
+            plan = fake_plan([sys.executable, "-c", "raise SystemExit(2)"])
+            plan["action"] = "download"
+            job = store.create_job({"action": "download"}, plan)
+            run = job["runs"][0]
+            store.mark_starting(run["id"])
+
+            self.assertEqual(workbench_worker.run_worker(store.database, run["id"]), 1)
+
+            saved = store.get_run(run["id"])
+            self.assertEqual(saved["status"], "failed")
+            self.assertEqual(saved["exit_code"], 2)
+            self.assertEqual(saved["error"], "command exited with code 2")
+
     def test_worker_codex_home_is_isolated_and_preserved_on_retry(self):
         with TemporaryDirectory() as temporary:
             state = Path(temporary)
@@ -2639,13 +3073,15 @@ class WorkbenchStoreTests(unittest.TestCase):
             state = Path(temporary)
             first = state / "first.md"
             second = state / "second.md"
+            release = state / "release"
             code = (
-                "from pathlib import Path; import os, time; "
-                f"first=Path({str(first)!r}); second=Path({str(second)!r}); "
-                "log=Path(os.environ['LOOSE_ENDS_ARTIFACT_LOG']); "
-                "first.write_text('first'); log.open('a').write(str(first.resolve())+'\\n'); "
-                "time.sleep(1.0); second.write_text('second'); "
-                "log.open('a').write(str(second.resolve())+'\\n'); time.sleep(0.5)"
+                "from pathlib import Path\nimport os, time\n"
+                f"first=Path({str(first)!r})\nsecond=Path({str(second)!r})\n"
+                f"release=Path({str(release)!r})\n"
+                "log=Path(os.environ['LOOSE_ENDS_ARTIFACT_LOG'])\n"
+                "first.write_text('first')\nlog.open('a').write(str(first.resolve())+'\\n')\n"
+                "while not release.exists(): time.sleep(0.05)\n"
+                "second.write_text('second')\nlog.open('a').write(str(second.resolve())+'\\n')\n"
             )
             store = WorkbenchStore(state / "workbench.sqlite3", state)
             job = store.create_job(
@@ -2662,13 +3098,16 @@ class WorkbenchStoreTests(unittest.TestCase):
                 args=(store.database, run["id"]),
             )
             worker.start()
-            deadline = time.time() + 4
-            while not store.get_run(run["id"])["outputs"] and time.time() < deadline:
-                time.sleep(0.05)
-            during = store.get_run(run["id"])
-            self.assertEqual(during["outputs"], [str(first.resolve())])
-            self.assertEqual(during["status"], "running")
-            worker.join(10)
+            try:
+                deadline = time.time() + 10
+                while not store.get_run(run["id"])["outputs"] and time.time() < deadline:
+                    time.sleep(0.05)
+                during = store.get_run(run["id"])
+                self.assertEqual(during["outputs"], [str(first.resolve())])
+                self.assertEqual(during["status"], "running")
+            finally:
+                release.touch()
+                worker.join(10)
             self.assertFalse(worker.is_alive())
             saved = store.get_run(run["id"])
             self.assertEqual(saved["outputs"], [str(first.resolve()), str(second.resolve())])
@@ -3100,7 +3539,7 @@ class WorkbenchWatchTests(unittest.TestCase):
             try:
                 time.sleep(0.15)
                 sequence = hub.current_sequence()
-                store.update_run(run["id"], heartbeat_at=time.time())
+                store.request_cancel(run["id"])
                 deadline = time.time() + 5
                 while (
                     hub.current_sequence() == sequence
@@ -3112,6 +3551,34 @@ class WorkbenchWatchTests(unittest.TestCase):
                 observer.stop()
                 observer.join(5)
                 scheduler.close()
+
+    def test_scheduler_launches_macos_worker_with_a_finite_memory_policy(self):
+        scheduler = object.__new__(workbench.Scheduler)
+        scheduler.store = Mock()
+        scheduler.hub = Mock()
+        scheduler.state_directory = PROJECT_ROOT / ".loose-ends"
+        scheduler.last_launch = 0.0
+        scheduler.memory_lock = threading.Lock()
+        database = PROJECT_ROOT / "unused-memory-test.sqlite3"
+        with (
+            patch.object(workbench_memory.sys, "platform", "darwin"),
+            patch.object(workbench_memory.os, "name", "posix"),
+            patch.object(
+                workbench_memory,
+                "physical_memory_bytes",
+                return_value=16 * workbench_memory.GB_BYTES,
+            ),
+            patch.dict(os.environ),
+            patch.object(workbench.subprocess, "Popen") as popen,
+        ):
+            os.environ.pop(workbench_memory.QUEUE_JOB_ENV, None)
+            scheduler.memory = workbench_memory.QueueMemoryController(database)
+            settings = {"memoryLimit": {"mode": "percent", "value": 50}}
+            scheduler._launch({"id": "test-run"}, settings)
+
+        popen.assert_called_once()
+        scheduler.store.update_run.assert_not_called()
+        self.assertNotIn(workbench_memory.QUEUE_JOB_ENV, popen.call_args.kwargs["env"])
 
     @unittest.skipUnless(sys.platform == "win32", "Windows process flags")
     def test_scheduler_launches_worker_without_a_console_window(self):
@@ -3210,7 +3677,8 @@ class UnsupportedMemoryPlatformTests(unittest.TestCase):
             self.assertIsNone(controller.prepare_run("run-1", settings))
             snapshot = controller.reconcile(settings, {"run-1"})
             self.assertFalse(snapshot["pending"])
-            self.assertIn("requires", snapshot["error"])
+            self.assertIsNone(snapshot["error"])
+            self.assertIn("workers will run without a memory limit", snapshot["warning"])
 
 
 class ReaderNoteEndpointTests(unittest.TestCase):

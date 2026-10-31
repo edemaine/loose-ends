@@ -485,6 +485,7 @@ def _install_review(
                 "requested_model": options.model,
                 "requested_reasoning_effort": options.reasoning_effort,
                 "requested_fast_mode": options.fast,
+                "requested_service_tier": options.service_tier,
                 "requested_web_search": web_search,
                 "correctness": result["correctness"],
                 "reviewed_coverage": result["reviewed_coverage"],
@@ -551,6 +552,7 @@ def _write_work_record(
             "requested_model": options.model,
             "requested_reasoning_effort": options.reasoning_effort,
             "requested_fast_mode": options.fast,
+            "requested_service_tier": options.service_tier,
             "requested_web_search": web_search,
         },
     )
@@ -1020,6 +1022,8 @@ def main(argv: list[str] | None = None) -> int:
             pending.append(attempt)
 
     if args.dry_run:
+        if pending:
+            codex_cli.report_codex_home_warnings()
         for attempt in pending:
             print(
                 f"Would review: {attempt.problem.paper_directory} "

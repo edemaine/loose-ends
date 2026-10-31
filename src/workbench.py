@@ -42,10 +42,12 @@ import write_paper
 import paper_document
 import visualizations
 from workbench_store import ACTIVE_STATUSES, WorkbenchStore
+from workbench_usage import UsageIndex
 from workbench_memory import QUEUE_JOB_ENV, QueueMemoryController
 from workbench_worker import recover_run_artifacts
 from workbench_tasks import (
     PlanError,
+    build_edit_plan,
     build_plan,
     populate_dry_run_previews,
     task_cli_defaults,
@@ -1707,6 +1709,8 @@ class WorkbenchApplication:
         self.arxiv_search_lock = threading.Lock()
         self.arxiv_pacer = download_arxiv.RequestPacer()
         self.observer = None
+        self.usage = UsageIndex(self.store, paths, manuscripts, self.hub)
+        self.usage.start()
 
     def start_watching(self) -> None:
         if Observer is None:
@@ -1747,6 +1751,20 @@ class WorkbenchApplication:
             catalog_version=self.catalog.version,
             paper_roots=self.paper_output_roots,
         )
+        return self._save_plan(request, plan)
+
+    def create_job_edit_plan(self, job_id: str, request: dict) -> dict:
+        plan = build_edit_plan(
+            self.store.get_job(job_id), request,
+            project_root=PROJECT_ROOT,
+            allowed_roots=self.allowed_roots,
+            manuscripts=self.manuscripts,
+            catalog_version=self.catalog.version,
+            paper_roots=self.paper_output_roots,
+        )
+        return self._save_plan(request, plan)
+
+    def _save_plan(self, request: dict, plan: dict) -> dict:
         populate_dry_run_previews(plan)
         with self.plan_lock:
             self.plans[plan["id"]] = {
@@ -1765,10 +1783,26 @@ class WorkbenchApplication:
 
     def confirm_plan(self, plan_id: str) -> dict:
         with self.plan_lock:
-            saved = self.plans.pop(plan_id, None)
+            saved = self.plans.get(plan_id)
+            if saved is not None and saved["plan"].get("jobId"):
+                raise PlanError("this plan edits an existing task")
+            self.plans.pop(plan_id, None)
         if saved is None:
             raise PlanError("this plan expired; review the task again")
         job = self.store.create_job(saved["request"], saved["plan"])
+        self.scheduler.schedule()
+        self.hub.publish("tasks.changed")
+        return job
+
+    def confirm_job_edit(self, job_id: str, plan_id: str) -> dict:
+        with self.plan_lock:
+            saved = self.plans.get(plan_id)
+            if saved is None:
+                raise PlanError("this plan expired; review the settings again")
+            if saved["plan"].get("jobId") != job_id:
+                raise PlanError("this plan does not edit this task")
+            self.plans.pop(plan_id)
+        job = self.store.edit_queued_runs(job_id, saved["plan"])
         self.scheduler.schedule()
         self.hub.publish("tasks.changed")
         return job
@@ -2160,6 +2194,30 @@ class WorkbenchApplication:
             shutil.rmtree(path, ignore_errors=True)
         self.scheduler.close()
         self.catalog.close()
+        self.usage.close()
+
+    def usage_summary(self, body: dict) -> dict:
+        targets = body.get("targets")
+        if not isinstance(targets, list) or not 1 <= len(targets) <= 5000:
+            raise PlanError("select between 1 and 5000 items")
+        for target in targets:
+            if not isinstance(target, dict) or not isinstance(target.get("kind"), str) or target.get("kind") not in {
+                "paper", "problem", "attempt", "manuscript", "draft", "job", "run",
+            } or not isinstance(target.get("path"), str):
+                raise PlanError("invalid usage target")
+            if target["kind"] not in {"job", "run"} and not _is_allowed_file(
+                Path(target["path"]), self.allowed_roots,
+            ):
+                raise PlanError("usage target is outside allowed roots")
+        excluded = body.get("excludeModels", [])
+        if not isinstance(excluded, list) or len(excluded) > 1000 or any(
+            model is not None and not isinstance(model, str) for model in excluded
+        ):
+            raise PlanError("excludeModels must be a list of model names (or null for unknown models)")
+        successful_only = body.get("successfulRunsOnly", False)
+        if type(successful_only) is not bool:
+            raise PlanError("successfulRunsOnly must be a boolean")
+        return self.usage.summary(targets, exclude_models=excluded, successful_runs_only=successful_only)
 
 
 def _is_allowed_file(path: Path, roots: Iterable[Path]) -> bool:
@@ -2477,6 +2535,8 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                     self.send_error_json(404, "visualization not found")
                 except ValueError as exc:
                     self.send_error_json(400, str(exc))
+            elif parsed.path == "/api/usage":
+                self.send_json(self.app.usage_summary(body))
             elif parsed.path == "/api/paper-imports":
                 self.send_json(self.app.create_paper_import(), 201)
             elif match := re.fullmatch(
@@ -2500,6 +2560,13 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                 if not isinstance(plan_id, str):
                     raise PlanError("planId is required")
                 self.send_json(self.app.confirm_plan(plan_id), 201)
+            elif match := re.fullmatch(r"/api/jobs/([0-9a-f-]+)/edit-plan", parsed.path):
+                self.send_json(self.app.create_job_edit_plan(match.group(1), body))
+            elif match := re.fullmatch(r"/api/jobs/([0-9a-f-]+)/settings", parsed.path):
+                plan_id = body.get("planId")
+                if not isinstance(plan_id, str):
+                    raise PlanError("planId is required")
+                self.send_json(self.app.confirm_job_edit(match.group(1), plan_id))
             elif parsed.path == "/api/scheduler":
                 changes = {}
                 if "workerLimit" in body:

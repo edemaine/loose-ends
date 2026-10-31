@@ -54,6 +54,8 @@ const state = {
   expandedTranscriptPanels: new Set(),
   expandedJobScopes: new Set(),
   expandedProblemBackgrounds: new Set(),
+  usageCache: new Map(),
+  usageLoads: new Map(),
   dialog: null,
 };
 
@@ -99,6 +101,10 @@ let navigationReady = false;
 let eventConnection = null;
 let eventReconnectNeedsRefresh = false;
 let sessionRefresh = null;
+let jobsRefresh = null;
+let jobsRefreshPending = false;
+let jobsRefreshPreserveDetail = true;
+let jobsRefreshTimer = null;
 let workerLimitDraft = null;
 let workerLimitTimer = null;
 let workerLimitSaving = false;
@@ -657,7 +663,7 @@ function problemTargetForAttempt(value) {
 }
 
 function taskTargetsForRequest(task) {
-  if (task.action !== "write" || task.options.pinAttempts === true) {
+  if (task.editJob || task.action !== "write" || task.options.pinAttempts === true) {
     return task.targets;
   }
   const targets = task.targets.map(value =>
@@ -874,10 +880,310 @@ function renderSelectionBar() {
   if ([...kinds].every(kind => ["paper", "problem", "attempt"].includes(kind))) {
     selectionBar.append(button("Write", () => openTask("write", values)));
   }
+  selectionBar.append(button("Cost", () => openCostDialog(values)));
   selectionBar.append(button("Clear", () => {
     state.selection.clear();
     render();
   }));
+}
+
+function usagePanel(scopes) {
+  const panel = node("section", "panel usage-panel");
+  panel.append(node("h2", "", "Usage"));
+  const totals = node("div", "usage-totals");
+  const modelFilter = { excludedModels: new Set(), successfulRunsOnly: false };
+  scopes.forEach(({ label, targets }) => totals.append(usageSummary(targets, label, modelFilter)));
+  panel.append(totals);
+  return panel;
+}
+
+function usageSummary(targets, label, modelFilter = null) {
+  const element = node("article", "usage-summary");
+  element.dataset.usageTargets = JSON.stringify(targets.map(({ kind, path }) => ({ kind, path })));
+  element.dataset.usageLabel = label;
+  element.usageModelFilter = modelFilter;
+  element.append(node("strong", "", label), node("p", "muted", "Loading usage…"));
+  queueMicrotask(() => refreshUsageElement(element));
+  return element;
+}
+
+function costButton(scopes) {
+  const control = button("Cost", () => openCostDialog(scopes[0].targets, scopes), "button");
+  control.dataset.usageTargets = JSON.stringify(scopes[0].targets.map(({ kind, path }) => ({ kind, path })));
+  control.dataset.usageLabel = scopes[0].label;
+  control.dataset.usageDisplay = "button";
+  control.title = "Show tokens and estimated API cost";
+  queueMicrotask(() => refreshUsageElement(control));
+  return control;
+}
+
+async function requestUsage(targets, force = false, excludedModels = [], successfulRunsOnly = false) {
+  const excluded = [...excludedModels].sort((a, b) => (a ?? "").localeCompare(b ?? ""));
+  const body = { targets };
+  if (excluded.length) body.excludeModels = excluded;
+  if (successfulRunsOnly) body.successfulRunsOnly = true;
+  const key = JSON.stringify(excluded.length || successfulRunsOnly ? body : targets);
+  const cached = state.usageCache.get(key);
+  if (!force && cached && Date.now() - cached.time < 15000) return cached.value;
+  if (!state.usageLoads.has(key)) {
+    const load = api("/api/usage", { method: "POST", body })
+      .then(value => {
+        state.usageCache.set(key, { time: Date.now(), value });
+        // Selections can produce many distinct combinations over a session.
+        if (state.usageCache.size > 100) state.usageCache.delete(state.usageCache.keys().next().value);
+        return value;
+      })
+      .finally(() => state.usageLoads.delete(key));
+    state.usageLoads.set(key, load);
+  }
+  return state.usageLoads.get(key);
+}
+
+function usageCostLabel(value) {
+  if (value.estimatedCost === null) return value.invocations ? "Cost unavailable" : "No recorded usage";
+  const dollars = value.estimatedCost > 0 && value.estimatedCost < .01
+    ? "<$0.01" : `≈${value.estimatedCost.toLocaleString("en-US", { style: "currency", currency: "USD" })}`;
+  return `${dollars}${value.missingUsage || value.unpriced ? " (partial)" : ""}`;
+}
+
+function usageElapsedLabel(value) {
+  if (!Number.isFinite(value.elapsedSeconds)) return "—";
+  const duration = value.elapsedSeconds === 0 ? "0s" : formatDuration(0, value.elapsedSeconds);
+  return `${value.elapsedFallbackRuns ? "≈" : ""}${duration}${value.runningElapsed ? "+" : ""}${value.missingElapsed || value.missingElapsedRuns ? "*" : ""}`;
+}
+
+function usageTable(value, label) {
+  const table = node("table", "usage-stage-table");
+  table.append(node("caption", "", label));
+  const head = node("thead");
+  const header = node("tr");
+  for (const [label, title] of [
+    ["Stage", "Pipeline stage"], ["Turns", "Recorded Codex turns"],
+    ["Elapsed", "Sum of wall-clock durations; overlapping runs count separately"],
+    ["Input", "All input tokens, including cache reads and writes"],
+    ["Cache read", "Cached tokens within input"],
+    ["Cache write", "Cache-write tokens reported by Codex; zero may be a default when upstream usage is unavailable"],
+    ["Output", "All output tokens, including reasoning"],
+    ["Reasoning", "Reasoning tokens within output"],
+    ["Est. API cost", "Estimated API-equivalent token cost"],
+  ]) {
+    const cell = node("th", "", label);
+    cell.scope = "col";
+    cell.title = title;
+    header.append(cell);
+  }
+  head.append(header);
+  const rowFor = (item, label) => {
+    const row = node("tr");
+    const heading = node("th", "", label);
+    heading.scope = "row";
+    if (label === "Unknown") heading.title = "Run time without an attributable stage, including work outside timed invocations";
+    row.append(heading, node("td", "", item.timingOnly ? "—" : item.invocations.toLocaleString()));
+    const elapsed = node("td", "", usageElapsedLabel(item));
+    elapsed.title = "Summed wall-clock time. ≈ uses recorded run timestamps as fallback; + includes running work; * is partial.";
+    row.append(elapsed);
+    for (const key of ["input_tokens", "cached_input_tokens", "cache_write_input_tokens", "output_tokens", "reasoning_output_tokens"]) {
+      const reported = item.reported[key];
+      const known = item.invocations - item.missingUsage;
+      const partial = reported > 0 && reported < known;
+      const emptySelection = (value.modelFilterApplied || value.successfulRunsOnly) && !item.invocations && !item.timingOnly;
+      const cell = node("td", "", reported ? `${item.tokens[key].toLocaleString()}${partial ? "*" : ""}` : emptySelection ? "0" : "—");
+      cell.title = reported ? partial ? `Reported for ${reported} of ${known} turns with usage` : "Reported tokens" : emptySelection ? "No turns match the selected filters" : "Unreported";
+      row.append(cell);
+    }
+    row.append(node("td", "", item.timingOnly ? "—" : usageCostLabel(item)));
+    return row;
+  };
+  const body = node("tbody");
+  const unassigned = value.stages.filter(stage => stage.timingOnly
+    && ["Other run time", "Run time · stage unavailable"].includes(stage.stage));
+  value.stages.filter(stage => !unassigned.includes(stage))
+    .forEach(stage => body.append(rowFor(stage, stage.stage)));
+  if (unassigned.length) {
+    const combined = { ...unassigned[0] };
+    const durations = unassigned.map(stage => stage.elapsedSeconds).filter(Number.isFinite);
+    combined.elapsedSeconds = durations.length ? durations.reduce((sum, seconds) => sum + seconds, 0) : null;
+    for (const key of ["elapsedFallbackRuns", "runningElapsed", "missingElapsed", "missingElapsedRuns"]) {
+      combined[key] = unassigned.reduce((sum, stage) => sum + (stage[key] || 0), 0);
+    }
+    body.append(rowFor(combined, "Unknown"));
+  }
+  const foot = node("tfoot");
+  foot.append(rowFor(value, "Total"));
+  table.append(head, body, foot);
+  const scroll = node("div", "usage-table-scroll");
+  scroll.append(table);
+  return scroll;
+}
+
+function usagePricingTable(pricing, modelFilter = null) {
+  const table = node("table", "usage-stage-table");
+  table.append(node("caption", "", "Assumed rates · USD per 1M tokens"));
+  const head = node("thead");
+  const header = node("tr");
+  for (const label of ["Model", "Service tier", "Uncached input", "Cache read", "Cache write (30m)", "Output"]) {
+    const cell = node("th", "", label);
+    cell.scope = "col";
+    header.append(cell);
+  }
+  head.append(header);
+  const body = node("tbody");
+  for (const item of pricing) {
+    const row = node("tr");
+    const model = node("th", "", item.model || "Unknown model");
+    model.scope = "row";
+    if (modelFilter) {
+      const label = node("label", "usage-model-filter");
+      const input = node("input");
+      input.type = "checkbox";
+      input.checked = !modelFilter.excludedModels.has(item.model);
+      input.dataset.usageModel = JSON.stringify([item.model, item.tier]);
+      input.setAttribute("aria-label", `Include ${item.model || "Unknown model"} (${item.tier || "unknown tier"})`);
+      input.title = "Include this model across all service tiers";
+      input.addEventListener("change", () => setUsageModelIncluded(modelFilter, item.model, input.checked));
+      label.append(input, node("span", "", item.model || "Unknown model"));
+      model.replaceChildren(label);
+      row.classList.toggle("usage-model-excluded", !input.checked);
+    }
+    row.append(model, node("td", "", item.tier || "Unknown tier"));
+    for (const key of ["input", "cachedInput", "cacheWrite", "output"]) {
+      const rate = item.rates?.[key];
+      const cell = node("td", "", rate == null ? "—" : rate.toLocaleString("en-US", {
+        style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 6,
+      }));
+      if (rate == null) cell.title = "No assumed pricing; excluded from the cost estimate";
+      row.append(cell);
+    }
+    body.append(row);
+  }
+  table.append(head, body);
+  const scroll = node("div", "usage-table-scroll");
+  scroll.append(table);
+  return scroll;
+}
+
+function setUsageModelIncluded(modelFilter, model, included) {
+  if (included) modelFilter.excludedModels.delete(model);
+  else modelFilter.excludedModels.add(model);
+  refreshUsageFilters(modelFilter);
+}
+
+function usageRunFilter(modelFilter) {
+  const label = node("label", "usage-model-filter");
+  const input = node("input");
+  input.type = "checkbox";
+  input.checked = modelFilter.successfulRunsOnly;
+  input.dataset.usageSuccessfulRuns = "true";
+  input.addEventListener("change", () => {
+    modelFilter.successfulRunsOnly = input.checked;
+    refreshUsageFilters(modelFilter);
+  });
+  label.title = "Exclude unsuccessful and active runs. Older logs without run status use completed turns.";
+  label.append(input, node("span", "", "Successful runs only"));
+  return label;
+}
+
+function refreshUsageFilters(modelFilter) {
+  document.querySelectorAll("[data-usage-targets]").forEach(element => {
+    if (element.usageModelFilter === modelFilter) {
+      element.usageValue = null; // Also synchronize duplicate model rows across tiers.
+      refreshUsageElement(element);
+    }
+  });
+}
+
+async function refreshUsageElement(element, force = false) {
+  if (!element.isConnected) return;
+  const targets = JSON.parse(element.dataset.usageTargets);
+  const requestId = element.usageRequestId = (element.usageRequestId || 0) + 1;
+  try {
+    const value = await requestUsage(targets, force, element.usageModelFilter?.excludedModels,
+      element.usageModelFilter?.successfulRunsOnly);
+    if (!element.isConnected || element.usageRequestId !== requestId) return;
+    if (element.usageValue === value) return;
+    element.usageValue = value;
+    if (element.dataset.usageDisplay === "button") {
+      element.textContent = value.estimatedCost !== null ? `Cost: ${usageCostLabel(value)}`
+        : value.invocations ? "Cost: unavailable" : value.indexing ? "Cost: indexing…" : "Cost: no usage";
+      element.title = `${element.dataset.usageLabel}. Estimated API cost; click for tokens and stage breakdown.`
+        + (value.missingUsage ? ` ${value.missingUsage} turn(s) missing usage.` : "")
+        + (value.unpriced ? ` ${value.unpriced} turn(s) without known pricing.` : "")
+        + (value.indexing ? " Usage index is updating." : "")
+        + (value.indexError ? ` Index update failed: ${value.indexError}` : "");
+      return;
+    }
+    const focusedInput = element.querySelector("input:focus");
+    const focusedModel = focusedInput?.dataset.usageModel;
+    const focusedRunFilter = focusedInput?.dataset.usageSuccessfulRuns;
+    const expanded = element.querySelector("details")?.open || false;
+    const label = element.dataset.usageLabel + (value.modelFilterApplied ? " · selected models" : "")
+      + (value.successfulRunsOnly ? " · successful runs only" : "");
+    element.replaceChildren(usageTable(value, label));
+    const coverage = [];
+    if (value.indexing) coverage.push("Indexing saved logs; totals may grow.");
+    if (value.indexError) coverage.push(`Index update failed: ${value.indexError}`);
+    if (value.missingUsage) coverage.push(`${value.missingUsage} invocation(s) missing usage.`);
+    if (value.unpriced) coverage.push(`${value.unpriced} invocation(s) without known pricing.`);
+    if (value.missingElapsed) coverage.push(`${value.missingElapsed} invocation(s) without attributable elapsed time.`);
+    if (value.missingElapsedRuns) coverage.push(`${value.missingElapsedRuns} run(s) missing elapsed time.`);
+    if (coverage.length) element.append(node("p", "usage-coverage muted", coverage.join(" ")));
+    const details = node("details", "usage-breakdown");
+    details.open = expanded;
+    details.append(node("summary", "", "Pricing details"));
+    if (element.usageModelFilter) details.append(usageRunFilter(element.usageModelFilter));
+    details.append(node("p", "muted", "Cache columns are included in input; reasoning is included in output. — means unreported; * means partially reported. Manuscript work is counted separately from source papers and problems."));
+    details.append(node("p", "muted", "Elapsed sums wall-clock durations, counting parallel runs separately. ≈ includes time from run start/end timestamps; + includes running work. The Unknown row covers time without an attributable stage, including setup and work outside timed invocations. Unknown model also covers unassigned run time, which cannot be split by model."));
+    details.append(node("p", "muted", "Cache-write counts are copied from Codex logs. The CLI usage schema allows a default of zero; these logs cannot distinguish a measured zero from a missing upstream count."));
+    if (element.usageModelFilter && value.pricingRates?.length) {
+      details.append(node("p", "muted", "Select models to include in the totals (all service tiers)."));
+    }
+    if (value.pricingRates?.length) details.append(usagePricingTable(value.pricingRates, element.usageModelFilter));
+    else if (value.models.length) details.append(node("p", "muted", value.models.join(", ")));
+    details.append(node("p", "muted", value.assumptions));
+    const pricing = node("a", "", `Pricing: ${value.pricingVersion}`);
+    pricing.href = value.pricingUrl;
+    pricing.target = "_blank";
+    pricing.rel = "noopener noreferrer";
+    details.append(pricing);
+    if (value.updatedAt) details.append(node("p", "muted", `Index updated ${formatTime(value.updatedAt)}`));
+    element.append(details);
+    if (focusedModel !== undefined) {
+      [...element.querySelectorAll("[data-usage-model]")]
+        .find(input => input.dataset.usageModel === focusedModel)?.focus({ preventScroll: true });
+    } else if (focusedRunFilter) {
+      element.querySelector("[data-usage-successful-runs]")?.focus({ preventScroll: true });
+    }
+  } catch (error) {
+    if (!element.isConnected || element.usageRequestId !== requestId) return;
+    element.usageValue = null;
+    if (element.dataset.usageDisplay === "button") {
+      element.textContent = "Cost";
+      element.title = `Could not load usage: ${error.message}. Click to retry.`;
+      return;
+    }
+    element.replaceChildren(node("strong", "", element.dataset.usageLabel), node("p", "error-box", error.message));
+  }
+}
+
+function refreshVisibleUsage(force = false) {
+  document.querySelectorAll("[data-usage-targets]").forEach(element => refreshUsageElement(element, force));
+}
+
+function openCostDialog(values, scopes = null) {
+  const modelFilter = { kind: "cost", excludedModels: new Set(), successfulRunsOnly: false };
+  state.dialog = modelFilter;
+  dialogEyebrow.textContent = scopes ? "Usage" : "Selected items";
+  dialogTitle.textContent = "Tokens and estimated cost";
+  dialogBody.replaceChildren(
+    node("p", "muted", "Includes descendants. Overlapping selections count each turn once."),
+    ...(scopes || [{ targets: values, label: `${values.length.toLocaleString()} selected item${values.length === 1 ? "" : "s"}` }])
+      .map(({ targets, label }) => usageSummary(targets, label, modelFilter)),
+  );
+  dialogFooter.replaceChildren(
+    button("Refresh", () => refreshVisibleUsage(true)),
+    button("Close", () => dialog.close()),
+  );
+  showTaskDialog();
 }
 
 function problemsForPapers(papers) {
@@ -924,7 +1230,6 @@ function render() {
   if (state.catalog.error) showNotice(`Catalog update delayed: ${state.catalog.error}`, true);
   else if (state.catalog.loading) renderCatalogLoading();
   else showNotice("");
-  sidebar.classList.toggle("split-sidebar", ["research", "manuscripts"].includes(state.tab));
   if (state.tab === "research") renderResearch();
   else if (state.tab === "papers") renderPapers();
   else if (state.tab === "manuscripts") renderManuscripts();
@@ -1003,6 +1308,10 @@ function renderMemoryControl(maximumWorkers) {
     memoryStatus.textContent = `Queue paused because the memory limit could not be enforced: ${telemetry.error}`;
     return;
   }
+  if (telemetry.warning) {
+    memoryStatus.textContent = `Warning: ${telemetry.warning}`;
+    return;
+  }
   if (!telemetry.available) {
     const policy = unlimited
       ? "Configured total allocation limit: unlimited."
@@ -1068,7 +1377,8 @@ function renderSchedulerControl() {
 
 async function updateScheduler(changes) {
   try {
-    state.settings = await api("/api/scheduler", { method: "POST", body: changes });
+    const settings = await api("/api/scheduler", { method: "POST", body: changes });
+    state.settings = { ...state.settings, ...settings };
     renderSchedulerControl();
   } catch (error) {
     showNotice(error.message, true);
@@ -1088,10 +1398,11 @@ function adjustWorkerLimit(delta) {
     workerLimitSaving = true;
     renderSchedulerControl();
     try {
-      state.settings = await api("/api/scheduler", {
+      const settings = await api("/api/scheduler", {
         method: "POST",
         body: { workerLimit: limit },
       });
+      state.settings = { ...state.settings, ...settings };
       workerLimitDraft = null;
     } catch (error) {
       workerLimitDraft = null;
@@ -1126,10 +1437,11 @@ function scheduleMemoryLimit(memory) {
     memoryLimitSaving = true;
     renderSchedulerControl();
     try {
-      state.settings = await api("/api/scheduler", {
+      const settings = await api("/api/scheduler", {
         method: "POST",
         body: { memoryLimit: limit },
       });
+      state.settings = { ...state.settings, ...settings };
       memoryLimitDraft = null;
     } catch (error) {
       memoryLimitDraft = null;
@@ -1192,7 +1504,9 @@ function rememberSidebarScroll() {
   if (!(renderedTab in state.sidebarScroll)) return;
   const primarySelector = {
     research: ".problem-scroll",
+    papers: ".paper-scroll",
     manuscripts: ".manuscript-scroll",
+    activity: ".activity-scroll",
   }[renderedTab];
   const scrollingElement = primarySelector ? sidebar.querySelector(primarySelector) : sidebar;
   if (scrollingElement) state.sidebarScroll[renderedTab] = scrollingElement.scrollTop;
@@ -1236,7 +1550,9 @@ function restoreSidebarScroll(tab) {
   sidebar.dataset.tab = tab;
   const primarySelector = {
     research: ".problem-scroll",
+    papers: ".paper-scroll",
     manuscripts: ".manuscript-scroll",
+    activity: ".activity-scroll",
   }[tab];
   if (primarySelector) sidebar.scrollTop = 0;
   const scrollingElement = primarySelector ? sidebar.querySelector(primarySelector) : sidebar;
@@ -1343,10 +1659,8 @@ function appendSideCard(parent, {
   else card.append(node("span"));
   const copy = node("span");
   const titleRow = node("span", "side-card-title-row");
-  const titleNode = node("strong", "", title);
+  const titleNode = inlineMarkdown("strong", "", title);
   titleNode.title = title;
-  const metaNode = node("small", "", meta);
-  metaNode.title = meta;
   titleRow.append(titleNode);
   if (relatedTask || relatedProblem) {
     titleRow.append(relatedTaskHost(relatedTask || {
@@ -1357,7 +1671,11 @@ function appendSideCard(parent, {
   }
   copy.append(titleRow);
   if (tags) copy.append(tags);
-  copy.append(metaNode);
+  if (meta) {
+    const metaNode = node("small", "", meta);
+    metaNode.title = meta;
+    copy.append(metaNode);
+  }
   card.append(copy);
   card.addEventListener("click", onClick);
   card.addEventListener("keydown", event => {
@@ -1674,7 +1992,7 @@ function renderResearch() {
       group.paperTitle,
       group.publicationTimestamp,
     );
-    const paperHeadingTitle = node("span", "paper-heading-title", paperHeadingLabel);
+    const paperHeadingTitle = inlineMarkdown("span", "paper-heading-title", paperHeadingLabel);
     paperHeadingTitle.title = paperHeadingLabel;
     paperHeading.append(
       paperHeadingTitle,
@@ -1685,10 +2003,7 @@ function renderResearch() {
     group.problems.forEach(item => {
       appendSideCard(list, {
         title: `${item.problemId} · ${item.problemTitle}`,
-        meta: item.attemptName
-          ? `${reviewModel.statusLabel(item.attemptStatus)} · ${item.totalAttemptCount} total attempt${item.totalAttemptCount === 1 ? "" : "s"}`
-          : "Unattempted",
-        tags: attemptTagsNode(item, { includeKnown: true }),
+        tags: attemptTagsNode(item, { includeKnown: true, includeProblem: true }),
         active: state.selectedProblem === item.problemKey,
         selectedTarget: problemTarget(item),
         relatedProblem: item,
@@ -1723,9 +2038,6 @@ function renderResearch() {
   attempts.forEach(item => {
     appendSideCard(attemptList, {
       title: item.attemptName || "No attempts yet",
-      meta: item.attemptDirectory
-        ? reviewModel.statusLabel(item.attemptStatus)
-        : "Open problem",
       tags: attemptTagsNode(item),
       active: state.selectedReview === item.itemKey,
       selectedTarget: item.attemptDirectory ? attemptTarget(item) : null,
@@ -1799,6 +2111,14 @@ function loadReviewDetail(summary) {
         state.detailLoads.delete(summary.itemKey);
       }
     });
+}
+
+function inlineMarkdown(tag, className, value) {
+  const element = node(tag, `${className} inline-markdown`.trim(), value);
+  if (markdownRenderer && value) {
+    element.innerHTML = markdownRenderer.renderInline(value, { latexProse: true });
+  }
+  return element;
 }
 
 function markdown(value, missing = "No content available.", env = {}) {
@@ -1925,7 +2245,7 @@ function problemManuscriptsPanel(item) {
       ? draft.name
       : `${matchingDraftCount} matching drafts · latest match ${draft.name}`;
     link.append(
-      node("strong", "", draft.title),
+      inlineMarkdown("strong", "", draft.title),
       node("small", "", `${manuscript.name} · ${draftSummary}`),
     );
     grid.append(link);
@@ -2014,8 +2334,8 @@ function renderReviewDetail(item) {
   const hero = node("section", "hero");
   const copy = node("div");
   const paperTitle = reviewModel.paperTitleWithYear(item.paperTitle, item.paperPublished);
-  copy.append(node("div", "eyebrow", `${paperTitle} · ${item.problemId}`));
-  copy.append(node("h1", "", item.problemTitle));
+  copy.append(inlineMarkdown("div", "eyebrow", `${paperTitle} · ${item.problemId}`));
+  copy.append(inlineMarkdown("h1", "", item.problemTitle));
   copy.append(node("p", "", item.paperAuthors?.join(", ") || "Authors unavailable"));
   hero.append(copy);
   shell.append(hero);
@@ -2077,6 +2397,10 @@ function renderReviewDetail(item) {
     addAction(solutionActions, item.attemptStatus === "reviewed" ? "Review again" : "Review", "review", [attempt]);
     addAction(solutionActions, "Write this result", "write", [attempt]);
   }
+  solutionActions.append(costButton([
+    { label: "Problem total · all attempts", targets: [problem] },
+    ...(attempt ? [{ label: `${item.attemptName} · solve and review`, targets: [attempt] }] : []),
+  ]));
   attemptHeading.append(attemptLabel, relatedTaskHost({
     paperPath: item.paperDirectory,
     problemPath: `${item.paperDirectory}/${item.problemId}`,
@@ -2275,7 +2599,9 @@ function renderPapers() {
     },
     onClick: () => { state.selectedPaper = paper.key; syncNavigation(); },
   }));
-  sidebar.append(node("div", "sidebar-heading", `${papers.length} papers`), list);
+  const paperScroll = node("div", "paper-scroll");
+  paperScroll.append(node("div", "sidebar-heading", `${papers.length} papers`), list);
+  sidebar.append(paperScroll);
   const paper = state.catalog.papers.find(value => value.key === state.selectedPaper);
   if (!paper) {
     main.replaceChildren(document.getElementById("empty-template").content.cloneNode(true));
@@ -2285,7 +2611,7 @@ function renderPapers() {
   const hero = node("section", "hero");
   const copy = node("div");
   copy.append(node("div", "eyebrow", paper.name));
-  copy.append(node("h1", "", paper.title));
+  copy.append(inlineMarkdown("h1", "", paper.title));
   copy.append(node("p", "", paper.authors.join(", ") || "Authors unavailable"));
   if (paper.published || (paper.updated && paper.updated !== paper.published)) {
     const dates = node("div", "paper-dates");
@@ -2349,6 +2675,7 @@ function renderPapers() {
     addAction(actions, "Solve problems", "solve", problems, paper.analyzed);
     addAction(actions, "Write from latest results", "write", [paperTarget(paper)]);
   }
+  actions.append(costButton([{ label: "Paper total · analysis and all problems", targets: [paperTarget(paper)] }]));
   shell.append(actions);
   if (paper.visualization) shell.append(renderDraftReader({ name: paper.title }, { key: paper.path, title: paper.title, visualization: paper.visualization }));
   shell.append(relatedTasksPanel({
@@ -2402,12 +2729,9 @@ function paperProblemsPanel(paper) {
       "",
       "entity-card",
     );
-    const attemptStatus = problem.attemptDirectory
-      ? reviewModel.statusLabel(problem.attemptStatus)
-      : "Unattempted";
     link.append(
-      node("strong", "", `${problem.problemId} · ${problem.problemTitle}`),
-      node("small", "", `${humanize(problem.explicitness)} · ${attemptStatus}`),
+      inlineMarkdown("strong", "", `${problem.problemId} · ${problem.problemTitle}`),
+      attemptTagsNode(problem, { includeKnown: true, includeProblem: true }),
     );
     grid.append(link);
   });
@@ -2522,6 +2846,13 @@ function appendPaperImportItems(items) {
   }
 }
 
+function showTaskDialog() {
+  dialog.showModal();
+  // Hidden dialogs have no scroll box; reset after opening and focus placement.
+  dialog.scrollTop = 0;
+  dialogBody.scrollTop = 0;
+}
+
 function openFileImport() {
   state.dialog = {
     kind: "fileImport",
@@ -2529,7 +2860,7 @@ function openFileImport() {
     outputDirectory: (state.settings.paperRoots || [])[0] || "",
   };
   renderFileImport();
-  dialog.showModal();
+  showTaskDialog();
 }
 
 function renderFileImport(errorMessage = "") {
@@ -2728,7 +3059,7 @@ function openMetadataEditor(paper) {
     button("Cancel", () => dialog.close()),
     button("Save metadata", saveMetadataEditor, "button primary"),
   );
-  dialog.showModal();
+  showTaskDialog();
 }
 
 async function saveMetadataEditor() {
@@ -2796,7 +3127,7 @@ function openProblemEditor(paper) {
     button("Cancel", () => dialog.close()),
     button("Add problem", saveProblemEditor, "button primary"),
   );
-  dialog.showModal();
+  showTaskDialog();
   dialogBody.querySelector('[name="title"]')?.focus();
 }
 
@@ -2957,7 +3288,7 @@ function renderManuscripts() {
   const hero = node("section", "hero");
   const copy = node("div");
   copy.append(node("div", "eyebrow", `${manuscript.name} · ${draft.name}`));
-  copy.append(node("h1", "", draft.title));
+  copy.append(inlineMarkdown("h1", "", draft.title));
   const badges = node("div", "badges");
   badges.append(badge(draft.status || "draft", "neutral"));
   badges.append(badge(draft.verdict, draft.verdict === "ready_for_expert_review" ? "succeeded" : "warn"));
@@ -3006,6 +3337,10 @@ function renderManuscripts() {
   const downloadZip = node("a", "button", "Download ZIP");
   downloadZip.href = manuscriptZipUrl(draft.path);
   actions.append(downloadZip);
+  actions.append(costButton([
+    { label: "Manuscript total · all drafts", targets: [target("manuscript", manuscript.path, manuscript.name)] },
+    { label: `${draft.name} · writing and review`, targets: [draftTarget(draft)] },
+  ]));
   shell.append(actions);
   shell.append(relatedTasksPanel({
     manuscriptPath: manuscript.path,
@@ -3263,7 +3598,9 @@ function renderActivity({ preserveDetail = false } = {}) {
       syncNavigation();
     },
   }));
-  sidebar.append(node("div", "sidebar-heading", `${jobs.length} tasks`), list);
+  const activityScroll = node("div", "activity-scroll");
+  activityScroll.append(node("div", "sidebar-heading", `${jobs.length} tasks`), list);
+  sidebar.append(activityScroll);
   if (!state.selectedJob) {
     main.replaceChildren(document.getElementById("empty-template").content.cloneNode(true));
     return;
@@ -3293,6 +3630,7 @@ function jobRenderFingerprint(job) {
     status: job.status,
     priority_level: job.priority_level,
     scheduling_paused: job.scheduling_paused,
+    settings_version: job.settings_version,
     created_at: job.created_at,
     finished_at: job.finished_at,
     runs: job.runs.map(run => ({
@@ -3305,6 +3643,7 @@ function jobRenderFingerprint(job) {
       error: run.error,
       outputs: run.outputs,
       argv: run.argv,
+      options: run.options,
       cancel_requested: run.cancel_requested,
     })),
   });
@@ -3419,6 +3758,17 @@ async function loadJob(id) {
   }
 }
 
+function shellQuote(value) {
+  return /^[a-zA-Z0-9_@%+=:,./-]+$/.test(value)
+    ? value : `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
+function runCommandDisplay(job, run) {
+  const command = run.argv.map(shellQuote).join(" ");
+  const home = (run.options ?? job.plan?.options)?.codexHome;
+  return home ? `CODEX_HOME=${shellQuote(home)} ${command}` : command;
+}
+
 function renderJobDetail(job) {
   const shell = node("div", "main-inner");
   shell.dataset.jobDetail = job.id;
@@ -3487,6 +3837,7 @@ function renderJobDetail(job) {
   shell.append(hero);
   const attention = runAttentionPanel(job);
   if (attention) shell.append(attention);
+  shell.append(usagePanel([{ label: "Job total · including retries", targets: [target("job", job.id, "Job")] }]));
   job.runs.forEach((run, index) => {
     const section = node("section", `run-card panel status-${taskStatus(run.status).tone}`);
     section.id = `run-${run.id}`;
@@ -3501,6 +3852,7 @@ function renderJobDetail(job) {
     appendRunTargetSummary(headingCopy, presentation);
     headingCopy.append(runTiming(run));
     const actions = node("div", "run-actions");
+    actions.append(button("Cost", () => openCostDialog([target("run", run.id, "Run")]), "button"));
     if (["queued", "starting", "running", "cancel_requested"].includes(run.status)) {
       actions.append(button("Cancel", () => mutateRun(run.id, "cancel"), "button danger"));
     }
@@ -3582,7 +3934,7 @@ function renderJobDetail(job) {
         details.append(selected);
       }
       const command = node("div", "confirm-block");
-      command.append(node("h3", "", "Command"), node("pre", "command", run.argv.join(" ")));
+      command.append(node("h3", "", "Command"), node("pre", "command", runCommandDisplay(job, run)));
       details.append(command);
       const cachedLog = state.runLogs.get(run.id);
       const log = node("pre", "console", runLogText(cachedLog));
@@ -3817,6 +4169,20 @@ function refreshVisibleRunElapsed(job) {
   });
 }
 
+function refreshLiveActivity() {
+  if (!navigationReady || document.hidden) return;
+  refreshVisibleUsage();
+  if (state.tab === "activity") {
+    const job = state.jobDetails.get(state.selectedJob);
+    if (job) refreshVisibleRunElapsed(job);
+  }
+  // Transcripts already have their own polling timer. Only fetch console
+  // logs that are displayed; completed logs and in-flight loads are cached.
+  main.querySelectorAll("[data-run-log]").forEach(log => {
+    refreshRunLog(log.dataset.runLog);
+  });
+}
+
 async function retryJob(job, control) {
   const runs = latestJobRuns(job).filter(run => ["failed", "partial"].includes(run.status));
   const partial = runs.some(run => run.status === "partial");
@@ -3874,6 +4240,14 @@ function jobSchedulingControls(job) {
     ));
   }
   controls.append(row, node("small", "", "Proportion of workers assigned to this task"));
+  const queued = job.runs.filter(run => run.status === "queued");
+  if (queued.length) {
+    controls.append(button(
+      queued.length === job.runs.length ? "Edit settings" : "Edit remaining runs",
+      () => openJobSettings(job.id),
+      "button",
+    ));
+  }
   return controls;
 }
 
@@ -4342,7 +4716,7 @@ function taskScopeSummary(job) {
   const pieces = [paperScope || targetCountLabel(targets)];
   const papers = targetPaperCount(targets);
   if (papers && !paperScope) pieces.push(`${papers} paper${papers === 1 ? "" : "s"}`);
-  const units = job.plan?.units?.length || new Set((job.runs || []).map(run => run.unit_index)).size;
+  const units = job.counts?.total || job.plan?.units?.length || new Set((job.runs || []).map(run => run.unit_index)).size;
   if (units) pieces.push(`${units} run${units === 1 ? "" : "s"}`);
   return pieces.join(" · ");
 }
@@ -4460,7 +4834,27 @@ function openTask(action, targets, presetOptions = null) {
     authorSearch: null, authorSelection: new Set(),
   };
   renderTaskConfiguration();
-  dialog.showModal();
+  showTaskDialog();
+}
+
+async function openJobSettings(jobId) {
+  try {
+    const job = await api(`/api/jobs/${jobId}`);
+    const runs = job.runs.filter(run => run.status === "queued");
+    if (!runs.length) throw new Error("This task has no remaining queued runs to edit.");
+    state.jobDetails.set(job.id, job);
+    state.dialog = {
+      action: job.action,
+      targets: job.action === "download" ? job.plan.targets : runs.flatMap(run => run.targets),
+      options: { ...runs[0].options },
+      editJob: { id: job.id, runIds: runs.map(run => run.id), settingsVersion: job.settings_version },
+      plan: null,
+    };
+    renderTaskConfiguration();
+    showTaskDialog();
+  } catch (error) {
+    showNotice(error.message, true);
+  }
 }
 
 function renderTaskTargetChips(task, container) {
@@ -4563,13 +4957,30 @@ async function fetchArxivAuthorPapers() {
   }
 }
 
+function beginTaskDialogStep(step) {
+  const task = state.dialog;
+  task.scrollPositions ??= {};
+  if (task.step) task.scrollPositions[task.step] = dialogBody.scrollTop;
+  task.step = step;
+  return task.scrollPositions[step] ?? 0;
+}
+
 function renderTaskConfiguration(errorMessage = "") {
   const task = state.dialog;
+  const scrollTop = beginTaskDialogStep("configure");
   dialogEyebrow.textContent = "Step 1 of 2 · Configure";
   dialogTitle.textContent = task.action === "write" && task.targets.length > 1
     ? "Write papers" : actionNames[task.action];
+  if (task.editJob) dialogTitle.textContent = "Edit settings";
   dialogBody.replaceChildren();
-  if (task.action === "write" && task.targets.length > 1) {
+  if (task.editJob) {
+    const count = task.editJob.runIds.length;
+    dialogBody.append(node("p", "", `Changes apply to ${count} queued run${count === 1 ? "" : "s"}. Running and completed runs keep their saved settings. The queue continues while you edit.`));
+    if (errorMessage) {
+      dialogBody.append(button("Reload pending runs", () => openJobSettings(task.editJob.id)));
+    }
+  }
+  if (!task.editJob && task.action === "write" && task.targets.length > 1) {
     const modes = node("fieldset", "write-modes");
     modes.append(node("legend", "", "Write as"));
     for (const [value, label] of [
@@ -4596,6 +5007,17 @@ function renderTaskConfiguration(errorMessage = "") {
   if (errorMessage) dialogBody.append(node("div", "error-box", errorMessage));
   const grid = node("div", "form-grid");
   const options = task.options;
+  if (task.action === "download" && task.editJob) {
+    grid.append(checkbox("force", "Force replacement", "Re-download files for arXiv directories that already exist.", options.force));
+    dialogBody.append(grid);
+    grid.querySelectorAll("input").forEach(input => input.addEventListener("input", saveDialogOptions));
+    dialogFooter.replaceChildren(
+      button("Cancel", () => dialog.close()),
+      button("Review changes", reviewTask, "button primary"),
+    );
+    dialogBody.scrollTop = scrollTop;
+    return;
+  }
   if (task.action === "download") {
     const roots = state.settings.paperRoots || [];
     const acquisition = options.acquisition || "ids";
@@ -4665,6 +5087,7 @@ function renderTaskConfiguration(errorMessage = "") {
         button("Review download", reviewTask, "button primary"),
       );
     }
+    dialogBody.scrollTop = scrollTop;
     return;
   }
   grid.append(field("prompt", promptLabel(task.action), {
@@ -4720,7 +5143,7 @@ function renderTaskConfiguration(errorMessage = "") {
     grid.append(checkbox("recoverComplete", "Recover completed workspace", "Install a preserved completed analysis without a new model turn.", options.recoverComplete));
   }
   if (task.action === "write") {
-    if (task.targets.some(value => value.kind === "attempt")) {
+    if (!task.editJob && task.targets.some(value => value.kind === "attempt")) {
       const pin = checkbox(
         "pinAttempts",
         "Pin to attempt",
@@ -4735,16 +5158,16 @@ function renderTaskConfiguration(errorMessage = "") {
     }
     grid.append(field("authors", "Authors", { type: "textarea", value: Array.isArray(options.authors) ? options.authors.join("\n") : options.authors || "", help: "One author per line." }));
     grid.append(field("title", "Title direction", { value: options.title || "" }));
-    if (!separateWriteTasks(task)) {
+    if (!task.editJob && !separateWriteTasks(task)) {
       grid.append(field("name", "Manuscript directory name", { value: options.name || "", help: "Leave blank for the derived name." }));
     }
   }
   if (task.action === "revise") {
     grid.append(field("authors", "Override authors", { type: "textarea", value: Array.isArray(options.authors) ? options.authors.join("\n") : options.authors || "", help: "Leave blank to inherit." }));
     grid.append(field("title", "Override title direction", { value: options.title || "" }));
-    grid.append(checkbox("refreshResults", "Refresh result selection", "Promote stored selectors to paper scope and use latest attempts.", options.refreshResults));
+    if (!task.editJob) grid.append(checkbox("refreshResults", "Refresh result selection", "Promote stored selectors to paper scope and use latest attempts.", options.refreshResults));
   }
-  grid.append(field("priorityLevel", "Scheduling weight", {
+  if (!task.editJob) grid.append(field("priorityLevel", "Scheduling weight", {
     type: "select",
     value: options.priorityLevel ?? "0",
     options: priorityOptions(),
@@ -4762,7 +5185,10 @@ function renderTaskConfiguration(errorMessage = "") {
     type: "select", value: options.reasoningEffort || "",
     options: [["", `Default (${taskDefaults.reasoningEffort || "unavailable"})`], ...["low", "medium", "high", "xhigh", "max", "ultra"].map(value => [value, value])],
   }));
-  advancedGrid.append(checkbox("fast", "Fast service tier", "Uses additional credits.", options.fast));
+  advancedGrid.append(field("serviceTier", "Speed / service tier", {
+    type: "select", value: options.serviceTier || (options.fast ? "fast" : "standard"),
+    options: [["standard", "Standard"], ["fast", "Fast (higher cost)"], ["ultrafast", "Ultrafast (highest cost; requires model/account support)"]],
+  }));
   if (["literature", "solve", "review", "visualize", "write", "revise"].includes(task.action)) {
     advancedGrid.append(field("webSearch", "Web search", {
       type: "select", value: options.webSearch || "",
@@ -4782,7 +5208,7 @@ function renderTaskConfiguration(errorMessage = "") {
   }
   advancedGrid.append(field("codexHome", "CODEX_HOME", {
     value: options.codexHome || "", placeholder: "~/.codex", full: true,
-    help: "Leave blank to inherit the default. ~ expands to the server's HOME directory.",
+    help: "Leave blank to inherit the server's CODEX_HOME or default. Dry runs warn if the selected or default home directory is missing. ~ expands to the server's HOME directory.",
   }));
   modelSettings.append(advancedGrid);
   grid.append(modelSettings);
@@ -4790,8 +5216,9 @@ function renderTaskConfiguration(errorMessage = "") {
   grid.querySelectorAll("input, textarea, select").forEach(input => input.addEventListener("input", saveDialogOptions));
   dialogFooter.replaceChildren(
     button("Cancel", () => dialog.close()),
-    button(separateWriteTasks(task) ? `Review ${task.targets.length} jobs` : "Review task", reviewTask, "button primary"),
+    button(task.editJob ? "Review changes" : separateWriteTasks(task) ? `Review ${task.targets.length} jobs` : "Review task", reviewTask, "button primary"),
   );
+  dialogBody.scrollTop = scrollTop;
 }
 
 function collectDialogOptions() {
@@ -4817,7 +5244,7 @@ function saveDialogOptions() {
     }
   }
   state.dialog.options = collected;
-  sessionStorage.setItem(state.dialog.storageKey, JSON.stringify(state.dialog.options));
+  if (state.dialog.storageKey) sessionStorage.setItem(state.dialog.storageKey, JSON.stringify(state.dialog.options));
 }
 
 function taskRequestOptions(task) {
@@ -4835,7 +5262,7 @@ function taskRequestOptions(task) {
 }
 
 function separateWriteTasks(task) {
-  return task.action === "write" && task.targets.length > 1 &&
+  return !task.editJob && task.action === "write" && task.targets.length > 1 &&
     task.options.writeMode !== "combined";
 }
 
@@ -4859,8 +5286,15 @@ async function reviewTask() {
   dialog.setAttribute("aria-busy", "true");
   try {
     task.plans = [];
-    for (const request of taskRequests(task)) {
-      task.plans.push(await api("/api/plans", { method: "POST", body: request }));
+    if (task.editJob) {
+      task.plans.push(await api(`/api/jobs/${task.editJob.id}/edit-plan`, {
+        method: "POST",
+        body: { ...task.editJob, options: task.options },
+      }));
+    } else {
+      for (const request of taskRequests(task)) {
+        task.plans.push(await api("/api/plans", { method: "POST", body: request }));
+      }
     }
     task.plan = {
       ...task.plans[0],
@@ -4878,6 +5312,7 @@ async function reviewTask() {
 
 function renderTaskConfirmation() {
   const task = state.dialog;
+  const scrollTop = beginTaskDialogStep("confirm");
   const plan = task.plan;
   dialogEyebrow.textContent = "Step 2 of 2 · Confirm";
   dialogTitle.textContent = plan.title;
@@ -4885,13 +5320,15 @@ function renderTaskConfirmation() {
   const scope = task.plans.length > 1
     ? `${task.plans.length} separate Write jobs, each producing one paper,`
     : `${plan.units.length} managed run${plan.units.length === 1 ? "" : "s"}`;
-  const intro = node("p", "", `This will queue ${scope} with a ${priorityMultiplier(plan.priorityLevel)} scheduling weight. Nothing has started yet.`);
+  const intro = node("p", "", task.editJob
+    ? `Save settings for ${plan.units.length} queued run${plan.units.length === 1 ? "" : "s"}. Running and completed runs keep their saved settings.`
+    : `This will queue ${scope} with a ${priorityMultiplier(plan.priorityLevel)} scheduling weight. Nothing has started yet.`);
   dialogBody.append(intro);
   if (plan.warnings.length) plan.warnings.forEach(value => dialogBody.append(node("div", "warning", value)));
   if (plan.options?.codexHome) {
     const block = node("section", "confirm-block");
     block.append(node("h3", "", "Environment"));
-    block.append(node("p", "", "Applies to all dry-run previews and runs in this task."));
+    block.append(node("p", "", task.editJob ? "Applies to the queued runs shown below." : "Applies to all dry-run previews and runs in this task."));
     block.append(node("pre", "command", `CODEX_HOME=${plan.options.codexHome}`));
     dialogBody.append(block);
   }
@@ -4937,8 +5374,29 @@ function renderTaskConfirmation() {
   });
   dialogFooter.replaceChildren(
     button("Back", () => renderTaskConfiguration()),
-    button(task.plans.length > 1 ? `Start ${task.plans.length} jobs` : `Start ${plan.units.length} run${plan.units.length === 1 ? "" : "s"}`, confirmTask, "button primary"),
+    button(task.editJob ? "Save changes" : task.plans.length > 1 ? `Start ${task.plans.length} jobs` : `Start ${plan.units.length} run${plan.units.length === 1 ? "" : "s"}`, task.editJob ? confirmJobEdit : confirmTask, "button primary"),
   );
+  dialogBody.scrollTop = scrollTop;
+}
+
+async function confirmJobEdit() {
+  const task = state.dialog;
+  dialogFooter.querySelectorAll("button").forEach(value => { value.disabled = true; });
+  try {
+    const job = await api(`/api/jobs/${task.editJob.id}/settings`, {
+      method: "POST", body: { planId: task.plan.id },
+    });
+    state.jobDetails.set(job.id, job);
+  } catch (error) {
+    task.plan = null;
+    task.plans = [];
+    renderTaskConfiguration(error.message);
+    return;
+  }
+  dialog.close();
+  state.dialog = null;
+  await refreshJobs().catch(error => showNotice(error.message, true));
+  await loadJob(task.editJob.id);
 }
 
 async function confirmTask() {
@@ -4981,6 +5439,31 @@ async function refreshCatalog() {
 }
 
 async function refreshJobs({ preserveActivityDetail = false } = {}) {
+  clearTimeout(jobsRefreshTimer);
+  jobsRefreshTimer = null;
+  jobsRefreshPending = true;
+  jobsRefreshPreserveDetail &&= preserveActivityDetail;
+  if (jobsRefresh) return jobsRefresh;
+  jobsRefresh = (async () => {
+    // A change arriving during a fetch needs one trailing fetch, rather than
+    // a parallel request whose older response could overwrite newer state.
+    while (jobsRefreshPending) {
+      const preserveDetail = jobsRefreshPreserveDetail;
+      jobsRefreshPending = false;
+      jobsRefreshPreserveDetail = true;
+      await fetchJobs({ preserveActivityDetail: preserveDetail });
+    }
+  })();
+  try {
+    await jobsRefresh;
+  } finally {
+    jobsRefresh = null;
+    jobsRefreshPending = false;
+    jobsRefreshPreserveDetail = true;
+  }
+}
+
+async function fetchJobs({ preserveActivityDetail }) {
   const value = await api("/api/jobs");
   state.jobs = value.jobs;
   updateActivityCount();
@@ -4995,6 +5478,15 @@ async function refreshJobs({ preserveActivityDetail = false } = {}) {
   const url = currentUrl();
   history.replaceState(historyPayload(window.scrollY), "", url);
   renderedUrl = url;
+}
+
+function scheduleJobsRefresh() {
+  if (jobsRefreshTimer !== null) return;
+  jobsRefreshTimer = setTimeout(() => {
+    jobsRefreshTimer = null;
+    refreshJobs({ preserveActivityDetail: true })
+      .catch(error => showNotice(error.message, true));
+  }, 100);
 }
 
 function connectEvents() {
@@ -5033,8 +5525,11 @@ function connectEvents() {
         refreshCatalog().catch(error => showNotice(error.message, true));
       }
       if (value.type === "tasks.changed") {
-        refreshJobs({ preserveActivityDetail: true })
-          .catch(error => showNotice(error.message, true));
+        scheduleJobsRefresh();
+      }
+      if (value.type === "usage.changed") {
+        state.usageCache.clear();
+        refreshVisibleUsage(true);
       }
       if (value.type === "settings.changed") {
         state.settings = { ...state.settings, ...value };
@@ -5079,5 +5574,8 @@ window.addEventListener("popstate", event => {
     scrollY: event.state?.looseEndsWorkbench ? event.state.scrollY : undefined,
   });
 });
+
+setInterval(refreshLiveActivity, 2000);
+document.addEventListener("visibilitychange", refreshLiveActivity);
 
 start();

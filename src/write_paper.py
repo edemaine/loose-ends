@@ -1630,6 +1630,7 @@ def _install_draft(
                 "requested_model": options.model,
                 "requested_reasoning_effort": options.reasoning_effort,
                 "requested_fast_mode": options.fast,
+                "requested_service_tier": options.service_tier,
                 "requested_web_search": web_search,
                 "status": result["status"],
                 "title": result["title"],
@@ -1964,6 +1965,7 @@ def run_paper_review(
                     "requested_model": options.model,
                     "requested_reasoning_effort": options.reasoning_effort,
                     "requested_fast_mode": options.fast,
+                    "requested_service_tier": options.service_tier,
                     "requested_web_search": web_search,
                     "verdict": result["verdict"],
                 },
@@ -2135,7 +2137,8 @@ def _inherit_options(
     return codex_cli.ModelOptions(
         secondary.model or primary.model,
         secondary.reasoning_effort or primary.reasoning_effort,
-        secondary.fast or primary.fast,
+        secondary.fast or (primary.fast and not secondary.ultrafast),
+        secondary.ultrafast or (primary.ultrafast and not secondary.fast),
     )
 
 
@@ -2462,6 +2465,7 @@ def main(argv: list[str] | None = None) -> int:
         return codex_cli.report_error(parser, exc)
 
     if args.dry_run:
+        codex_cli.report_codex_home_warnings()
         print(f"Would write one manuscript: {manuscript_directory}")
         if selection_changed:
             print("  result selection changed; an author round will run first")

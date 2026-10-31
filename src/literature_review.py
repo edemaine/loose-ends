@@ -457,6 +457,7 @@ def _install_literature(
             "requested_model": options.model,
             "requested_reasoning_effort": options.reasoning_effort,
             "requested_fast_mode": options.fast,
+            "requested_service_tier": options.service_tier,
             "requested_web_search": web_search,
             "resolution_status": entry["resolution_status"],
             "confidence": entry["confidence"],
@@ -524,6 +525,7 @@ def _write_work_record(
             "requested_model": options.model,
             "requested_reasoning_effort": options.reasoning_effort,
             "requested_fast_mode": options.fast,
+            "requested_service_tier": options.service_tier,
             "requested_web_search": web_search,
         },
     )
@@ -942,6 +944,8 @@ def main(argv: list[str] | None = None) -> int:
             stale.append(problem)
 
     if args.dry_run:
+        if stale:
+            codex_cli.report_codex_home_warnings()
         for problem in stale:
             print(
                 f"Would search literature: {problem.paper_directory} "

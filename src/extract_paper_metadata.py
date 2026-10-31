@@ -200,6 +200,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Would skip {paper}: title and authors are already present.")
             return 0
         if args.dry_run:
+            codex_cli.report_codex_home_warnings()
             print("Would ask Codex to extract title and authors from:")
             print(f"  PDF: {paper / 'paper.pdf'}")
             source = paper / "source"
