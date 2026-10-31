@@ -570,11 +570,6 @@ class QueueMemoryController:
         if not self.available:
             if desired is None or not _memory_enforcement_supported():
                 return None
-            if not (os.name == "nt" or sys.platform.startswith("linux")):
-                # Hosts without a supported backend (such as macOS) run
-                # workers unlimited, matching reconcile(), which reports the
-                # missing enforcement instead of pausing the queue.
-                return None
             raise OSError(self.error or "worker memory enforcement is unavailable")
         try:
             container = self._containers.get(run_id)
