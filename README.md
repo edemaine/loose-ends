@@ -15,6 +15,8 @@ Eventually, the idea is for humans and LLMs to work together on open problems.
 
 Loose Ends enables the following research workflow:
 
+![Loose Ends workflow: survey papers and problems, iterate on solution attempts and independent reviews, then write and review manuscripts for expert human review.](docs/workflow.svg)
+
 1. **Fetch papers.** Download PDFs, source, and metadata from arXiv, either by
    paper ID or author.
 2. **Analyze papers.** Build a technical summary and extract the important
@@ -57,7 +59,7 @@ The workbench additionally uses `watchdog` for efficient filesystem updates.
 
 To use Loose Ends, install the following prerequisites if you haven't already:
 
-* [Python](https://www.python.org/)
+* [Python 3.11+](https://www.python.org/)
 * Python dependencies: `python -m pip install -r requirements.txt`
 * [Codex CLI](https://learn.chatgpt.com/docs/codex/cli), and run
   `codex login` to authenticate your account
@@ -148,17 +150,81 @@ review the exact commands and dry-run previews, and then start the runs. Once a
 task starts, the workbench switches automatically to **Activity**, where you
 can follow its status and console output; or use the back button to return.
 Use **Activity** at any time to revisit task history, logs, failures, and output
-paths. The **Workers** control in the top bar sets how many queued CLI runs may
+paths. **Edit settings** lets you change queued runs' account, model, prompts,
+and other execution options, then review updated commands and dry-run previews
+before saving. For a task that has started, **Edit remaining runs** applies only
+to its queued runs. Running and completed runs retain their settings, including
+when retried. If pending runs change while you edit, reload them and review again.
+The **Workers** control in the top bar sets how many queued CLI runs may
 execute concurrently. The same control sets a total memory allocation as a
 percentage of installed RAM, a fixed number of GB, or infinity. That allocation
 is divided by the maximum worker count to produce an independent limit for each
 worker. The default is 50% of installed RAM.
 
+Paper, problem, and manuscript pages have a **Cost** button in their action row,
+labeled with the estimated API cost. It opens a popup with tokens and costs.
+Problem popups show both the lifetime problem total and the selected attempt
+(including its critic); manuscript popups show all drafts and the selected
+draft. Activity keeps its **Usage** section below **Needs attention**.
+The usage table shows stage and total
+rows with elapsed time, input, cache reads/writes, output, reasoning, and estimated cost. Reasoning
+is part of output, and cache reads/writes are part of input, so neither is
+added twice. Use **Cost** in the multiselect bar to total selected items;
+overlapping selections count each invocation once. Paper totals include
+analysis and all problems. Manuscript work is counted separately from its
+source papers and problems.
+
+Elapsed time sums wall-clock durations, counting overlapping work separately.
+New managed invocations record precise durations, including failed invocations.
+Historical runs use SQLite start/end timestamps as fallback, with precise
+invocation times subtracted before adding any remainder. `≈` marks run-time
+fallbacks, `+` includes active work, and `*` marks partial timing coverage.
+Time without an attributable stage (including setup and work outside timed
+calls) is combined in an **Unknown** row immediately before **Total**. It uses
+**Unknown model** for filtering when its model is also unassigned.
+Model filters include a fallback only when its model
+attribution supports the selected models; they never divide a mixed-model run
+arbitrarily. Logs without invocation timing or a corresponding managed run
+show elapsed time as unavailable. Queue waiting time is excluded.
+
+Usage is indexed in the workbench SQLite database. A background import starts
+automatically and checks for changed logs every 30 seconds; unchanged logs
+are skipped and growing logs are read from their saved position. Queries do
+not parse logs. Recorded usage survives replacement of installed artifacts or
+removal of Activity records. Historical logs are backfilled when available;
+missing usage and unknown model prices are marked as partial. Rebuilding from
+logs can only recover history whose logs are still present.
+
+Prices are API-equivalent token estimates, not subscription charges. The
+versioned rate table in `src/workbench_usage.py` uses current short-context
+rates and 30-minute cache writes, with Fast/Ultrafast multipliers. Unreported
+cache writes use ordinary input rates. Tool fees, long-context premiums, and
+account-specific discounts are excluded. **Pricing details** shows the assumed
+USD-per-million-token rates for each model and service tier in the total,
+including the Fast/Ultrafast multipliers. Unknown rates appear as dashes and
+are excluded from the price estimate. In Cost popups, checkboxes beside the
+models filter token counts, elapsed time, stages, and costs across the popup; a model's
+service tiers are selected together. All models are included when opening a
+popup, and these selections do not change stored usage or the page's total.
+The **Successful runs only** checkbox in **Pricing details** filters tokens,
+costs, and elapsed time to succeeded runs, excluding unsuccessful and active
+runs. For older logs without a managed run status, it uses completed turns.
+It combines with model selections and resets when opening a Cost popup.
+Successful runs can still have missing usage or unknown pricing, so their
+cost estimate may remain partial.
+Raw tokens are stored independently
+of the rate table, so updating prices does not require reimporting logs.
+Cache-write zeros are preserved from Codex logs. Its usage schema permits a
+default zero, so these logs cannot distinguish a measured zero from an
+upstream counter that was not supplied.
+
 To use multiple Codex accounts, set **CODEX_HOME** at the bottom of a task's
 **Model and web-search settings** to the directory authenticated for the desired
 account, such as `~/.codex_personal`. A leading `~` expands to the server's
 `$HOME`; leaving the field blank preserves the inherited default. The setting
-applies to that task, including retries. See
+applies to that task, including retries. Codex dry runs warn when the selected
+or default home directory is missing. The web app also shows these
+warnings before you start the task. See
 [T3 Code's multiple-account guide](https://github.com/pingdotgg/t3code/blob/main/docs/user/providers-codex.md#use-multiple-accounts)
 for account setup instructions.
 
@@ -521,7 +587,11 @@ Reasoning effort is separate from the model ID. Supported levels include
 `low`, `medium`, `high`, `xhigh`, `max`, and `ultra`; a selected model may
 support only a subset. `--fast` requests Codex's faster service tier for these
 runs without changing the global CLI configuration; Fast mode consumes credits
-at a higher rate.
+at a higher rate. Use `--ultrafast` for the Ultrafast service tier, where the
+selected model and account support it. `--fast` and `--ultrafast` are mutually
+exclusive. Automatic critics inherit the primary tier unless overridden with
+`--review-fast` or `--review-ultrafast`. The workbench exposes Standard, Fast,
+and Ultrafast under **Model and web-search settings → Speed / service tier**.
 
 Codex writes in a temporary workspace beneath the paper's `analysis/`
 directory. The runner stages disposable copies of `paper.pdf` and `source/`
@@ -1177,6 +1247,10 @@ elsewhere. The default binding is local-only. To use the workbench from another
 machine on a trusted network, pass `--host 0.0.0.0` and browse to this machine's
 IP address.
 
+On macOS and other platforms without an enforcement backend, workers run
+without a memory limit regardless of the configured allocation. The worker
+popover shows a warning; tasks can still start.
+
 Linux enforcement requires a writable cgroups v2 subtree delegated to the
 workbench with the memory controller enabled. By default, the workbench creates
 a manager cgroup and one child cgroup per worker beneath its current cgroup. A
@@ -1194,13 +1268,22 @@ All Codex-backed commands share the analyzer's `--model`,
 `--reasoning-effort`, `--fast`, `--codex`, Cygwin path conversion, Windows ACL
 repair, and transient startup retry behavior. Batch commands also expose
 concurrency controls.
-Automated Codex runs ignore the invoking user's Codex configuration and
+Automated Codex runs ignore the invoking user's Codex execution settings and
 explicitly disable MCP/plugin app tools, shell network access, automatic MCP
 dependency installation, and nested agent spawning. Paper analysis and triage
 also disable web search; literature, solver, paper writer, and critic runs
 default to live first-party web search, independently of shell network access.
-Saved Codex authentication is still used, as documented for
-`--ignore-user-config`. On Windows, the launcher explicitly restores the
+Saved Codex authentication is still used. With `--ignore-user-config`, the
+launcher explicitly preserves these settings from `$CODEX_HOME/config.toml`
+(default: `~/.codex/config.toml`): `cli_auth_credentials_store`,
+`forced_login_method`, `forced_chatgpt_workspace_id`, `sqlite_home`,
+`model_provider`, the selected `model_providers` entry, `openai_base_url`, and
+`chatgpt_base_url`. Relative SQLite and provider authentication working-directory
+paths resolve from the configuration directory. If `sqlite_home` is absent,
+a nonempty `CODEX_SQLITE_HOME` supplies it. Other environment variables,
+including authentication tokens and certificate settings, remain inherited.
+Missing configuration files use defaults; unreadable or invalid files fail
+before the agent starts. On Windows, the launcher explicitly restores the
 elevated sandbox implementation so `workspace-write` remains effective even
 though user configuration is ignored.
 

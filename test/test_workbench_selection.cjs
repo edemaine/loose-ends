@@ -11,7 +11,8 @@ const functions = [
   "paperFilterControl", "renderPaperFilters", "filteredPapers", "renderPapers", "paperSideMeta",
   "manuscriptFilterControl", "renderManuscriptFilters", "filteredManuscripts", "renderManuscripts",
   "sidebarSearch", "renderActivity",
-  "syncListNavigation", "restoreSidebarScroll", "revealIfHidden", "revealCentered",
+  "inlineMarkdown",
+  "syncListNavigation", "rememberSidebarScroll", "restoreSidebarScroll", "revealIfHidden", "revealCentered",
   "paperSortControl", "manuscriptSortControl", "normalizeManuscriptSort",
   "olderVersionWarning", "olderAttemptWarning", "openRoute",
 ].map(name => source.match(new RegExp(`^function ${name}[(][^]*?^}`, "m"))[0]).join("\n");
@@ -90,7 +91,7 @@ function harness(view, sort = "alphabetical") {
     };
   }
   const context = vm.createContext({
-    state, reviewModel, node, renderScrollTarget: null,
+    state, reviewModel, node, markdownRenderer: null, renderScrollTarget: null,
     manuscriptSortOptions: [["latest", "Latest drafts"], ["alphabetical", "Alphabetical"]],
     document: { createTextNode: text => text, getElementById: () => ({ content: { cloneNode() {} } }) },
     button: (text, handler) => ({ text, handler }),
@@ -302,18 +303,24 @@ for (const tab of ["research", "papers", "manuscripts", "activity"]) {
     const { context, state } = harness("Research");
     const primary = scrollContainer(500);
     const secondary = scrollContainer(80);
-    const split = ["research", "manuscripts"].includes(tab);
-    context.sidebar = split ? {
-      dataset: {}, scrollTop: 0,
-      querySelector: selector => selector.endsWith("-scroll") ? primary : secondary,
-    } : primary;
+    const hasSecondary = ["research", "manuscripts"].includes(tab);
+    const primarySelector = {
+      research: ".problem-scroll", papers: ".paper-scroll",
+      manuscripts: ".manuscript-scroll", activity: ".activity-scroll",
+    }[tab];
+    context.sidebar = {
+      dataset: { tab }, scrollTop: 25,
+      querySelector: selector => selector === primarySelector ? primary
+        : hasSecondary && [".attempt-list", ".draft-list"].includes(selector) ? secondary : null,
+    };
     state.sidebarScroll = { [tab]: 100 };
     state.sidebarSecondaryScroll = { [tab]: 100 };
     state.keepSidebarSelectionVisible = true;
     context.restoreSidebarScroll(tab);
     assert.equal(primary.scrollTop, 340);
     assert.equal(state.sidebarScroll[tab], 340);
-    if (split) {
+    assert.equal(context.sidebar.scrollTop, 0);
+    if (hasSecondary) {
       assert.equal(secondary.scrollTop, 80);
       assert.equal(state.sidebarSecondaryScroll[tab], 80);
     }
@@ -322,6 +329,9 @@ for (const tab of ["research", "papers", "manuscripts", "activity"]) {
     state.sidebarScroll[tab] = 100;
     context.restoreSidebarScroll(tab);
     assert.equal(primary.scrollTop, 100);
+    primary.scrollTop = 175;
+    context.rememberSidebarScroll();
+    assert.equal(state.sidebarScroll[tab], 175);
   });
 }
 

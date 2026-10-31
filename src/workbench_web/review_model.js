@@ -537,8 +537,15 @@
     }).sort((left, right) => comparePaperEntries(left, right, sort));
   }
 
-  function attemptTags(item, { includeKnown = false } = {}) {
+  function attemptTags(item, { includeKnown = false, includeProblem = false } = {}) {
     const values = [];
+    if (includeProblem) {
+      if (item.explicitness) values.push(["source", item.explicitness]);
+      if (item.totalAttemptCount != null) {
+        const count = item.totalAttemptCount;
+        values.push(["attempts", String(count), `${count} attempt${count === 1 ? "" : "s"}`]);
+      }
+    }
     if (includeKnown && item.literatureStatus === "resolved") values.push(["known", "known"]);
     if (item.claimedResultType) values.push(["claim", item.claimedResultType]);
     if (item.attemptStatus === "reviewed") {
@@ -547,14 +554,28 @@
         ["coverage", item.reviewedCoverage],
         ["importance", item.importance],
       );
-    } else {
+      if (item.current === false) values.push(["status", "stale review"]);
+    } else if (!includeProblem || item.totalAttemptCount !== 0 || item.attemptStatus !== "unattempted") {
       values.push(["status", statusLabel(item.attemptStatus)]);
     }
-    return values.filter(([, value]) => value).map(([dimension, value]) => ({
+    let legacyShown = false;
+    return values.filter(([, value]) => {
+      if (!value) return false;
+      if (value !== "legacy") return true;
+      if (legacyShown) return false;
+      legacyShown = true;
+      return true;
+    }).map(([dimension, value, label]) => ({
       dimension,
       value,
-      label: humanize(value),
-      title: `${dimension}: ${humanize(value)}`,
+      label: label || (value === "legacy" ? "legacy review"
+        : value === "none" ? { claim: "no claimed result", coverage: "no coverage", importance: "no importance" }[dimension]
+        : humanize(value)),
+      title: dimension === "source" ? `Relation to source paper: ${humanize(value)}`
+        : dimension === "attempts" ? `Total solution attempts for this problem: ${value}`
+        : value === "legacy" ? "This review predates the separate correctness, coverage, and importance assessments"
+        : dimension === "status" ? `Solution attempt: ${humanize(value)}`
+        : `${dimension}: ${humanize(value)}`,
       className: ["claim", "status", "known"].includes(dimension) ? dimension : "",
     }));
   }

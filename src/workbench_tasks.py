@@ -41,6 +41,12 @@ MAX_DRY_RUN_OUTPUT = 100_000
 MAX_DRY_RUN_WORKERS = 4
 MIN_PRIORITY_LEVEL = -3
 MAX_PRIORITY_LEVEL = 3
+EDITABLE_TASK_OPTIONS = {
+    "codexHome", "model", "reasoningEffort", "fast", "serviceTier", "webSearch", "prompt",
+    "reviewModel", "reviewReasoningEffort", "reviewWebSearch", "reviewPrompt",
+    "maxRounds", "review", "reviewTimeoutMinutes", "includeLiteratureResolved",
+    "mode", "timeoutMinutes", "force", "recoverComplete", "authors", "title",
+}
 
 
 def task_cli_defaults() -> dict[str, dict[str, str]]:
@@ -177,16 +183,72 @@ def populate_dry_run_previews(plan: dict) -> dict:
     units = plan.get("units", [])
     if not units:
         return plan
+    if plan.get("action") != "download":
+        environment = os.environ.copy()
+        if plan.get("options", {}).get("codexHome"):
+            environment["CODEX_HOME"] = plan["options"]["codexHome"]
+        warnings = plan.setdefault("warnings", [])
+        for warning in codex_cli.codex_home_warnings(environment):
+            if warning not in warnings:
+                warnings.append(warning)
     with ThreadPoolExecutor(
         max_workers=min(MAX_DRY_RUN_WORKERS, len(units))
     ) as executor:
         futures = {
-            executor.submit(_dry_run_preview, unit, plan.get("options", {})): index
+            executor.submit(_dry_run_preview, unit, unit.get("options", plan.get("options", {}))): index
             for index, unit in enumerate(units)
         }
         for future in as_completed(futures):
             units[futures[future]]["dryRun"] = future.result()
     return plan
+
+
+def build_edit_plan(job: dict, request: dict, **planner_arguments) -> dict:
+    """Rebuild pending commands with fixed targets and reviewed execution settings."""
+    run_ids = request.get("runIds")
+    version = request.get("settingsVersion")
+    if (
+        not isinstance(run_ids, list) or not run_ids
+        or not all(isinstance(value, str) for value in run_ids)
+        or len(set(run_ids)) != len(run_ids)
+        or type(version) is not int
+    ):
+        raise PlanError("runIds and settingsVersion are required")
+    queued = [run for run in job["runs"] if run["status"] == "queued"]
+    if version != job["settings_version"] or set(run_ids) != {run["id"] for run in queued}:
+        raise ValueError("Pending runs or settings changed; reopen Edit settings and review again.")
+    options = request.get("options")
+    editable = {"force"} if job["action"] == "download" else EDITABLE_TASK_OPTIONS
+    if not isinstance(options, dict) or set(options) - editable:
+        raise PlanError("only execution settings can be edited; task type and targets are fixed")
+    plans = []
+    for run in queued:
+        merged = {key: value for key, value in run["options"].items() if key not in editable}
+        merged.update(options)
+        if job["action"] == "download":
+            # Freeze the destination even when the original request used its default.
+            merged["outputDirectory"] = run["argv"][run["argv"].index("--output-dir") + 1]
+        plan = build_plan({
+            "action": job["action"], "targets": run["targets"], "options": merged,
+        }, **planner_arguments)
+        if len(plan["units"]) != 1 or {
+            (target["kind"], target["path"]) for target in plan["units"][0]["targets"]
+        } != {(target["kind"], target["path"]) for target in run["targets"]}:
+            raise PlanError("editing settings must preserve each run's targets")
+        unit = plan["units"][0]
+        unit.update(runId=run["id"], options=plan["options"])
+        plans.append(plan)
+    return {
+        **plans[0],
+        "jobId": job["id"],
+        "title": job["title"],
+        "runIds": run_ids,
+        "settingsVersion": version,
+        "priorityLevel": job["priority_level"],
+        "units": [plan["units"][0] for plan in plans],
+        "targets": [target for plan in plans for target in plan["targets"]],
+        "warnings": list(dict.fromkeys(warning for plan in plans for warning in plan["warnings"])),
+    }
 
 
 def _under(path: Path, roots: Iterable[Path]) -> bool:
@@ -343,8 +405,11 @@ def _common_arguments(
         if effort not in codex_cli.REASONING_EFFORTS:
             raise PlanError("invalid reasoning effort")
         argv.extend(("--reasoning-effort", effort))
-    if options.get("fast") is True:
-        argv.append("--fast")
+    tier = options.get("serviceTier") or ("fast" if options.get("fast") is True else "standard")
+    if tier not in {"standard", "fast", "ultrafast"}:
+        raise PlanError("invalid service tier")
+    if tier != "standard":
+        argv.append(f"--{tier}")
     if web_search:
         mode = options.get("webSearch")
         if mode:

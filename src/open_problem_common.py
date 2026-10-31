@@ -18,6 +18,7 @@ from typing import Iterable, Sequence
 import analyze_papers
 from artifact_reporting import ARTIFACT_LOG_ENV, report_artifacts
 import codex_cli
+from validation import common as validation_common
 
 
 RUNS_DIRECTORY = ".runs"
@@ -194,6 +195,10 @@ def read_json(path: Path, *, description: str | None = None) -> dict:
     if not isinstance(value, dict):
         label = description or str(path)
         raise CodexError(f"{label} is not a JSON object: {path}")
+    reporter = validation_common.Reporter()
+    validation_common.validate_control_characters(value, reporter, path=f"{path.name}#")
+    if reporter.issues:
+        raise CodexError("\n".join(issue.render() for issue in reporter.issues))
     return value
 
 
@@ -740,6 +745,10 @@ def validate_markdown(path: Path, *, description: str) -> str:
         raise CodexError(f"Codex did not create {description}: {path.name}") from exc
     except (OSError, UnicodeError) as exc:
         raise CodexError(f"could not read generated {description}: {exc}") from exc
+    reporter = validation_common.Reporter()
+    validation_common.validate_control_characters(contents, reporter, path=path.name)
+    if reporter.issues:
+        raise CodexError("\n".join(issue.render() for issue in reporter.issues))
     if not contents.strip():
         raise CodexError(f"Codex created an empty {description}")
     if not contents.lstrip().startswith("#"):
