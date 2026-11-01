@@ -172,6 +172,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--force", action="store_true", help="replace populated metadata")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--codex", default="codex")
+    codex_cli.add_claude_argument(parser)
     codex_cli.add_prompt_arguments(
         parser,
         default_template=DEFAULT_PROMPT_PATH,
@@ -214,12 +215,14 @@ def main(argv: list[str] | None = None) -> int:
             args.prompt,
             task="paper metadata extraction",
         )
+        options = codex_cli.model_options_from_args(args)
+        codex, _ = codex_cli.resolve_backends(args, [options.model])
         extract_metadata(
             paper,
-            codex=codex_cli.resolve_codex_executable(args.codex),
+            codex=codex,
             prompt=prompt,
             schema_path=args.schema.expanduser().resolve(),
-            options=codex_cli.model_options_from_args(args),
+            options=options,
             force=args.force,
         )
     except (OSError, MetadataExtractionError) as exc:

@@ -695,6 +695,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="codex",
         help="Codex CLI executable or command name (default: codex)",
     )
+    codex_cli.add_claude_argument(parser)
     codex_cli.add_prompt_arguments(
         parser,
         default_template=DEFAULT_PROMPT_PATH,
@@ -802,8 +803,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if failures else 0
 
     try:
-        codex = resolve_codex_executable(args.codex)
-        codex_version = read_codex_version(codex)
+        codex, codex_version = codex_cli.resolve_backends(args, [args.model])
     except (AnalysisError, OSError) as exc:
         return codex_cli.report_error(parser, exc)
 
@@ -815,7 +815,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(
             f"Found {len(papers)} paper(s); running up to "
-            f"{min(args.jobs, len(papers))} Codex agent(s) at once."
+            f"{min(args.jobs, len(papers))} {codex_cli.backend_label(args.model)} agent(s) at once."
         )
 
     outcomes: list[AnalysisOutcome] = []

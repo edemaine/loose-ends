@@ -5,7 +5,7 @@ const vm = require("node:vm");
 
 const source = readFileSync(`${__dirname}/../src/workbench_web/app.js`, "utf8");
 const functions = [
-  "latestJobRuns", "retryJob", "codexItems", "refreshCodexLogs",
+  "latestJobRuns", "retryJob", "claudeToolDetail", "claudeResultText", "codexItems", "refreshCodexLogs",
   "separateWriteTasks", "taskRequests", "taskRequestOptions", "taskTargetsForRequest",
   "targetKey", "targetCountLabel", "reviewTask", "confirmTask", "collectDialogOptions",
   "saveProblemEditor", "configuredMemoryLimit", "renderMemoryControl",
@@ -250,6 +250,45 @@ test("Codex transcript updates items and keeps repeated IDs in later turns", () 
   assert.equal(items[0].aggregated_output, "done");
   assert.equal(items[1].text, "Hello");
   assert.equal(items[2].text, "failure");
+});
+
+test("Claude Code transcript folds tool results into their calls", () => {
+  const context = vm.createContext({});
+  vm.runInContext(functions, context);
+  const events = [
+    { type: "system", subtype: "init", claude_code_version: "2.1.263" },
+    { type: "system", subtype: "thinking_tokens", estimated_tokens: 5 },
+    { type: "assistant", message: { content: [
+      { type: "thinking", thinking: "" },
+      { type: "text", text: "Reading inputs." },
+      { type: "tool_use", id: "toolu_1", name: "Bash", input: { command: "ls inputs" } },
+    ] } },
+    { type: "user", message: { content: [
+      { type: "tool_result", tool_use_id: "toolu_1", content: [{ type: "text", text: "paper" }] },
+    ] } },
+    { type: "assistant", message: { content: [
+      { type: "tool_use", id: "toolu_2", name: "Write", input: { file_path: "attempt.md", content: "x" } },
+    ] } },
+    { type: "user", message: { content: [
+      { type: "tool_result", tool_use_id: "toolu_2", is_error: true, content: "denied" },
+    ] } },
+    { type: "result", subtype: "success", is_error: false, num_turns: 3, duration_ms: 10, total_cost_usd: 0.5, usage: { output_tokens: 7 } },
+  ].map(value => JSON.stringify(value)).join("\n");
+  const items = context.codexItems(events);
+  // Values from the sandbox have their own prototypes, so compare copies.
+  assert.deepEqual([...items.map(item => item.type)], ["agent_message", "Bash", "Write", "usage"]);
+  assert.equal(items[0].text, "Reading inputs.");
+  assert.equal(items[1].command, "ls inputs");
+  assert.equal(items[1].aggregated_output, "paper");
+  assert.equal(items[1].status, "completed");
+  assert.equal(items[2].command, "attempt.md");
+  assert.equal(items[2].status, "failed");
+  assert.equal(items[2].aggregated_output, "denied");
+  assert.deepEqual(JSON.parse(items[3].text), { num_turns: 3, duration_ms: 10, total_cost_usd: 0.5, usage: { output_tokens: 7 } });
+  const failed = context.codexItems(JSON.stringify({ type: "result", is_error: true, result: "hit your session limit" }));
+  assert.equal(failed.length, 1);
+  assert.equal(failed[0].type, "error");
+  assert.equal(failed[0].text, "hit your session limit");
 });
 
 test("shared transcript loader preserves report queries and pages both sources", async () => {

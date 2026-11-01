@@ -516,7 +516,7 @@ class MainOutputTests(unittest.TestCase):
         with (
             TemporaryDirectory() as temporary,
             patch.object(analyze_papers, "analysis_is_current", return_value=False),
-            patch.object(analyze_papers, "resolve_codex_executable") as resolve,
+            patch.object(codex_cli, "resolve_codex_executable") as resolve,
             patch.object(analyze_papers, "analyze_paper") as analyze,
             patch.dict(os.environ, {"CODEX_HOME": "", "USERPROFILE": ""}),
             patch.object(codex_cli.Path, "home", return_value=Path(temporary)),
@@ -540,12 +540,12 @@ class MainOutputTests(unittest.TestCase):
         with (
             TemporaryDirectory() as temporary,
             patch.object(
-                analyze_papers,
+                codex_cli,
                 "resolve_codex_executable",
                 return_value="codex",
             ),
             patch.object(
-                analyze_papers,
+                codex_cli,
                 "read_codex_version",
                 return_value="codex-cli test",
             ),

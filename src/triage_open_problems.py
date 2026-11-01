@@ -480,7 +480,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="report what would be triaged without starting Codex",
+        help="report what would be triaged without starting an agent",
     )
     parser.add_argument(
         "--solve",
@@ -504,6 +504,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="codex",
         help="Codex CLI executable or command name (default: codex)",
     )
+    codex_cli.add_claude_argument(parser)
     codex_cli.add_prompt_arguments(
         parser,
         default_template=DEFAULT_PROMPT_PATH,
@@ -628,11 +629,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if stale:
         try:
-            codex = (
-                repaired_codex
-                or codex_cli.resolve_codex_executable(args.codex)
+            codex, codex_version = codex_cli.resolve_backends(
+                args,
+                [options.model],
             )
-            codex_version = codex_cli.read_codex_version(codex)
         except common.CodexError as exc:
             return codex_cli.report_error(parser, exc)
     else:
@@ -646,7 +646,8 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"Triaging {len(stale)} stale problem(s) from "
             f"{len(grouped)} paper(s), with up to "
-            f"{min(args.jobs, len(grouped))} Codex agent(s) at once."
+            f"{min(args.jobs, len(grouped))} "
+            f"{codex_cli.backend_label(options.model)} agent(s) at once."
         )
         with ThreadPoolExecutor(
             max_workers=min(args.jobs, len(grouped))
@@ -717,6 +718,8 @@ def main(argv: list[str] | None = None) -> int:
             str(args.jobs),
             "--codex",
             args.codex,
+            "--claude",
+            args.claude,
         ]
         for problem in selected:
             solver_arguments.extend(

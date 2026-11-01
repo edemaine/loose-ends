@@ -879,13 +879,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="report pending reviews without starting Codex",
+        help="report pending reviews without starting an agent",
     )
     parser.add_argument(
         "--codex",
         default="codex",
         help="Codex CLI executable or command name (default: codex)",
     )
+    codex_cli.add_claude_argument(parser)
     codex_cli.add_prompt_arguments(
         parser,
         default_template=DEFAULT_PROMPT_PATH,
@@ -1037,13 +1038,16 @@ def main(argv: list[str] | None = None) -> int:
 
     if pending:
         try:
-            codex = codex_cli.resolve_codex_executable(args.codex)
-            codex_version = codex_cli.read_codex_version(codex)
+            codex, codex_version = codex_cli.resolve_backends(
+                args,
+                [options.model],
+            )
         except common.CodexError as exc:
             return codex_cli.report_error(parser, exc)
         print(
             f"Reviewing {len(pending)} attempt(s), with up to "
-            f"{min(args.jobs, len(pending))} Codex critic(s) at once."
+            f"{min(args.jobs, len(pending))} "
+            f"{codex_cli.backend_label(options.model)} critic(s) at once."
         )
         finished_count = 0
 

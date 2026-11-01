@@ -1360,7 +1360,7 @@ function renderSchedulerControl() {
       ? "Pause manually"
       : "Pause queue";
   if (state.settings.queuePauseReason === "codex_credits") {
-    workerStatus.textContent = `${counts.active} active; ${counts.queued} waiting. Codex credits exhausted. Replenish credits, then resume the queue. Active runs continue.`;
+    workerStatus.textContent = `${counts.active} active; ${counts.queued} waiting. Agent credits or usage limit exhausted: ${state.settings.codexCreditError || "see the failed run"}. Replenish credits or wait for the limit to reset, then resume the queue. Active runs continue.`;
   } else if (state.settings.memoryLimitPending && state.settings.memory?.error) {
     workerStatus.textContent = `${counts.active} active; ${counts.queued} waiting. Queue paused because memory enforcement failed.`;
   } else if (state.settings.memoryLimitPending) {
@@ -2474,7 +2474,7 @@ function renderReviewDetail(item) {
   }));
 
   const tabs = reviewModel.detailTabs(item);
-  tabs.splice(tabs.length - 1, 0, ["codex", "Codex logs"]);
+  tabs.splice(tabs.length - 1, 0, ["codex", "Agent logs"]);
   if (!tabs.some(([key]) => key === state.detailTab)) state.detailTab = tabs[0][0];
   const reports = node("section", "section problem-reports");
   reports.id = "problem-documents";
@@ -3733,13 +3733,13 @@ function renderJobDetail(job) {
     }
     const codexExpanded = state.expandedCodexRuns.has(run.id);
     const codexFooter = node("div", "run-detail-footer");
-    const codexToggle = button(`${codexExpanded ? "Hide" : "Show"} Codex transcript`, () => {
+    const codexToggle = button(`${codexExpanded ? "Hide" : "Show"} agent transcript`, () => {
       if (state.expandedCodexRuns.has(run.id)) state.expandedCodexRuns.delete(run.id);
       else state.expandedCodexRuns.add(run.id);
       renderJobDetail(job);
     }, "run-detail-toggle");
     codexToggle.setAttribute("aria-expanded", String(codexExpanded));
-    codexToggle.setAttribute("aria-label", `${codexExpanded ? "Hide" : "Show"} Codex transcript for ${presentation.title}`);
+    codexToggle.setAttribute("aria-label", `${codexExpanded ? "Hide" : "Show"} agent transcript for ${presentation.title}`);
     codexToggle.prepend(node("span", "run-chevron", "›"));
     codexFooter.append(codexToggle);
     section.append(codexFooter);
@@ -3852,7 +3852,7 @@ function catalogTranscriptFold(kind, item) {
     category: kind, key: item.key, version: state.catalog.version || 0,
   })}`;
   const fold = node("details", "catalog-transcript-fold");
-  fold.append(node("summary", "", "Codex logs"));
+  fold.append(node("summary", "", "Agent logs"));
   fold.open = state.expandedTranscriptPanels.has(key);
   if (fold.open) fold.append(codexTranscript(source));
   fold.addEventListener("toggle", () => {
@@ -3871,7 +3871,7 @@ function catalogTranscriptFold(kind, item) {
 function codexTranscript(source) {
   const element = node("section", "codex-transcripts");
   element.dataset.codexSource = source;
-  element.append(node("h3", "", "Codex transcript"));
+  element.append(node("h3", "", "Agent transcript"));
   return element;
 }
 
@@ -3881,6 +3881,23 @@ function refreshVisibleCodexLogs() {
   });
 }
 
+function claudeToolDetail(input) {
+  if (!input || typeof input !== "object") return {};
+  const detail = input.command ?? input.file_path ?? input.pattern ?? input.query ?? input.url;
+  return typeof detail === "string" ? { command: detail } : {};
+}
+
+function claudeResultText(content) {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content.map(block => (block && typeof block === "object" && typeof block.text === "string")
+      ? block.text : JSON.stringify(block)).join("\n");
+  }
+  return content == null ? "" : JSON.stringify(content, null, 2);
+}
+
+// Both CLIs' event streams reduce to the same items: agent messages, tool
+// activity keyed by ID so results merge into their calls, errors, and usage.
 function codexItems(text) {
   const items = new Map();
   let turn = 0;
@@ -3890,21 +3907,48 @@ function codexItems(text) {
     try { event = JSON.parse(line); } catch { continue; }
     if (!event || typeof event !== "object") continue;
     if (event.type === "thread.started" || event.type === "turn.started") turn++;
+    if (event.type === "system" && event.subtype === "init") turn++;
     if (event.item && typeof event.item === "object") {
       items.set(`${turn}:${event.item.id ?? sequence++}`, event.item);
     } else if (event.type === "error" || event.type === "turn.failed") {
       items.set(`error:${sequence++}`, { type: "error", text: event.message || event.error?.message || JSON.stringify(event) });
     } else if (event.type === "turn.completed") {
       items.set(`usage:${sequence++}`, { type: "usage", text: JSON.stringify(event.usage || {}) });
+    } else if (event.type === "assistant" || event.type === "user") {
+      const blocks = Array.isArray(event.message?.content) ? event.message.content : [];
+      for (const block of blocks) {
+        if (!block || typeof block !== "object") continue;
+        if (event.type === "assistant" && block.type === "text" && block.text) {
+          items.set(`${turn}:text:${sequence++}`, { type: "agent_message", text: block.text });
+        } else if (event.type === "assistant" && block.type === "tool_use") {
+          items.set(`${turn}:${block.id ?? sequence++}`, {
+            type: block.name || "tool_use", status: "in_progress",
+            ...claudeToolDetail(block.input), text: JSON.stringify(block.input ?? {}, null, 2),
+          });
+        } else if (event.type === "user" && block.type === "tool_result") {
+          const key = `${turn}:${block.tool_use_id ?? sequence++}`;
+          const item = items.get(key) || { type: "tool_result" };
+          item.status = block.is_error ? "failed" : "completed";
+          item.aggregated_output = claudeResultText(block.content);
+          items.set(key, item);
+        }
+      }
+    } else if (event.type === "result") {
+      if (event.is_error) {
+        items.set(`error:${sequence++}`, { type: "error", text: event.result || event.subtype || JSON.stringify(event) });
+      } else {
+        const { num_turns, duration_ms, total_cost_usd, usage } = event;
+        items.set(`usage:${sequence++}`, { type: "usage", text: JSON.stringify({ num_turns, duration_ms, total_cost_usd, usage }) });
+      }
     }
   }
   return [...items.values()];
 }
 
 function renderCodexTranscript(element, transcripts) {
-  element.replaceChildren(node("h3", "", "Codex transcript"));
+  element.replaceChildren(node("h3", "", "Agent transcript"));
   if (!transcripts.length) {
-    element.append(node("p", "muted", "No saved Codex transcript available yet."));
+    element.append(node("p", "muted", "No saved agent transcript available yet."));
   }
   for (const transcript of transcripts) {
     element.append(node("h4", "codex-invocation-heading", transcript.label));
@@ -3960,6 +4004,7 @@ async function refreshCodexLogs(source, element) {
     for (const entry of value.transcripts) {
       let transcript = cached.find(value => value.id === entry.id);
       if (!transcript) { transcript = { ...entry, files: {} }; cached.push(transcript); }
+      else if (entry.label && entry.label !== transcript.label) { transcript.label = entry.label; changed = true; }
       for (const kind of ["prompt", "events", "diagnostics"]) {
         // Older transcripts have no saved prompt.
         if (kind === "prompt" && entry.legacy) continue;
@@ -4606,18 +4651,47 @@ function field(name, label, { type = "text", value = "", placeholder = "", help 
   return wrapper;
 }
 
-function modelField(name, label, value, defaultLabel) {
-  const options = [
-    ["", defaultLabel],
+// Model IDs starting with "claude" run through the Claude Code CLI; every
+// other model runs through the Codex CLI.
+const MODEL_CHOICES = [
+  ["Codex", [
     ["gpt-6.1-sol", "GPT-6.1 Sol"],
     ["gpt-6-astra", "GPT-6 Astra"],
     ["gpt-5.6-sol", "GPT-5.6 Sol"],
     ["gpt-5.6-terra", "GPT-5.6 Terra"],
     ["gpt-5.6-luna", "GPT-5.6 Luna"],
-  ];
+  ]],
+  ["Claude Code", [
+    ["claude-fable-5-1", "Claude Fable 5.1"],
+    ["claude-opus-5-5", "Claude Opus 5.5"],
+    ["claude-opus-5", "Claude Opus 5"],
+    ["claude-sonnet-5", "Claude Sonnet 5"],
+  ]],
+];
+
+function modelField(name, label, value, defaultLabel) {
+  const wrapper = node("label", "field");
+  wrapper.append(node("span", "", label));
+  const input = node("select");
+  input.name = name;
+  const addOption = (parent, optionValue, optionLabel) => {
+    const option = node("option", "", optionLabel);
+    option.value = optionValue;
+    parent.append(option);
+  };
+  addOption(input, "", defaultLabel);
+  MODEL_CHOICES.forEach(([groupLabel, models]) => {
+    const group = node("optgroup");
+    group.label = groupLabel;
+    models.forEach(([id, text]) => addOption(group, id, text));
+    input.append(group);
+  });
   // Preserve model IDs from saved task drafts, including older models.
-  if (value && !options.some(([id]) => id === value)) options.push([value, value]);
-  return field(name, label, { type: "select", value: value || "", options });
+  const known = MODEL_CHOICES.flatMap(([, models]) => models.map(([id]) => id));
+  if (value && !known.includes(value)) addOption(input, value, value);
+  input.value = value || "";
+  wrapper.append(input, node("small", "", "Claude models run through the Claude Code CLI."));
+  return wrapper;
 }
 
 function checkbox(name, label, help = "", checked = false) {

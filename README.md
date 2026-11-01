@@ -63,6 +63,8 @@ To use Loose Ends, install the following prerequisites if you haven't already:
 * Python dependencies: `python -m pip install -r requirements.txt`
 * [Codex CLI](https://learn.chatgpt.com/docs/codex/cli), and run
   `codex login` to authenticate your account
+* Optionally, [Claude Code](https://code.claude.com/docs/en/overview), and run
+  `claude` once to log in, if you want to run tasks with Claude models
 * LaTeX, such as [TeX Live](https://www.tug.org/texlive/), including `latexmk`,
   to write manuscripts
 
@@ -533,6 +535,31 @@ selected model and account support it. `--fast` and `--ultrafast` are mutually
 exclusive. Automatic critics inherit the primary tier unless overridden with
 `--review-fast` or `--review-ultrafast`. The workbench exposes Standard, Fast,
 and Ultrafast under **Model and web-search settings → Speed / service tier**.
+
+### Claude Code backend
+
+A model ID starting with `claude` (for example, `--model claude-opus-5-5`, or
+`--review-model claude-fable-5-1` for the critic only) runs that agent through
+the [Claude Code](https://code.claude.com/docs/en/overview) CLI instead of
+Codex; `--claude` names the executable, as `--codex` does for Codex. The
+workbench's model menu lists both families. Each Claude turn ignores your
+user, project, and local Claude Code settings (no hooks, `CLAUDE.md` files,
+plugins, skills, or MCP servers), runs shell commands in Claude Code's sandbox
+with writes confined to the workspace and no network (the sandbox is the only
+check on shell commands, so no command waits for an approval nobody can give),
+auto-approves file edits only inside the workspace, and offers the `WebSearch`
+and `WebFetch` tools only when the task's web search is enabled. Because that sandbox runs on macOS,
+Linux, and WSL2 only, Claude turns fail early on native Windows rather than
+running unsandboxed. Reasoning effort maps onto Claude Code's `--effort`
+levels, with `ultra` treated as `max`, and `--fast` turns on Claude Code's fast
+mode for models and accounts that support it. If Claude falls back to standard
+speed, the reason is recorded in `run.log`. Ultrafast is unsupported and is rejected.
+Claude Code writes the same `events.jsonl`,
+`run.log`, and `agent-result.json` files, so attempts, reviews, and
+manuscripts are recorded and reviewed identically whichever backend produced
+them. Claude token totals include cache reads and writes; unknown Claude
+model prices remain explicitly unpriced. The transcript retains Claude's
+reported cost.
 
 Codex writes in a temporary workspace beneath the paper's `analysis/`
 directory. The runner stages disposable copies of `paper.pdf` and `source/`
@@ -1151,23 +1178,26 @@ interrupted and runs that installed no output can be retried. A run that
 installed output before a later phase failed is marked partial so the next
 action can operate on that output without accidentally duplicating it.
 
-In **Activity**, expand **Codex transcript** for a read-only
-transcript: Codex messages appear as Markdown, with expandable task prompts,
+In **Activity**, expand **agent transcript** for a read-only
+transcript: agent messages appear as Markdown, with expandable task prompts,
 tool activity, and diagnostics. Transcripts refresh while the run is active.
+Claude Code turns are shown the same way, labeled **Claude Code** instead of
+**Codex**, with each tool call folded together with its result.
 The **command & output** fold opens independently.
-Each problem also has a **Full reports → Codex logs** tab for the selected
+Each problem also has a **Full reports → Agent logs** tab for the selected
 attempt's saved solution/review logs and the problem's triage/literature logs.
 It shares the Activity transcript viewer, including expandable tool calls and
 paged loading. Original prompts remain available in Activity for archived runs.
-The **Papers** and **Manuscripts** tabs also have a **Codex logs** fold for
+The **Papers** and **Manuscripts** tabs also have an **Agent logs** fold for
 paper analysis and the selected draft's writing/review logs, respectively.
 New managed runs archive each Codex invocation separately, including repair
 turns and failures. Older runs use event logs beside their installed artifacts;
 these may reflect later reviews or replacements and do not include the prompt.
 
 Use the worker control in the top bar to change concurrent CLI invocations or
-pause new starts. Codex credit exhaustion automatically pauses the queue;
-replenish credits and use **Resume queue** to restart pending work. Active runs
+pause new starts. Codex credit exhaustion, or a Claude Code usage or session
+limit, automatically pauses the queue; replenish credits or wait for the limit
+to reset, then use **Resume queue** to restart pending work. Active runs
 continue. A task's **Retry all failed/partial** button creates a new task with
 its latest failed and partial runs, using the same commands and settings.
 Partial runs restart their commands and may repeat completed work.
