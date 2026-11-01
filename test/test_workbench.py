@@ -3057,6 +3057,39 @@ class WorkbenchStoreTests(unittest.TestCase):
             self.assertEqual(saved["outputs"], [str(first.resolve()), str(second.resolve())])
             self.assertEqual(saved["status"], "succeeded")
 
+    def test_stale_run_is_interrupted_when_no_worker_process_can_be_found(self):
+        with TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            store = WorkbenchStore(state / "workbench.sqlite3", state)
+            job = store.create_job(
+                {"action": "solve"},
+                fake_plan([sys.executable, "-c", "pass"]),
+            )
+            run = job["runs"][0]
+            store.mark_starting(run["id"])
+            store.update_run(run["id"], heartbeat_at=time.time() - 3600)
+            scheduler = workbench.Scheduler.__new__(workbench.Scheduler)
+            scheduler.store = store
+            scheduler.hub = Mock()
+            scheduler.memory = Mock()
+            scheduler.memory.available = False
+            scheduler.memory.run_has_processes.return_value = None
+            scheduler.memory_lock = threading.Lock()
+
+            for alive in (True, None):
+                with self.subTest(alive=alive), patch.object(
+                    workbench.Scheduler, "_worker_process_exists", return_value=alive
+                ):
+                    self.assertEqual(scheduler._interrupt_terminated_workers(), [])
+                    self.assertEqual(store.get_run(run["id"])["status"], "starting")
+            with patch.object(
+                workbench.Scheduler, "_worker_process_exists", return_value=False
+            ):
+                self.assertEqual(
+                    scheduler._interrupt_terminated_workers(), [run["id"]]
+                )
+            self.assertEqual(store.get_run(run["id"])["status"], "interrupted")
+
     def test_confirmed_terminated_worker_becomes_interrupted_and_can_retry(self):
         with TemporaryDirectory() as temporary:
             state = Path(temporary)
@@ -3576,6 +3609,49 @@ class WorkbenchWatchTests(unittest.TestCase):
                 time.sleep(0.1)
 
             self.assertGreater(manager.version, initial)
+
+
+class WorkerProcessDetectionTests(unittest.TestCase):
+    def test_lookup_distinguishes_missing_processes_from_errors(self):
+        for code, expected in ((0, True), (1, False), (2, None), (3, None)):
+            with self.subTest(code=code), patch.object(workbench.os, "name", "posix"), patch.object(
+                workbench.shutil, "which", return_value="/usr/bin/pgrep"
+            ), patch.object(
+                workbench.subprocess, "run", return_value=SimpleNamespace(returncode=code)
+            ):
+                self.assertIs(workbench.Scheduler._worker_process_exists("run-1"), expected)
+
+    def test_unavailable_lookup_leaves_process_state_unknown(self):
+        with patch.object(workbench.os, "name", "posix"), patch.object(
+            workbench.shutil, "which", return_value=None
+        ):
+            self.assertIsNone(workbench.Scheduler._worker_process_exists("run-1"))
+        for error in (OSError("unavailable"), subprocess.TimeoutExpired("pgrep", 10)):
+            with self.subTest(error=error), patch.object(workbench.os, "name", "posix"), patch.object(
+                workbench.shutil, "which", return_value="/usr/bin/pgrep"
+            ), patch.object(workbench.subprocess, "run", side_effect=error):
+                self.assertIsNone(workbench.Scheduler._worker_process_exists("run-1"))
+
+    @unittest.skipUnless(os.name == "posix" and workbench.shutil.which("pgrep"), "requires POSIX pgrep")
+    def test_matches_live_worker_with_complete_run_id(self):
+        with TemporaryDirectory() as temporary:
+            script = Path(temporary) / "workbench_worker.py"
+            script.write_text("import time\nprint('ready', flush=True)\ntime.sleep(30)\n")
+            run_id = "worker-detection-" + Path(temporary).name
+            worker = subprocess.Popen(
+                [sys.executable, "-u", str(script), "--database", "unused", "--run", run_id],
+                stdout=subprocess.PIPE, text=True,
+            )
+            try:
+                self.assertEqual(worker.stdout.readline().strip(), "ready")
+                self.assertTrue(workbench.Scheduler._worker_process_exists(run_id))
+                self.assertFalse(workbench.Scheduler._worker_process_exists(run_id[:-1]))
+                self.assertFalse(workbench.Scheduler._worker_process_exists(run_id + "-other"))
+            finally:
+                worker.terminate()
+                worker.wait(timeout=5)
+                worker.stdout.close()
+            self.assertFalse(workbench.Scheduler._worker_process_exists(run_id))
 
 
 if __name__ == "__main__":

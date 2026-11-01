@@ -1400,6 +1400,34 @@ class Scheduler:
         self.last_memory_report = report
         self.hub.publish("settings.changed", **settings)
 
+    @staticmethod
+    def _worker_process_exists(run_id: str) -> bool | None:
+        """Look for a live worker process when no OS container can answer."""
+        if os.name == "nt":
+            return None
+        pgrep = shutil.which("pgrep")
+        if pgrep is None:
+            return None
+        pattern = (
+            rf"(^|[[:space:]/])workbench_worker\.py[[:space:]].*"
+            rf"--run[[:space:]]+{re.escape(run_id)}([[:space:]]|$)"
+        )
+        try:
+            completed = subprocess.run(
+                [pgrep, "-f", pattern],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        # pgrep: 0 means a match, 1 means no match; other codes are errors.
+        if completed.returncode not in (0, 1):
+            return None
+        return completed.returncode == 0
+
     def _interrupt_terminated_workers(self) -> list[str]:
         interrupted = []
         candidates = self.store.stale_run_ids(
@@ -1408,6 +1436,11 @@ class Scheduler:
         for run_id in candidates:
             with self.memory_lock:
                 has_processes = self.memory.run_has_processes(run_id)
+            if has_processes is None and not self.memory.available:
+                # Hosts without any memory backend (such as macOS) cannot
+                # inspect an OS container; fall back to the process table so
+                # a dead worker's run does not stay "running" forever.
+                has_processes = self._worker_process_exists(run_id)
             if has_processes is not False:
                 continue
             if not self.store.mark_run_interrupted_if_stale(
