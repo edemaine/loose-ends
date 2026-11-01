@@ -1408,9 +1408,13 @@ class Scheduler:
         pgrep = shutil.which("pgrep")
         if pgrep is None:
             return None
+        pattern = (
+            rf"(^|[[:space:]/])workbench_worker\.py[[:space:]].*"
+            rf"--run[[:space:]]+{re.escape(run_id)}([[:space:]]|$)"
+        )
         try:
             completed = subprocess.run(
-                [pgrep, "-f", f"workbench_worker\\.py.*--run {run_id}"],
+                [pgrep, "-f", pattern],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -1418,6 +1422,9 @@ class Scheduler:
                 timeout=10,
             )
         except (OSError, subprocess.TimeoutExpired):
+            return None
+        # pgrep: 0 means a match, 1 means no match; other codes are errors.
+        if completed.returncode not in (0, 1):
             return None
         return completed.returncode == 0
 
