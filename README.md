@@ -552,10 +552,14 @@ and `WebFetch` tools only when the task's web search is enabled. Because that sa
 Linux, and WSL2 only, Claude turns fail early on native Windows rather than
 running unsandboxed. Reasoning effort maps onto Claude Code's `--effort`
 levels, with `ultra` treated as `max`, and `--fast` turns on Claude Code's fast
-mode for models that support it. Claude Code writes the same `events.jsonl`,
+mode for models and accounts that support it. If Claude falls back to standard
+speed, the reason is recorded in `run.log`. Ultrafast is unsupported and is rejected.
+Claude Code writes the same `events.jsonl`,
 `run.log`, and `agent-result.json` files, so attempts, reviews, and
 manuscripts are recorded and reviewed identically whichever backend produced
-them.
+them. Claude token totals include cache reads and writes; unknown Claude
+model prices remain explicitly unpriced. The transcript retains Claude's
+reported cost.
 
 Codex writes in a temporary workspace beneath the paper's `analysis/`
 directory. The runner stages disposable copies of `paper.pdf` and `source/`

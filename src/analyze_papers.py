@@ -815,7 +815,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(
             f"Found {len(papers)} paper(s); running up to "
-            f"{min(args.jobs, len(papers))} Codex agent(s) at once."
+            f"{min(args.jobs, len(papers))} {codex_cli.backend_label(args.model)} agent(s) at once."
         )
 
     outcomes: list[AnalysisOutcome] = []

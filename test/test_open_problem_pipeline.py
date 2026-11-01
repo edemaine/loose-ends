@@ -1880,7 +1880,7 @@ class OpenProblemPipelineTests(unittest.TestCase):
             )
             workspace_for_codex = codex_cli.path_for_codex(workspace).replace(
                 "\\", "/"
-            )
+            ).lstrip("/")
             common.write_json(
                 workspace / "agent-result.json",
                 {

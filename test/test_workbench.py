@@ -2525,6 +2525,7 @@ class WorkbenchStoreTests(unittest.TestCase):
                     peer.wait(timeout=5)
                 controller.close()
 
+    @patch.object(workbench_memory.mmap, "PAGESIZE", 4096)
     def test_linux_cgroup_backend_reconciles_limits_and_membership(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)

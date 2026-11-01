@@ -1068,8 +1068,13 @@ def _is_final_event(event: object) -> bool:
     )
 
 
-def structured_turn_is_complete(events_path: Path, result_path: Path) -> bool:
-    """Return whether the agent wrote both its final event and valid JSON result."""
+def structured_turn_is_complete(
+    events_path: Path, result_path: Path, *, result_from_events: bool = False,
+) -> bool:
+    """Recognize final output, including Claude JSON not yet saved by the driver."""
+    if result_from_events:
+        event = claude_result_event(events_path)
+        return _is_final_event(event) and isinstance(event.get("structured_output"), dict)
     try:
         with result_path.open(encoding="utf-8") as source:
             json.load(source)
@@ -1147,6 +1152,7 @@ def _run_codex_process(
     result_path: Path,
     timeout_seconds: float | None,
     completion_grace_seconds: float | None,
+    result_from_events: bool = False,
 ) -> tuple[subprocess.CompletedProcess, bool, bool]:
     """Run Codex while detecting completed turns with lingering tools."""
     popen_options: dict = {
@@ -1179,7 +1185,9 @@ def _run_codex_process(
     try:
         while process.poll() is None:
             now = time.monotonic()
-            if structured_turn_is_complete(events_path, result_path):
+            if structured_turn_is_complete(
+                events_path, result_path, result_from_events=result_from_events,
+            ):
                 if completed_at is None:
                     completed_at = now
                 elif (
@@ -1212,7 +1220,9 @@ def _run_codex_process(
     except BaseException:
         _stop_codex_process(process)
         raise
-    if structured_turn_is_complete(events_path, result_path):
+    if structured_turn_is_complete(
+        events_path, result_path, result_from_events=result_from_events,
+    ):
         # Some launchers, notably the Cygwin `codex` shell wrapper, can return
         # a nonzero status after the CLI has already fulfilled the structured
         # output contract.  The validated result and final event are the
@@ -1440,6 +1450,8 @@ def build_claude_command(
         )
     if options.model is None:
         raise CodexError("a Claude model ID is required for Claude Code turns")
+    if options.ultrafast:
+        raise CodexError("Claude Code does not support Ultrafast mode; use Standard or Fast")
     settings: dict[str, object] = dict(CLAUDE_SANDBOX_SETTINGS)
     if options.fast:
         settings["fastMode"] = True
@@ -1504,11 +1516,19 @@ def _finish_claude_turn(
     result_path: Path,
     log_path: Path,
     model_writes_result: bool,
+    requested_fast: bool = False,
 ) -> None:
     """Check Claude Code's final event and stage a driver-owned result."""
     event = claude_result_event(events_path)
     if event is None:
         return
+    if requested_fast and event.get("fast_mode_state") == "off":
+        with log_path.open("a", encoding="utf-8") as log:
+            log.write(
+                "\nDriver: Claude Code ran at standard speed despite the Fast request: "
+                + str(event.get("fast_mode_disabled_reason") or "reason not reported")
+                + "\n"
+            )
     denials = event.get("permission_denials")
     if isinstance(denials, list) and denials:
         with log_path.open("a", encoding="utf-8") as log:
@@ -1643,6 +1663,7 @@ def run_structured_codex(
                         result_path=result_path,
                         timeout_seconds=timeout_seconds,
                         completion_grace_seconds=completion_grace_seconds,
+                        result_from_events=backend == "claude" and not model_writes_result,
                     )
         except OSError as exc:
             if (
@@ -1681,6 +1702,7 @@ def run_structured_codex(
                 result_path=result_path,
                 log_path=log_path,
                 model_writes_result=model_writes_result,
+                requested_fast=options.fast,
             )
             structured_result_complete = structured_turn_is_complete(
                 events_path,

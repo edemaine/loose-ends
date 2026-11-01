@@ -3,7 +3,6 @@ import json
 import os
 from contextlib import redirect_stderr
 from io import StringIO
-import json
 from pathlib import Path
 import subprocess
 import sys
@@ -122,6 +121,7 @@ name = "Ignored provider"
         with (
             patch.dict(os.environ, {"CODEX_HOME": r"C:\Accounts\second"}),
             patch.object(codex_cli.sys, "platform", "cygwin"),
+            patch.object(codex_cli, "path_for_codex", side_effect=str),
             patch.object(codex_cli, "_run_local_command", return_value=str(self.codex_home)) as convert,
         ):
             config = self.command_config()
@@ -677,6 +677,53 @@ name = "Ignored provider"
             },
         )
 
+    def test_claude_rejects_unsupported_ultrafast(self):
+        with self.assertRaisesRegex(codex_cli.CodexError, "does not support Ultrafast"):
+            codex_cli.build_claude_command(
+                claude="claude", schema_path=Path("unused"),
+                options=codex_cli.ModelOptions(model="claude-sonnet-5", ultrafast=True),
+                model_writes_result=True,
+            )
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX fake CLI script")
+    def test_claude_structured_output_stops_a_lingering_process(self):
+        with TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            schema = workspace / "schema.json"
+            schema.write_text('{"type":"object"}')
+            fake = workspace / "claude"
+            fake.write_text(
+                "#!/bin/sh\ncat > /dev/null\n"
+                "echo '{\"type\":\"result\",\"subtype\":\"success\","
+                "\"is_error\":false,\"structured_output\":{\"answer\":\"ok\"}}'\n"
+                "sleep 30\n"
+            )
+            fake.chmod(0o755)
+            with patch.object(codex_cli, "claude_executable", return_value=str(fake)):
+                result = codex_cli.run_structured_codex(
+                    codex="unused", workspace=workspace, prompt="test",
+                    schema_path=schema,
+                    options=codex_cli.ModelOptions(model="claude-sonnet-5"),
+                    timeout_seconds=3, completion_grace_seconds=.1, launch_interval=0,
+                )
+            self.assertEqual(json.loads(result.read_text()), {"answer": "ok"})
+            self.assertIn("grace period", (workspace / "run.log").read_text())
+
+    def test_claude_event_completion_requires_success_and_structured_output(self):
+        with TemporaryDirectory() as temporary:
+            events = Path(temporary) / "events.jsonl"
+            for event, expected in (
+                ({"type": "result", "subtype": "success", "structured_output": {}}, True),
+                ({"type": "result", "subtype": "success", "structured_output": [], }, False),
+                ({"type": "result", "subtype": "success", "is_error": True, "structured_output": {}}, False),
+                ({"type": "result", "subtype": "error_during_execution", "structured_output": {}}, False),
+            ):
+                with self.subTest(event=event):
+                    events.write_text(json.dumps(event) + "\n")
+                    self.assertEqual(codex_cli.structured_turn_is_complete(
+                        events, Path(temporary) / "absent", result_from_events=True,
+                    ), expected)
+
     def test_claude_command_requires_a_model(self):
         with self.assertRaisesRegex(codex_cli.CodexError, "Claude model ID"):
             codex_cli.build_claude_command(
@@ -776,7 +823,9 @@ name = "Ignored provider"
                 "printf '%s\\n' \"$*\" > argv.txt\n"
                 "echo '{\"type\":\"system\",\"subtype\":\"init\"}'\n"
                 "echo '{\"type\":\"result\",\"subtype\":\"success\","
-                "\"is_error\":false,\"permission_denials\":[{\"tool_name\":"
+                "\"is_error\":false,\"fast_mode_state\":\"off\","
+                "\"fast_mode_disabled_reason\":\"extra_usage_disabled\","
+                "\"permission_denials\":[{\"tool_name\":"
                 "\"Write\"}],\"structured_output\":{\"answer\":\"ok\"}}'\n",
                 encoding="utf-8",
             )
@@ -794,7 +843,7 @@ name = "Ignored provider"
                     workspace=workspace,
                     prompt="solve it",
                     schema_path=schema,
-                    options=codex_cli.ModelOptions(model="claude-opus-5"),
+                    options=codex_cli.ModelOptions(model="claude-opus-5", fast=True),
                     timeout_seconds=30,
                     completion_grace_seconds=1,
                 )
@@ -815,6 +864,7 @@ name = "Ignored provider"
                 "denied 1 tool call(s)",
                 (workspace / "run.log").read_text(encoding="utf-8"),
             )
+            self.assertIn("extra_usage_disabled", (workspace / "run.log").read_text())
             self.assertTrue(
                 codex_cli.structured_turn_is_complete(
                     workspace / "events.jsonl",

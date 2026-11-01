@@ -1,4 +1,4 @@
-"""Persistent, rebuildable token accounting for saved Codex invocations.
+"""Persistent, rebuildable token accounting for saved agent invocations.
 
 Logs are imported in the background, never on a summary request. Thread/turn
 IDs deduplicate archived, installed, and merged repair logs. The index retains
@@ -38,6 +38,7 @@ TOKEN_FIELDS = (
     "output_tokens", "reasoning_output_tokens",
 )
 EVENT_RE = re.compile(rb'^\s*\{\s*"type"\s*:\s*"(thread.started|turn.started|turn.completed|turn.failed|error)"')
+CLAUDE_EVENT_RE = re.compile(rb'"type"\s*:\s*"(system|result)"')
 ENTITY_RE = re.compile(r"^(OP-\d+|attempt-\d+|draft-\d+)$")
 
 
@@ -72,6 +73,25 @@ def token_usage(value):
     if result.get("reasoning_output_tokens", 0) > result["output_tokens"]:
         return None
     return result
+
+
+def claude_token_usage(value):
+    """Claude reports uncached input separately from cache reads and writes."""
+    if not isinstance(value, dict):
+        return None
+    keys = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "output_tokens")
+    if any(type(value.get(key)) is not int or value[key] < 0 for key in keys):
+        return None
+    usage = {
+        "input_tokens": sum(value[key] for key in keys[:3]),
+        "cached_input_tokens": value["cache_read_input_tokens"],
+        "cache_write_input_tokens": value["cache_creation_input_tokens"],
+        "output_tokens": value["output_tokens"],
+    }
+    details = value.get("output_tokens_details")
+    if isinstance(details, dict) and "thinking_tokens" in details:
+        usage["reasoning_output_tokens"] = details["thinking_tokens"]
+    return token_usage(usage)
 
 
 def model_rates(model, tier):
@@ -389,7 +409,7 @@ class UsageIndex:
             stat = events.stat()
         except OSError:
             return 0
-        context_json = json.dumps(context, sort_keys=True)
+        context_json = json.dumps({**context, "parser_version": 2}, sort_keys=True)
         signature = json.dumps([stat.st_size, stat.st_mtime_ns, stat.st_ino, context_json])
         if known is None:
             with self.store.connect() as db:
@@ -417,13 +437,27 @@ class UsageIndex:
                     if not line or not line.endswith(b"\n"):
                         break
                     offset = stream.tell()
-                    if not EVENT_RE.match(line[:160]):
+                    if not EVENT_RE.match(line[:160]) and not CLAUDE_EVENT_RE.search(line):
                         continue
                     try:
                         event = json.loads(line)
                     except ValueError:
                         continue
-                    kind = event["type"]
+                    kind = event.get("type") if isinstance(event, dict) else None
+                    if kind not in {"system", "result", "thread.started", "turn.started", "turn.completed", "turn.failed", "error"}:
+                        continue
+                    if kind in {"system", "result"}:
+                        if kind == "system" and event.get("subtype") != "init":
+                            continue
+                        session = event.get("session_id")
+                        if session:
+                            state = {"thread": f"claude:{session}", "turn": 1}
+                        identity = f"{state.get('thread', 'source:' + key)}:1"
+                        usage = claude_token_usage(event.get("usage")) if kind == "result" else None
+                        complete = kind == "result" and event.get("subtype") == "success" and not event.get("is_error")
+                        if identity not in records or usage is not None:
+                            records[identity] = (usage, complete)
+                        continue
                     if kind == "thread.started":
                         state = {"thread": event.get("thread_id") or f"source:{key}", "turn": 0}
                         records[f"{state['thread']}:1"] = (None, False)
@@ -443,6 +477,12 @@ class UsageIndex:
         if self.stopping.is_set():
             return 0  # Do not mark an interrupted import as fully consumed.
         with self.store.connect() as db:
+            if any(identity.startswith("claude:") for identity in records):
+                # Older importers recorded Claude logs as an unknown source.
+                # Replace that placeholder when the session becomes identifiable.
+                legacy_identity = f"source:{key}:1"
+                db.execute("DELETE FROM usage_scopes WHERE invocation_id = ?", (legacy_identity,))
+                db.execute("DELETE FROM usage_invocations WHERE id = ?", (legacy_identity,))
             for identity, (usage, completed) in records.items():
                 db.execute("""INSERT INTO usage_invocations
                     (id, stage, model, tier, quality, usage_json, completed)

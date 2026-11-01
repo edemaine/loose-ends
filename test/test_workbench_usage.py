@@ -84,6 +84,56 @@ class UsageTests(unittest.TestCase):
         (archive / "source.json").write_text(json.dumps(sources))
         return archive
 
+    def test_claude_usage_imports_incrementally_and_deduplicates_copies(self):
+        context = self.context(model="claude-sonnet-5")
+        init = json.dumps({"type": "system", "subtype": "init", "session_id": "claude-session"}) + "\n"
+        # Real Claude result events can place type after the usage payload.
+        result = json.dumps({
+            "usage": {"input_tokens": 10, "cache_read_input_tokens": 20,
+                      "cache_creation_input_tokens": 30, "output_tokens": 40,
+                      "output_tokens_details": {"thinking_tokens": 5}},
+            "session_id": "claude-session", "subtype": "success", "is_error": False,
+            "type": "result",
+        }) + "\n"
+        path = self.source("claude-events", init, context)
+        self.assertEqual(self.total()["missingUsage"], 1)
+        with path.open("a") as stream:
+            stream.write(result)
+        self.index.import_source(path, context)
+        self.source("installed-copy", init + result, context)
+        total = self.total()
+        self.assertEqual(total["invocations"], 1)
+        self.assertEqual(total["missingUsage"], 0)
+        self.assertEqual(total["tokens"]["input_tokens"], 60)
+        self.assertEqual(total["tokens"]["cached_input_tokens"], 20)
+        self.assertEqual(total["tokens"]["cache_write_input_tokens"], 30)
+        self.assertEqual(total["tokens"]["output_tokens"], 40)
+        self.assertEqual(total["tokens"]["reasoning_output_tokens"], 5)
+        self.assertIsNone(total["estimatedCost"])
+        self.assertEqual(self.index.summary([{"kind": "paper", "path": str(self.paper)}], successful_runs_only=True)["invocations"], 1)
+
+    def test_claude_failed_result_keeps_usage_but_is_not_successful(self):
+        self.source("failed-claude", json.dumps({
+            "type": "result", "session_id": "failed-session", "subtype": "error_max_turns",
+            "is_error": True, "usage": {"input_tokens": 1, "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0, "output_tokens": 2},
+        }) + "\n", self.context(model="claude-sonnet-5"))
+        self.assertEqual(self.total()["tokens"]["input_tokens"], 1)
+        self.assertEqual(self.index.summary([{"kind": "paper", "path": str(self.paper)}], successful_runs_only=True)["invocations"], 0)
+
+    def test_claude_reimport_replaces_legacy_unknown_usage(self):
+        context = self.context(model="claude-sonnet-5")
+        path = self.source("legacy-claude", '{"unrecognized":true}\n', context)
+        self.assertEqual(self.total()["missingUsage"], 1)
+        path.write_text(json.dumps({
+            "type": "result", "session_id": "legacy-session", "subtype": "success",
+            "usage": {"input_tokens": 1, "cache_read_input_tokens": 0,
+                      "cache_creation_input_tokens": 0, "output_tokens": 2},
+        }) + "\n")
+        self.index.import_source(path, context)
+        self.assertEqual(self.total()["invocations"], 1)
+        self.assertEqual(self.total()["missingUsage"], 0)
+
     def test_precise_elapsed_breakdown_and_run_remainder_are_counted_once(self):
         run = self.managed_run()
         self.archive(run, "solve", elapsed=30)
