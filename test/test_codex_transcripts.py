@@ -61,7 +61,7 @@ class TranscriptTests(unittest.TestCase):
             self.assertGreaterEqual(timing["finished_at"], timing["started_at"])
             handler = self.handler(root, {"log_path": str(root / "console.log"), "status": "failed"})
             handler._send_codex("id", "")
-            self.assertEqual(handler.result["transcripts"][0]["label"], "Codex 1 · Review")
+            self.assertEqual(handler.result["transcripts"][0]["label"], "Claude 1 · Review")
 
     def test_elapsed_uses_monotonic_time_and_preserves_return_value(self):
         with TemporaryDirectory() as temporary:
@@ -132,11 +132,11 @@ class TranscriptTests(unittest.TestCase):
             handler._send_review_codex("key=selected")
             entries = handler.result["transcripts"]
             self.assertEqual([entry["label"] for entry in entries], [
-                "Codex 1 · Solve", "Codex 2 · Review", "Codex 3 · Literature review", "Codex 4 · Triage",
+                "Claude 1 · Solve", "Claude 2 · Review", "Claude 3 · Literature review", "Claude 4 · Triage",
             ])
             handler._send_review_codex(urlencode({"key": "selected", "id": entries[0]["id"]}))
             self.assertEqual(json.loads(handler.result["text"])["type"], "turn.completed")
-            with self.assertRaisesRegex(Exception, "unknown Codex transcript"):
+            with self.assertRaisesRegex(Exception, "unknown Claude transcript"):
                 handler._send_review_codex(urlencode({"key": "selected", "id": str(other / "events.jsonl")}))
 
     def test_catalog_transcripts_scope_paper_analysis_and_selected_draft(self):
@@ -159,15 +159,15 @@ class TranscriptTests(unittest.TestCase):
                 ]}],
             })
             handler._send_catalog_codex("category=paper&key=paper")
-            self.assertEqual([entry["label"] for entry in handler.result["transcripts"]], ["Codex 1 · Analyze"])
+            self.assertEqual([entry["label"] for entry in handler.result["transcripts"]], ["Claude 1 · Analyze"])
             handler._send_catalog_codex("category=draft&key=draft1")
             entries = handler.result["transcripts"]
-            self.assertEqual([entry["label"] for entry in entries], ["Codex 1 · Write", "Codex 2 · Paper review"])
+            self.assertEqual([entry["label"] for entry in entries], ["Claude 1 · Write", "Claude 2 · Paper review"])
             handler._send_catalog_codex(urlencode({"category": "draft", "key": "draft1", "id": entries[0]["id"]}))
             self.assertEqual(json.loads(handler.result["text"]), {})
             with self.assertRaises(KeyError):
                 handler._send_catalog_codex("category=draft&key=missing")
-            with self.assertRaisesRegex(Exception, "unknown Codex transcript"):
+            with self.assertRaisesRegex(Exception, "unknown Claude transcript"):
                 handler._send_catalog_codex(urlencode({"category": "draft", "key": "draft1", "id": str(other / "events.jsonl")}))
 
 

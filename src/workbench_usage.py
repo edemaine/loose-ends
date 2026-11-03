@@ -1,4 +1,4 @@
-"""Persistent, rebuildable token accounting for saved Codex invocations.
+"""Persistent, rebuildable token accounting for saved agent invocations.
 
 Logs are imported in the background, never on a summary request. Thread/turn
 IDs deduplicate archived, installed, and merged repair logs. The index retains
@@ -20,19 +20,34 @@ from codex_transcripts import transcript_stage
 from write_paper import resolve_manifest_path
 
 
-PRICING_VERSION = "openai-2026-10-25"
-PRICING_URL = "https://developers.openai.com/api/docs/pricing"
-# USD per million tokens: uncached input, cache read, cache write (30m), output.
-# https://developers.openai.com/api/docs/models/gpt-6.1-sol
-# https://developers.openai.com/api/docs/pricing?tab=suite
+PRICING_VERSION = "anthropic-2026-10-06"
+PRICING_URL = "https://platform.claude.com/docs/en/about-claude/pricing"
+# USD per million tokens: uncached input, cache read, cache write, output.
+# Claude Code writes prompt caches with the 1-hour TTL (2x input).  These
+# rates are only a fallback: Claude Code reports each run's API-list-price
+# cost, which is stored with its usage and preferred when present.
 RATES = {
-    "gpt-6-astra": (10, 1, 12.5, 50),
-    "gpt-6.1-sol": (2, .1, 2.5, 10),
-    "gpt-6-sol": (2, .2, 2.5, 10),
-    "gpt-6-luna": (.1, .01, .125, .5),
-    "gpt-5.6-sol": (4, .4, 5, 20),
-    "gpt-5.3-codex": (1.75, .175, 1.75, 14),
+    "claude-fable-5-1": (10, .25, 20, 50),
+    "claude-fable-5": (10, 1, 20, 50),
+    "claude-opus-5-5": (4, .2, 8, 20),
+    "claude-opus-5": (5, .5, 10, 25),
+    "claude-opus-4-8": (5, .5, 10, 25),
+    "claude-sonnet-5-5": (2, .2, 4, 10),
+    "claude-sonnet-5": (2, .2, 4, 10),
+    "claude-sonnet-4-6": (3, .3, 6, 15),
+    "claude-haiku-5-5": (.1, .01, .2, .5),
+    "claude-haiku-4-5": (1, .1, 2, 5),
 }
+# Claude Code aliases, resolved to the models they named when this table was
+# written.  An alias that later moves still uses the reported run cost.
+MODEL_ALIASES = {
+    "opus": "claude-opus-5-5",
+    "sonnet": "claude-sonnet-5-5",
+    "haiku": "claude-haiku-5-5",
+    "fable": "claude-fable-5-1",
+}
+# Fast mode (2x standard rates) exists only on these models.
+FAST_MODE_MODELS = {"claude-opus-5-5", "claude-opus-5", "claude-opus-4-8"}
 TOKEN_FIELDS = (
     "input_tokens", "cached_input_tokens", "cache_write_input_tokens",
     "output_tokens", "reasoning_output_tokens",
@@ -71,21 +86,27 @@ def token_usage(value):
         return None
     if result.get("reasoning_output_tokens", 0) > result["output_tokens"]:
         return None
+    cost = value.get("cost_usd")
+    if type(cost) in (int, float) and math.isfinite(cost) and cost >= 0:
+        result["cost_usd"] = float(cost)
     return result
 
 
 def model_rates(model, tier):
     """Return the same effective USD/MTok rates used for calculation and display."""
+    model = MODEL_ALIASES.get(model, model)
     rates = RATES.get(model)
-    if rates is None or tier not in {"standard", "fast", "ultrafast"}:
+    if rates is None or tier not in {"standard", "fast"}:
         return None
-    if tier == "ultrafast" and model not in {"gpt-6-astra", "gpt-6.1-sol"}:
+    if tier == "fast" and model not in FAST_MODE_MODELS:
         return None
-    multiplier = {"standard": 1, "fast": 2, "ultrafast": 6}[tier]
+    multiplier = {"standard": 1, "fast": 2}[tier]
     return tuple(rate * multiplier for rate in rates)
 
 
 def estimated_cost(usage, model, tier):
+    if "cost_usd" in usage:
+        return usage["cost_usd"]
     rates = model_rates(model, tier)
     if rates is None:
         return None
@@ -166,7 +187,7 @@ class UsageIndex:
                 self.updated_at = time.time()
             except Exception as exc:
                 self.error = str(exc)
-                logging.exception("Could not index Codex usage")
+                logging.exception("Could not index agent usage")
             finally:
                 self.indexing = False
                 if self.hub:
@@ -224,7 +245,7 @@ class UsageIndex:
         manifest = self._json(events.parent / f"{prefix}manifest.json")
         if prefix == "review-" and events.parent.name.startswith("draft-"):
             manifest = self._json(events.parent / "paper-review-manifest.json")
-        return {"stage": transcript_stage(events) or "Codex",
+        return {"stage": transcript_stage(events) or "Claude",
                 "model": manifest.get("requested_model"), "tier": self._tier(manifest),
                 "quality": 2, "scopes": sorted(self._scopes(events))}
 
@@ -232,7 +253,7 @@ class UsageIndex:
         events = resolve_manifest_path(sources["events"])
         scopes = self._scopes(events)
         scopes.update({("run", run["id"]), ("job", run["job_id"])})
-        stage = sources.get("stage") or transcript_stage(events) or "Codex"
+        stage = sources.get("stage") or transcript_stage(events) or "Claude"
         argv = json.loads(run["argv_json"])
         review = stage.startswith(("Review", "Paper review")) and run["action"] in {"solve", "write", "revise"}
         prefix = "--review-" if review else "--"
@@ -366,7 +387,7 @@ class UsageIndex:
         return changed
 
     def _import_empty_invocation(self, folder, context):
-        """A failed launch can have precise timing without any Codex events."""
+        """A failed launch can have precise timing without any Claude events."""
         identity = "invocation:" + path_key(folder)
         with self.store.connect() as db:
             changed = db.execute("""INSERT INTO usage_invocations
@@ -431,7 +452,9 @@ class UsageIndex:
                     if kind == "turn.started":
                         state["turn"] = state.get("turn", 0) + 1
                     identity = f"{state.get('thread', 'source:' + key)}:{max(1, state.get('turn', 1))}"
-                    usage = token_usage(event.get("usage")) if kind == "turn.completed" else None
+                    # Claude Code also reports what a failed turn consumed.
+                    usage = (token_usage(event.get("usage"))
+                             if kind in ("turn.completed", "turn.failed") else None)
                     if identity not in records or usage is not None:
                         records[identity] = (usage, kind == "turn.completed")
                 if not records and not state and stat.st_size:
@@ -615,10 +638,10 @@ class UsageIndex:
                 "pricingRates": pricing,
                 "modelFilterApplied": bool(excluded),
                 "successfulRunsOnly": successful_runs_only,
-                "assumptions": "API-equivalent token estimate at current short-context rates; "
-                "30-minute cache writes; unreported cache writes use ordinary input rates. "
-                "Excludes tool fees and long-context premiums. "
-                "Subscription charges may differ. Reasoning is included in output."}
+                "assumptions": "API-equivalent estimate: Claude Code's reported list-price cost "
+                "for each run when available, otherwise current rates with 1-hour cache writes. "
+                "Excludes web-search tool fees. Subscription charges may differ. "
+                "Reasoning is included in output."}
 
     @staticmethod
     def _totals(rows):

@@ -879,12 +879,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="report pending reviews without starting Codex",
+        help="report pending reviews without starting Claude",
     )
     parser.add_argument(
+        "--claude",
         "--codex",
-        default="codex",
-        help="Codex CLI executable or command name (default: codex)",
+        dest="codex",
+        default="claude",
+        help="Claude Code CLI executable or command name (default: claude)",
     )
     codex_cli.add_prompt_arguments(
         parser,
@@ -1043,7 +1045,7 @@ def main(argv: list[str] | None = None) -> int:
             return codex_cli.report_error(parser, exc)
         print(
             f"Reviewing {len(pending)} attempt(s), with up to "
-            f"{min(args.jobs, len(pending))} Codex critic(s) at once."
+            f"{min(args.jobs, len(pending))} Claude critic(s) at once."
         )
         finished_count = 0
 

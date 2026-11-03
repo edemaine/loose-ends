@@ -49,7 +49,7 @@ class UsageTests(unittest.TestCase):
 
     def context(self, directory=None, **overrides):
         directory = directory or self.attempt
-        value = {"stage": "Solve", "model": "gpt-6.1-sol", "tier": "standard",
+        value = {"stage": "Solve", "model": "claude-opus-5-5", "tier": "standard",
                  "quality": 2, "scopes": sorted(self.index._scopes(directory / "events.jsonl"))}
         return {**value, **overrides}
 
@@ -66,14 +66,14 @@ class UsageTests(unittest.TestCase):
 
     def managed_run(self, *, started=100, finished=200, status="succeeded", action="solve"):
         job = self.store.create_job({}, {"action": action, "title": "Timing", "units": [{
-            "label": "Problem", "argv": ["python", "solve.py", "--model", "gpt-6.1-sol"],
+            "label": "Problem", "argv": ["python", "solve.py", "--model", "claude-opus-5-5"],
             "cwd": str(self.root), "targets": [{"kind": "problem", "path": str(self.problem)}],
         }]})
         run = job["runs"][0]
         self.store.update_run(run["id"], status=status, started_at=started, finished_at=finished)
         return run
 
-    def archive(self, run, thread, *, stage="Solve", model="gpt-6.1-sol", elapsed=None, directory=None):
+    def archive(self, run, thread, *, stage="Solve", model="claude-opus-5-5", elapsed=None, directory=None):
         archive = Path(run["log_path"]).parent / "codex" / ("turn-" + thread)
         archive.mkdir(parents=True)
         (archive / "events").write_text(events(thread))
@@ -87,7 +87,7 @@ class UsageTests(unittest.TestCase):
     def test_precise_elapsed_breakdown_and_run_remainder_are_counted_once(self):
         run = self.managed_run()
         self.archive(run, "solve", elapsed=30)
-        self.archive(run, "review", stage="Review", model="gpt-6-astra", elapsed=20)
+        self.archive(run, "review", stage="Review", model="claude-sonnet-5-5", elapsed=20)
         self.index.refresh()
         # Installed copies enrich scope but do not add the same invocation twice.
         self.source("installed-copy", events("solve"))
@@ -101,14 +101,14 @@ class UsageTests(unittest.TestCase):
         self.assertEqual(stages["Other run time"]["elapsedSeconds"], 50)
         self.assertTrue(stages["Other run time"]["timingOnly"])
         filtered = self.index.summary([{"kind": "paper", "path": str(self.paper)}],
-                                      exclude_models=["gpt-6-astra", None])
+                                      exclude_models=["claude-sonnet-5-5", None])
         self.assertEqual(filtered["elapsedSeconds"], 30)
         self.assertEqual(filtered["elapsedFallbackRuns"], 0)
 
     def test_historical_mixed_models_show_unassigned_time_instead_of_inventing_a_split(self):
         run = self.managed_run()
         self.archive(run, "solve")
-        self.archive(run, "review", stage="Review", model="gpt-6-astra")
+        self.archive(run, "review", stage="Review", model="claude-sonnet-5-5")
         self.index.refresh()
         total = self.total()
         self.assertEqual(total["elapsedSeconds"], 100)
@@ -120,14 +120,14 @@ class UsageTests(unittest.TestCase):
         self.assertEqual(self.index.summary([{"kind": "paper", "path": str(self.paper)}],
                                            exclude_models=[None])["elapsedSeconds"], 100)
         filtered = self.index.summary([{"kind": "paper", "path": str(self.paper)}],
-                                      exclude_models=["gpt-6-astra"])
+                                      exclude_models=["claude-sonnet-5-5"])
         self.assertIsNone(filtered["elapsedSeconds"])
         self.assertEqual(filtered["missingElapsed"], 1)
 
     def test_partial_timing_uses_only_the_remaining_run_time(self):
         run = self.managed_run()
         self.archive(run, "solve", elapsed=30)
-        self.archive(run, "review", stage="Review", model="gpt-6-astra")
+        self.archive(run, "review", stage="Review", model="claude-sonnet-5-5")
         self.index.refresh()
         total = self.total()
         self.assertEqual(total["elapsedSeconds"], 100)
@@ -135,7 +135,7 @@ class UsageTests(unittest.TestCase):
         self.assertEqual({row["stage"]: row["elapsedSeconds"] for row in total["stages"]},
                          {"Review": 70, "Solve": 30})
         filtered = self.index.summary([{"kind": "paper", "path": str(self.paper)}],
-                                      exclude_models=["gpt-6.1-sol"])
+                                      exclude_models=["claude-opus-5-5"])
         self.assertEqual(filtered["elapsedSeconds"], 70)
         self.assertEqual(filtered["missingElapsed"], 0)
 
@@ -182,7 +182,7 @@ class UsageTests(unittest.TestCase):
         self.archive(succeeded, "success", elapsed=30)
         for status in ("partial", "failed", "canceled", "interrupted", "running"):
             run = self.managed_run(status=status, finished=None if status == "running" else 200)
-            self.archive(run, status, elapsed=20, model="gpt-6-astra", stage="Review")
+            self.archive(run, status, elapsed=20, model="claude-sonnet-5-5", stage="Review")
         self.index.refresh()
         # An installed copy must not let a failed run back into the result.
         self.source("failed-installed-copy", events("failed"))
@@ -191,13 +191,13 @@ class UsageTests(unittest.TestCase):
         total = self.index.summary(targets, successful_runs_only=True)
         self.assertEqual(total["invocations"], 1)
         self.assertEqual(total["tokens"], USAGE)
-        self.assertAlmostEqual(total["estimatedCost"], .00191)
+        self.assertAlmostEqual(total["estimatedCost"], .00412)
         self.assertEqual(total["elapsedSeconds"], 60)
         self.assertTrue(total["successfulRunsOnly"])
         self.assertNotIn("Review", [stage["stage"] for stage in total["stages"]])
         self.assertEqual(len(total["pricingRates"]), 3)  # Keep model and overhead choices.
         filtered = self.index.summary(targets, successful_runs_only=True,
-                                      exclude_models=["gpt-6.1-sol", None])
+                                      exclude_models=["claude-opus-5-5", None])
         self.assertEqual(filtered["invocations"], 0)
         self.assertEqual(filtered["estimatedCost"], 0)
         self.assertEqual(filtered["elapsedSeconds"], 0)
@@ -269,7 +269,7 @@ class UsageTests(unittest.TestCase):
         with sqlite3.connect(database) as db:
             db.execute("""CREATE TABLE usage_invocations (id TEXT PRIMARY KEY, stage TEXT,
                 model TEXT, tier TEXT, quality INTEGER, usage_json TEXT, completed INTEGER)""")
-            db.execute("INSERT INTO usage_invocations VALUES ('old','Solve','gpt-6.1-sol','standard',2,?,1)",
+            db.execute("INSERT INTO usage_invocations VALUES ('old','Solve','claude-opus-5-5','standard',2,?,1)",
                        (json.dumps(USAGE),))
         db.close()
         store = WorkbenchStore(database)
@@ -291,7 +291,7 @@ class UsageTests(unittest.TestCase):
         self.assertEqual(total["tokens"]["input_tokens"], 2000)
         self.assertEqual(total["tokens"]["output_tokens"], 200)
         self.assertEqual(total["tokens"]["reasoning_output_tokens"], 80)
-        self.assertAlmostEqual(total["estimatedCost"], 2 * .00191)
+        self.assertAlmostEqual(total["estimatedCost"], 2 * .00412)
 
     def test_incremental_import_preserves_partial_lines_and_does_not_reread_unchanged_logs(self):
         path = self.source("live/events", events("live", None))
@@ -347,7 +347,7 @@ class UsageTests(unittest.TestCase):
         (archive / "events").write_text(events("same"))
         (self.attempt / "events.jsonl").write_text(events("same"))
         (self.attempt / "manifest.json").write_text(json.dumps({
-            "requested_model": "gpt-6.1-sol", "requested_fast_mode": False,
+            "requested_model": "claude-opus-5-5", "requested_fast_mode": False,
         }))
         self.assertGreater(self.index.refresh(), 0)
         total = self.total(("job", job["id"]))
@@ -371,48 +371,65 @@ class UsageTests(unittest.TestCase):
         self.assertEqual(self.total()["invocations"], 1)
         self.assertEqual(self.total(("manuscript", draft.parent), ("draft", draft))["invocations"], 1)
 
+    def test_failed_claude_turn_still_records_reported_usage(self):
+        failed = "".join(json.dumps(event) + "\n" for event in (
+            {"type": "thread.started", "thread_id": "failed"},
+            {"type": "turn.started"},
+            {"type": "turn.failed", "error": {"message": "max turns"},
+             "usage": {**USAGE, "cost_usd": 0.5}},
+        ))
+        self.source("failed", failed)
+        total = self.total()
+        self.assertEqual(total["invocations"], 1)
+        self.assertEqual(total["missingUsage"], 0)
+        self.assertEqual(total["tokens"]["input_tokens"], USAGE["input_tokens"])
+        self.assertAlmostEqual(total["estimatedCost"], 0.5)
+        with self.store.connect() as db:
+            completed = db.execute("SELECT completed FROM usage_invocations").fetchone()[0]
+        self.assertEqual(completed, 0)
+
     def test_metadata_change_updates_without_changing_tokens(self):
         path = self.source("events", events("known"), self.context(model=None))
         self.assertIsNone(self.total()["estimatedCost"])
-        self.index.import_source(path, self.context(tier="ultrafast", quality=3))
+        self.index.import_source(path, self.context(tier="fast", quality=3))
         total = self.total()
-        self.assertAlmostEqual(total["estimatedCost"], .00191 * 6)
+        self.assertAlmostEqual(total["estimatedCost"], .00412 * 2)
         self.assertEqual(total["invocations"], 1)
         self.assertEqual(len(total["pricingRates"]), 1)
         pricing = total["pricingRates"][0]
-        self.assertEqual((pricing["model"], pricing["tier"]), ("gpt-6.1-sol", "ultrafast"))
-        for key, expected in {"input": 12, "cachedInput": .6, "cacheWrite": 15, "output": 60}.items():
+        self.assertEqual((pricing["model"], pricing["tier"]), ("claude-opus-5-5", "fast"))
+        for key, expected in {"input": 8, "cachedInput": .4, "cacheWrite": 16, "output": 40}.items():
             self.assertAlmostEqual(pricing["rates"][key], expected)
 
     def test_model_filter_updates_totals_and_stages_across_tiers_without_losing_choices(self):
         self.source("sol", events("sol"))
         self.source("sol-duplicate", events("sol"))
         self.source("sol-fast", events("sol-fast"), self.context(tier="fast"))
-        self.source("astra", events("astra"), self.context(model="gpt-6-astra", stage="Review"))
+        self.source("astra", events("astra"), self.context(model="claude-sonnet-5-5", stage="Review"))
         self.source("custom", events("custom"), self.context(model="custom-model"))
         self.source("missing", events("missing", None), self.context(model=None))
         targets = [{"kind": "paper", "path": str(self.paper)},
                    {"kind": "problem", "path": str(self.problem)}]
 
-        astra = self.index.summary(targets, exclude_models=["gpt-6.1-sol", "custom-model", None])
+        astra = self.index.summary(targets, exclude_models=["claude-opus-5-5", "custom-model", None])
         self.assertEqual(astra["invocations"], 1)
         self.assertEqual(astra["tokens"], USAGE)
-        self.assertAlmostEqual(astra["estimatedCost"], estimated_cost(USAGE, "gpt-6-astra", "standard"))
+        self.assertAlmostEqual(astra["estimatedCost"], estimated_cost(USAGE, "claude-sonnet-5-5", "standard"))
         self.assertEqual([item["stage"] for item in astra["stages"]], ["Review"])
         self.assertEqual((astra["unpriced"], astra["missingUsage"]), (0, 0))
         self.assertTrue(astra["modelFilterApplied"])
         self.assertEqual(len(astra["pricingRates"]), 5)
 
-        sol = self.index.summary(targets, exclude_models=["gpt-6-astra", "custom-model", None])
+        sol = self.index.summary(targets, exclude_models=["claude-sonnet-5-5", "custom-model", None])
         self.assertEqual(sol["invocations"], 2)
         self.assertEqual(sol["tokens"]["input_tokens"], 2000)
-        self.assertAlmostEqual(sol["estimatedCost"], .00191 * 3)
+        self.assertAlmostEqual(sol["estimatedCost"], .00412 * 3)
 
-        unknown = self.index.summary(targets, exclude_models=["gpt-6.1-sol", "gpt-6-astra"])
+        unknown = self.index.summary(targets, exclude_models=["claude-opus-5-5", "claude-sonnet-5-5"])
         self.assertEqual((unknown["invocations"], unknown["unpriced"], unknown["missingUsage"]), (2, 1, 1))
         self.assertIsNone(unknown["estimatedCost"])
 
-        empty = self.index.summary(targets, exclude_models=["gpt-6.1-sol", "gpt-6-astra", "custom-model", None])
+        empty = self.index.summary(targets, exclude_models=["claude-opus-5-5", "claude-sonnet-5-5", "custom-model", None])
         self.assertEqual(empty["invocations"], 0)
         self.assertEqual(empty["estimatedCost"], 0)
         self.assertFalse(any(empty["tokens"].values()))
@@ -447,7 +464,7 @@ class UsageTests(unittest.TestCase):
                 app.usage_summary(body)
         self.assertEqual(app.usage_summary({"targets": [{"kind": "paper", "path": str(self.paper)}]})["invocations"], 0)
         targets = [{"kind": "paper", "path": str(self.paper)}]
-        for excluded in ("gpt-6.1-sol", {}, [7], [[]], ["m"] * 1001):
+        for excluded in ("claude-opus-5-5", {}, [7], [[]], ["m"] * 1001):
             with self.subTest(excluded=excluded), self.assertRaises(PlanError):
                 app.usage_summary({"targets": targets, "excludeModels": excluded})
         self.assertTrue(app.usage_summary({"targets": targets, "excludeModels": [None]})["modelFilterApplied"])
@@ -463,23 +480,34 @@ class UsageTests(unittest.TestCase):
         self.assertEqual(path_key(native), path_key(cygwin))
 
 
-class UltrafastTests(unittest.TestCase):
+class ServiceTierTests(unittest.TestCase):
     def test_rates_cache_subsets_and_tiers(self):
-        self.assertAlmostEqual(estimated_cost(USAGE, "gpt-6.1-sol", "standard"), .00191)
-        self.assertAlmostEqual(estimated_cost(USAGE, "gpt-6.1-sol", "fast"), .00382)
-        self.assertAlmostEqual(estimated_cost(USAGE, "gpt-6.1-sol", "ultrafast"), .01146)
+        self.assertAlmostEqual(estimated_cost(USAGE, "claude-opus-5-5", "standard"), .00412)
+        self.assertAlmostEqual(estimated_cost(USAGE, "opus", "standard"), .00412)
+        self.assertAlmostEqual(estimated_cost(USAGE, "claude-opus-5-5", "fast"), .00824)
+        self.assertIsNone(estimated_cost(USAGE, "claude-opus-5-5", "ultrafast"))
         self.assertIsNone(estimated_cost(USAGE, "unknown", "standard"))
-        self.assertIsNone(estimated_cost(USAGE, "gpt-5.6-sol", "ultrafast"))
+        # Fast mode exists only on Opus models.
+        self.assertIsNone(estimated_cost(USAGE, "claude-haiku-5-5", "fast"))
         self.assertIsNone(token_usage({**USAGE, "input_tokens": True}))
+
+    def test_reported_claude_cost_is_preferred_over_the_rate_table(self):
+        reported = token_usage({**USAGE, "cost_usd": 0.25})
+        self.assertEqual(reported["cost_usd"], 0.25)
+        self.assertAlmostEqual(estimated_cost(reported, "claude-opus-5-5", "standard"), 0.25)
+        self.assertAlmostEqual(estimated_cost(reported, "unknown-model", None), 0.25)
+        for invalid in (-1, float("nan"), True, "0.25"):
+            with self.subTest(cost=invalid):
+                self.assertNotIn("cost_usd", token_usage({**USAGE, "cost_usd": invalid}))
 
     def test_cli_flags_inheritance_and_digest(self):
         for module in (analyze_papers, solve_open_problems, write_paper):
             parser = module.build_parser()
             # Parser defaults/positional inputs differ; inspect the argument group.
-            self.assertIn("--ultrafast", parser._option_string_actions)
+            self.assertNotIn("--ultrafast", parser._option_string_actions)
             self.assertIn("--fast", parser._option_string_actions)
-        normal = codex_cli.ModelOptions("gpt-6.1-sol", "high")
-        ultra = codex_cli.ModelOptions("gpt-6.1-sol", "high", ultrafast=True)
+        normal = codex_cli.ModelOptions("claude-opus-5-5", "high")
+        ultra = codex_cli.ModelOptions("claude-opus-5-5", "high", ultrafast=True)
         fast = codex_cli.ModelOptions(fast=True)
         self.assertNotEqual(codex_cli.semantic_config_digest("p", "{}", normal),
                             codex_cli.semantic_config_digest("p", "{}", ultra))
@@ -490,17 +518,16 @@ class UltrafastTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             codex_cli.ModelOptions(fast=True, ultrafast=True)
         argv = []
-        _common_arguments(argv, {"serviceTier": "ultrafast"})
-        self.assertEqual(argv, ["--ultrafast"])
-        with self.assertRaises(PlanError):
-            _common_arguments([], {"serviceTier": "typo"})
-        with patch.object(codex_cli, "codex_account_config_overrides", return_value=[]):
-            command = codex_cli.build_exec_command(
-                codex="codex", workspace=Path.cwd(), prompt="p", schema_path=Path("schema.json"),
+        _common_arguments(argv, {"serviceTier": "fast"})
+        self.assertEqual(argv, ["--fast"])
+        for tier in ("ultrafast", "typo"):
+            with self.subTest(tier=tier), self.assertRaises(PlanError):
+                _common_arguments([], {"serviceTier": tier})
+        with self.assertRaisesRegex(codex_cli.CodexError, "Ultrafast"):
+            codex_cli.build_exec_command(
+                codex="claude", workspace=Path.cwd(), prompt="p", schema_path=Path("schema.json"),
                 result_path=Path("result.json"), options=ultra,
             )
-        self.assertIn('service_tier="ultrafast"', command)
-        self.assertNotIn('service_tier="fast"', command)
 
     def test_invocation_provenance_survives_failure(self):
         with TemporaryDirectory() as temporary:
@@ -515,10 +542,10 @@ class UltrafastTests(unittest.TestCase):
 
             with patch.dict(os.environ, {TRANSCRIPT_ENV: str(root / "archive")}):
                 with self.assertRaises(RuntimeError):
-                    invoke(workspace=workspace, prompt="p", options=codex_cli.ModelOptions("gpt-6-astra", ultrafast=True))
+                    invoke(workspace=workspace, prompt="p", options=codex_cli.ModelOptions("claude-sonnet-5-5", ultrafast=True))
             folder = next((root / "archive").iterdir())
             metadata = json.loads((folder / "source.json").read_text())
-            self.assertEqual(metadata["model"], "gpt-6-astra")
+            self.assertEqual(metadata["model"], "claude-sonnet-5-5")
             self.assertEqual(metadata["service_tier"], "ultrafast")
             self.assertTrue((folder / "events").is_file())
 

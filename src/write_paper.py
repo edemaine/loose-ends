@@ -2316,12 +2316,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="validate and report the manuscript plan without starting Codex",
+        help="validate and report the manuscript plan without starting Claude",
     )
     parser.add_argument(
+        "--claude",
         "--codex",
-        default="codex",
-        help="Codex CLI executable or command name (default: codex)",
+        dest="codex",
+        default="claude",
+        help="Claude Code CLI executable or command name (default: claude)",
     )
     parser.add_argument(
         "--latexmk",

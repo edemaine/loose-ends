@@ -16,7 +16,7 @@ ways to improve on earlier attempts.
 
 This is research triage, not a quota. Classify every requested problem:
 
-- `attempt`: a Codex solver has a concrete, worthwhile line of attack now;
+- `attempt`: a Claude solver has a concrete, worthwhile line of attack now;
 - `maybe`: progress seems possible, but the work is exploratory,
   underspecified, or likely needs a prerequisite;
 - `skip`: the problem is currently a poor fit, too broad, requires unavailable

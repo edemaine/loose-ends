@@ -145,64 +145,6 @@ class CodexPathTests(unittest.TestCase):
         self.assertRegex(converted, r"^[A-Za-z]:\\")
         self.assertNotIn("/cygdrive/", converted)
 
-    def test_codex_environment_omits_windows_store_command_aliases(self):
-        separator = codex_cli.os.pathsep
-        if separator == ";":
-            keep = (r"C:\Tools", r"C:\Windows\System32")
-            windows_apps = (
-                r"C:\Users\tester\AppData\Local\Microsoft\WindowsApps"
-            )
-        else:
-            keep = ("/usr/bin", "/cygdrive/c/Windows/System32")
-            windows_apps = (
-                "/cygdrive/c/Users/tester/AppData/Local/"
-                "Microsoft/WindowsApps"
-            )
-        original = separator.join((keep[0], windows_apps, keep[1]))
-        with (
-            patch.object(codex_cli, "is_windows_host", return_value=True),
-            patch.dict(codex_cli.os.environ, {"PATH": original}),
-        ):
-            environment = codex_cli.codex_subprocess_environment()
-            self.assertEqual(codex_cli.os.environ["PATH"], original)
-
-        self.assertEqual(
-            environment["PATH"],
-            separator.join(keep),
-        )
-
-    def test_acl_repair_removes_explicit_deny_before_granting_access(self):
-        with (
-            TemporaryDirectory() as temporary,
-            patch.object(codex_cli, "is_windows_host", return_value=True),
-            patch.object(
-                codex_cli,
-                "workspace_is_user_accessible",
-                side_effect=[False, True],
-            ),
-            patch.object(
-                codex_cli,
-                "windows_identity",
-                return_value=r"DOMAIN\user",
-            ),
-            patch.object(
-                codex_cli,
-                "windows_icacls_for_sandbox",
-                return_value="icacls.exe",
-            ),
-            patch.object(codex_cli, "_run_local_command") as run_local,
-        ):
-            workspace = Path(temporary)
-            codex_cli.normalize_workspace_access(workspace, "codex")
-
-        self.assertEqual(run_local.call_count, 2)
-        remove_command = run_local.call_args_list[0].args[0]
-        grant_command = run_local.call_args_list[1].args[0]
-        self.assertIn("/remove:d", remove_command)
-        self.assertIn(r"DOMAIN\user", remove_command)
-        self.assertIn("/grant", grant_command)
-        self.assertIn(r"DOMAIN\user:(OI)(CI)(F)", grant_command)
-
 
 class AnalyzePaperTests(unittest.TestCase):
     @patch.object(analyze_papers.subprocess, "run")
@@ -249,29 +191,31 @@ class AnalyzePaperTests(unittest.TestCase):
             command = next(
                 candidate
                 for candidate in commands
-                if len(candidate) > 1 and candidate[1] == "exec"
+                if len(candidate) > 1
+                and candidate[1] == str(codex_cli.CLAUDE_EXEC_PATH)
             )
             codex_call = next(
                 call
                 for call in run.call_args_list
-                if len(call.args[0]) > 1 and call.args[0][1] == "exec"
+                if len(call.args[0]) > 1
+                and call.args[0][1] == str(codex_cli.CLAUDE_EXEC_PATH)
             )
-            self.assertIn("--ephemeral", command)
-            self.assertIn("--ignore-user-config", command)
-            self.assertIn("shell_snapshot", command)
-            self.assertIn("skill_mcp_dependency_install", command)
-            self.assertIn('web_search="disabled"', command)
-            self.assertIn("apps._default.enabled=false", command)
-            self.assertIn("agents.enabled=false", command)
-            self.assertIn(
-                "sandbox_workspace_write.network_access=false",
-                command,
+            claude = command[command.index("--") + 1:]
+            self.assertEqual(claude[:2], ["codex", "-p"])
+            self.assertIn("--no-session-persistence", claude)
+            self.assertIn("--safe-mode", claude)
+            self.assertIn("--strict-mcp-config", claude)
+            self.assertEqual(
+                claude[claude.index("--tools") + 1],
+                "Bash,Read,Write,Edit,Glob,Grep",
             )
-            self.assertIn('windows.sandbox="elevated"', command)
-            self.assertIn("--json", command)
-            self.assertIn("workspace-write", command)
+            self.assertEqual(
+                claude[claude.index("--output-format") + 1],
+                "stream-json",
+            )
             self.assertNotIn("--add-dir", command)
-            self.assertEqual(command[-1], "-")
+            # The validated analysis writes agent-result.json itself.
+            self.assertNotIn("--result", command)
             self.assertEqual(codex_call.kwargs["encoding"], "utf-8")
             self.assertIn(
                 analyze_papers.STAGED_PAPER_DIRECTORY,
@@ -292,23 +236,23 @@ class AnalyzePaperTests(unittest.TestCase):
                 prompt_template=PROMPT_TEMPLATE,
                 schema_path=analyze_papers.DEFAULT_SCHEMA_PATH,
                 schema_text=SCHEMA_TEXT,
-                model="gpt-5.6-sol",
+                model="claude-sonnet-5-5",
                 reasoning_effort="xhigh",
                 fast=True,
                 launch_interval=0,
             )
 
             command = commands[0]
-            self.assertIn("gpt-5.6-sol", command)
-            self.assertIn('model_reasoning_effort="xhigh"', command)
-            self.assertIn("features.fast_mode=true", command)
-            self.assertIn('service_tier="fast"', command)
+            self.assertEqual(command[command.index("--model") + 1], "claude-sonnet-5-5")
+            self.assertEqual(command[command.index("--effort") + 1], "xhigh")
+            settings = json.loads(command[command.index("--settings") + 1])
+            self.assertTrue(settings["fastMode"])
             manifest = json.loads(
                 (paper / "analysis" / "manifest.json").read_text(
                     encoding="utf-8"
                 )
             )
-            self.assertEqual(manifest["requested_model"], "gpt-5.6-sol")
+            self.assertEqual(manifest["requested_model"], "claude-sonnet-5-5")
             self.assertEqual(manifest["requested_reasoning_effort"], "xhigh")
             self.assertTrue(manifest["requested_fast_mode"])
 
@@ -518,7 +462,7 @@ class MainOutputTests(unittest.TestCase):
             patch.object(analyze_papers, "analysis_is_current", return_value=False),
             patch.object(analyze_papers, "resolve_codex_executable") as resolve,
             patch.object(analyze_papers, "analyze_paper") as analyze,
-            patch.dict(os.environ, {"CODEX_HOME": "", "USERPROFILE": ""}),
+            patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": ""}),
             patch.object(codex_cli.Path, "home", return_value=Path(temporary)),
         ):
             paper = make_paper(Path(temporary))
@@ -531,8 +475,8 @@ class MainOutputTests(unittest.TestCase):
         self.assertEqual(returncode, 0)
         self.assertIn(f"Would analyze: {paper}", output.getvalue())
         self.assertIn("1 would run; 0 current", output.getvalue())
-        self.assertIn("Codex home is not an existing directory", error.getvalue())
-        self.assertIn(str(Path(temporary) / ".codex"), error.getvalue())
+        self.assertIn("Claude config directory is not an existing directory", error.getvalue())
+        self.assertIn(str((Path(temporary) / ".claude").resolve()), error.getvalue())
         resolve.assert_not_called()
         analyze.assert_not_called()
 

@@ -217,7 +217,7 @@ def validate_triage_result(
                 )
             except OSError as exc:
                 raise common.CodexError(
-                    f"Codex did not create triage report for {problem_id}, "
+                    f"Claude did not create triage report for {problem_id}, "
                     f"and the driver could not synthesize it: {exc}"
                 ) from exc
             synthesized_reports.append(problem_id)
@@ -333,7 +333,7 @@ def triage_paper(
     options: codex_cli.ModelOptions,
     launch_interval: float = codex_cli.CODEX_LAUNCH_INTERVAL_SECONDS,
 ) -> list[TriageOutcome]:
-    """Triage the selected stale problems from one paper in one Codex run."""
+    """Triage the selected stale problems from one paper in one Claude run."""
     if not problems:
         return []
     paper = problems[0].paper_directory
@@ -469,7 +469,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--jobs",
         type=codex_cli.positive_integer,
         default=1,
-        help="maximum concurrent per-paper Codex runs (default: 1)",
+        help="maximum concurrent per-paper Claude runs (default: 1)",
     )
     parser.add_argument(
         "-f",
@@ -480,7 +480,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="report what would be triaged without starting Codex",
+        help="report what would be triaged without starting Claude",
     )
     parser.add_argument(
         "--solve",
@@ -500,9 +500,11 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--claude",
         "--codex",
-        default="codex",
-        help="Codex CLI executable or command name (default: codex)",
+        dest="codex",
+        default="claude",
+        help="Claude Code CLI executable or command name (default: claude)",
     )
     codex_cli.add_prompt_arguments(
         parser,
@@ -646,7 +648,7 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"Triaging {len(stale)} stale problem(s) from "
             f"{len(grouped)} paper(s), with up to "
-            f"{min(args.jobs, len(grouped))} Codex agent(s) at once."
+            f"{min(args.jobs, len(grouped))} Claude agent(s) at once."
         )
         with ThreadPoolExecutor(
             max_workers=min(args.jobs, len(grouped))

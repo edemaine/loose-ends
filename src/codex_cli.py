@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
-"""Shared non-interactive Codex CLI execution helpers."""
+"""Shared non-interactive agent execution helpers.
+
+This fork drives the Claude Code CLI (``claude -p``) instead of the Codex CLI.
+The module keeps its historical name and public function names (for example
+``run_structured_codex``) so the pipeline scripts and on-disk formats are
+unchanged; ``claude_exec.py`` translates Claude's stream into the Codex-style
+``events.jsonl`` that the rest of Loose Ends reads.
+"""
 
 from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-from functools import lru_cache
 import hashlib
 import json
 import os
@@ -16,41 +22,40 @@ import subprocess
 import sys
 import threading
 import time
-import tomllib
 from typing import Callable, Mapping
 
 from validation import common as validation_common
 from codex_transcripts import record_transcript
 
 
-REASONING_EFFORTS = ("low", "medium", "high", "xhigh", "max", "ultra")
+REASONING_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 WEB_SEARCH_MODES = ("disabled", "indexed", "live")
-DEFAULT_MODEL = "gpt-6-astra"
+DEFAULT_MODEL = "claude-opus-5-5"
 DEFAULT_REASONING_EFFORT = "xhigh"
 DEFAULT_VALIDATION_PROMPT_PATH = (
     Path(__file__).resolve().parent.parent / "prompts" / "validate-output.md"
 )
+CLAUDE_EXEC_PATH = Path(__file__).resolve().parent / "claude_exec.py"
+CLAUDE_CONFIG_ENV = "CLAUDE_CONFIG_DIR"
+CLAUDE_SANDBOX_ENV = "LOOSE_ENDS_CLAUDE_SANDBOX"
+# Built-in Claude Code tools available to every agent.  Subagents, MCP,
+# plugins' tools, and interactive tools are deliberately excluded.
+CLAUDE_BASE_TOOLS = ("Bash", "Read", "Write", "Edit", "Glob", "Grep")
+CLAUDE_WEB_TOOLS = {
+    "disabled": (),
+    "indexed": ("WebSearch",),
+    "live": ("WebSearch", "WebFetch"),
+}
 CODEX_LAUNCH_INTERVAL_SECONDS = 1.0
 MAX_CODEX_START_ATTEMPTS = 3
 CODEX_POLL_INTERVAL_SECONDS = 0.5
 CODEX_STOP_GRACE_SECONDS = 10.0
-WINDOWS_SANDBOX_ACL_FAILURE = "helper_unknown_error: apply deny-read acls"
 WORKBENCH_DATABASE_ENV = "LOOSE_ENDS_WORKBENCH_DATABASE"
-CODEX_ACCOUNT_CONFIG_KEYS = (
-    "cli_auth_credentials_store",
-    "forced_login_method",
-    "forced_chatgpt_workspace_id",
-    "sqlite_home",
-    "model_provider",
-    "openai_base_url",
-    "chatgpt_base_url",
-)
+# Log marker of a Codex-era Windows sandbox failure; still recognized so
+# workspaces preserved from older Codex runs can be recovered.
+WINDOWS_SANDBOX_ACL_FAILURE = "helper_unknown_error: apply deny-read acls"
 _CODEX_LAUNCH_LOCK = threading.Lock()
-_WINDOWS_SANDBOX_PROBE_LOCK = threading.Lock()
-_WINDOWS_ACL_NORMALIZE_LOCK = threading.Lock()
 _next_codex_launch_at = 0.0
-_windows_sandbox_probe_error: str | None = None
-_windows_sandbox_probe_succeeded = False
 _WINDOWS_RESERVED_DEVICE_NAMES = {
     "aux",
     "con",
@@ -62,11 +67,22 @@ _WINDOWS_RESERVED_DEVICE_NAMES = {
 
 
 class CodexError(RuntimeError):
-    """A local Codex invocation or its workspace could not be used."""
+    """A local agent (Claude Code) invocation or its workspace could not be used."""
+
+
+CREDIT_ERROR_PHRASES = (
+    "hit your usage limit",
+    "hit your limit",
+    "usage limit reached",
+    "out of credits",
+    "insufficient credits",
+    "credit balance is too low",
+    "out of extra usage",
+)
 
 
 def codex_credit_error(events_path: Path) -> str | None:
-    """Recognize account exhaustion only in Codex error events."""
+    """Recognize account exhaustion only in translated agent error events."""
     with events_path.open(encoding="utf-8", errors="replace") as events:
         for line in events:
             try:
@@ -85,8 +101,7 @@ def codex_credit_error(events_path: Path) -> str | None:
                 continue
             message = str(error.get("message", ""))
             if error.get("code") in {"usage_limit_reached", "insufficient_quota"} or any(
-                phrase in message.casefold()
-                for phrase in ("hit your usage limit", "out of credits", "insufficient credits")
+                phrase in message.casefold() for phrase in CREDIT_ERROR_PHRASES
             ):
                 return message or str(error["code"])
     return None
@@ -113,6 +128,8 @@ class ModelOptions:
 
     @property
     def service_tier(self) -> str:
+        # Ultrafast is a Codex tier kept only so older manifests still parse;
+        # build_exec_command rejects it for Claude Code.
         return "ultrafast" if self.ultrafast else "fast" if self.fast else "standard"
 
 
@@ -262,8 +279,8 @@ def add_model_arguments(
         default=model_default,
         metavar="MODEL",
         help=(
-            "Codex model ID; for example, gpt-5.6-sol "
-            f"(default: {model_default_help})"
+            "Claude model ID or alias; for example, claude-sonnet-5-5, "
+            f"opus, or haiku (default: {model_default_help})"
         ),
     )
     parser.add_argument(
@@ -273,30 +290,27 @@ def add_model_arguments(
         choices=REASONING_EFFORTS,
         metavar="LEVEL",
         help=(
-            "reasoning depth: low, medium, high, xhigh, max, or ultra; "
-            f"extra-high is xhigh (default: {reasoning_default_help})"
+            "Claude Code effort: low, medium, high, xhigh, or max "
+            f"(default: {reasoning_default_help})"
         ),
     )
-    speed = parser.add_mutually_exclusive_group()
-    speed.add_argument(
+    parser.add_argument(
         f"--{option_prefix}fast",
         dest=f"{destination_prefix}fast",
         action="store_true",
         help=(
-            "request Codex Fast mode for this run; this uses more credits "
+            "request Claude Code fast mode (Opus models; billed as extra "
+            "usage on subscriptions) "
             + (
                 "(default: inherit the primary run)"
                 if prefix
-                else "(default: use the CLI configuration)"
+                else "(default: standard speed)"
             )
         ),
     )
-    speed.add_argument(
-        f"--{option_prefix}ultrafast",
-        dest=f"{destination_prefix}ultrafast",
-        action="store_true",
-        help="request Codex Ultrafast mode (higher cost; requires model/account support)",
-    )
+    # Codex's Ultrafast tier has no Claude Code equivalent; keep the
+    # attribute so callers and manifests stay uniform.
+    parser.set_defaults(**{f"{destination_prefix}ultrafast": False})
 
 
 def add_web_search_argument(
@@ -305,7 +319,7 @@ def add_web_search_argument(
     default: str,
     prefix: str = "",
 ) -> None:
-    """Add a scoped Codex first-party web-search option."""
+    """Add a scoped Claude Code web-tool option."""
     if default not in WEB_SEARCH_MODES:
         raise ValueError(f"invalid default web-search mode: {default}")
     option_prefix = f"{prefix}-" if prefix else ""
@@ -317,9 +331,10 @@ def add_web_search_argument(
         default=None if prefix else default,
         metavar="MODE",
         help=(
-            "Codex first-party web search: disabled, indexed, or live "
+            "Claude web tools: disabled, indexed (WebSearch only), or live "
+            "(WebSearch and WebFetch) "
             f"(default: {'inherit the primary run' if prefix else default}); "
-            "this does not enable shell network access or MCP/plugin apps"
+            "this does not enable shell network access or MCP servers"
         ),
     )
 
@@ -421,10 +436,11 @@ def with_validation_instructions(prompt: str) -> str:
 
 
 def resolve_codex_executable(value: str) -> str:
+    """Resolve the Claude Code CLI (historically the Codex CLI) on PATH."""
     executable = shutil.which(value)
     if executable is None:
         raise CodexError(
-            f"could not find the Codex CLI executable {value!r} on PATH"
+            f"could not find the Claude Code CLI executable {value!r} on PATH"
         )
     return executable
 
@@ -441,7 +457,7 @@ def read_codex_version(codex: str) -> str:
         raise CodexError(f"could not run {codex!r}: {exc}") from exc
     if completed.returncode != 0:
         detail = completed.stderr.strip() or f"exit status {completed.returncode}"
-        raise CodexError(f"could not query the Codex CLI version: {detail}")
+        raise CodexError(f"could not query the Claude Code CLI version: {detail}")
     return completed.stdout.strip()
 
 
@@ -450,22 +466,8 @@ def is_windows_host() -> bool:
 
 
 def codex_subprocess_environment() -> dict[str, str]:
-    """Avoid Windows Store command aliases inaccessible to sandbox users."""
-    environment = os.environ.copy()
-    if not is_windows_host():
-        return environment
-    path = environment.get("PATH")
-    if path is None:
-        return environment
-    entries = path.split(os.pathsep)
-    environment["PATH"] = os.pathsep.join(
-        entry
-        for entry in entries
-        if not entry.rstrip("\\/").replace("\\", "/").casefold().endswith(
-            "/microsoft/windowsapps"
-        )
-    )
-    return environment
+    """Return the agent environment with Loose Ends' own variables intact."""
+    return os.environ.copy()
 
 
 def _run_local_command(command: list[str], description: str) -> str:
@@ -488,7 +490,7 @@ def _run_local_command(command: list[str], description: str) -> str:
 
 
 def path_for_codex(path: Path) -> str:
-    """Return a path the Windows-native Codex CLI can understand."""
+    """Return a path the Windows-native agent CLI can understand."""
     resolved = path.resolve()
     if sys.platform != "cygwin":
         return str(resolved)
@@ -511,234 +513,31 @@ def path_for_codex(path: Path) -> str:
     return converted
 
 
-@lru_cache(maxsize=1)
-def windows_identity() -> str:
-    domain = os.environ.get("USERDOMAIN", "").strip()
-    username = os.environ.get("USERNAME", "").strip()
-    if domain and username:
-        return f"{domain}\\{username}"
-    executable = shutil.which("whoami.exe")
-    if executable is None:
-        raise CodexError("could not find whoami.exe for Windows ACL setup")
-    identity = _run_local_command(
-        [executable],
-        "could not determine the current Windows identity",
-    ).strip()
-    if not identity or "\\" not in identity:
-        raise CodexError(
-            f"whoami.exe returned an unexpected identity: {identity!r}"
-        )
-    return identity
-
-
-@lru_cache(maxsize=1)
-def windows_icacls() -> str:
-    executable = shutil.which("icacls.exe") or shutil.which("icacls")
-    if executable is None:
-        raise CodexError("could not find icacls.exe for Windows ACL setup")
-    return executable
-
-
-def windows_icacls_for_sandbox() -> str:
-    executable = windows_icacls()
-    if sys.platform == "cygwin":
-        return path_for_codex(Path(executable))
-    return executable
-
-
-def _windows_sandbox_probe_command(codex: str, workspace: Path) -> list[str]:
-    windows_directory = os.environ.get("WINDIR", r"C:\Windows")
-    executable = str(
-        PureWindowsPath(windows_directory) / "System32" / "whoami.exe"
-    )
-    return [
-        codex,
-        "sandbox",
-        "-c",
-        'windows.sandbox="elevated"',
-        "-P",
-        ":workspace",
-        "-C",
-        path_for_codex(workspace),
-        executable,
-    ]
-
-
-def _windows_sandbox_acl_state_path() -> Path:
-    codex_home = os.environ.get("CODEX_HOME")
-    if codex_home:
-        path = Path(codex_home).expanduser()
-    else:
-        path = Path.home() / ".codex"
-    return path / ".sandbox" / "deny_read_acl_state.json"
-
-
-def windows_sandbox_acl_state_problem() -> str | None:
-    """Describe a corrupt elevated-sandbox ACL state file, if present."""
-    if not is_windows_host():
-        return None
-    path = _windows_sandbox_acl_state_path()
-    try:
-        raw = path.read_bytes()
-    except FileNotFoundError:
-        # A missing state file is valid: Codex creates it during setup.
-        return None
-    except OSError as exc:
-        return f"could not read Codex sandbox ACL state {path}: {exc}"
-    try:
-        state = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        if raw and not raw.strip(b"\0 \t\r\n"):
-            reason = "the file contains only NUL bytes"
-        elif not raw:
-            reason = "the file is empty"
-        else:
-            reason = f"invalid JSON ({exc})"
-        return (
-            f"Codex sandbox ACL state is corrupt at {path}: {reason}. "
-            "Move that file aside and retry; Codex will regenerate it."
-        )
-    if not isinstance(state, dict) or not isinstance(
-        state.get("principals"),
-        dict,
-    ):
-        return (
-            f"Codex sandbox ACL state is corrupt at {path}: unexpected "
-            "JSON structure. Move that file aside and retry; Codex will "
-            "regenerate it."
-        )
-    return None
+# Codex ran agents on Windows as a separate restricted sandbox account and
+# needed ACL grants and repairs around every turn.  Claude Code runs as the
+# invoking user (with its own OS sandbox on macOS/Linux), so these hooks are
+# deliberately no-ops.  They are kept so the pipeline's call sites are stable.
 
 
 def require_secure_windows_sandbox(codex: str, workspace: Path) -> None:
-    """Fail before model use when the elevated Windows helper is broken."""
-    global _windows_sandbox_probe_error
-    global _windows_sandbox_probe_succeeded
-    if not is_windows_host():
-        return
-    with _WINDOWS_SANDBOX_PROBE_LOCK:
-        if _windows_sandbox_probe_error is not None:
-            raise CodexError(_windows_sandbox_probe_error)
-        if _windows_sandbox_probe_succeeded:
-            return
-        state_problem = windows_sandbox_acl_state_problem()
-        if state_problem is not None:
-            _windows_sandbox_probe_error = (
-                "secure elevated Windows sandbox preflight failed before "
-                f"the agent was started: {state_problem}"
-            )
-            raise CodexError(_windows_sandbox_probe_error)
-        command = _windows_sandbox_probe_command(codex, workspace)
-        try:
-            completed = subprocess.run(
-                command,
-                cwd=workspace,
-                env=codex_subprocess_environment(),
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=30,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            detail = str(exc)
-        else:
-            if completed.returncode == 0:
-                _windows_sandbox_probe_succeeded = True
-                return
-            detail = (completed.stderr or completed.stdout).strip()
-            if not detail:
-                detail = f"exit status {completed.returncode}"
-        state_problem = windows_sandbox_acl_state_problem()
-        if state_problem is not None:
-            recovery = state_problem
-        else:
-            recovery = (
-                "Stop other active Codex CLI batches and retry; if none are "
-                "active, inspect ~/.codex/.sandbox/setup_error.json and the "
-                "current sandbox log before restarting Codex or Windows."
-            )
-        _windows_sandbox_probe_error = (
-            "secure elevated Windows sandbox preflight failed before the "
-            f"agent was started: {detail}. {recovery}"
-        )
-        raise CodexError(_windows_sandbox_probe_error)
+    """No Codex sandbox helper exists to probe with Claude Code."""
+    return None
 
 
 def note_windows_sandbox_failure(log_path: Path) -> None:
-    """Prevent further model launches after an elevated-helper ACL failure."""
-    global _windows_sandbox_probe_error
-    global _windows_sandbox_probe_succeeded
-    if not is_windows_host():
-        return
-    try:
-        log = log_path.read_text(encoding="utf-8", errors="replace").lower()
-    except OSError:
-        return
-    if WINDOWS_SANDBOX_ACL_FAILURE not in log:
-        return
-    state_problem = windows_sandbox_acl_state_problem()
-    with _WINDOWS_SANDBOX_PROBE_LOCK:
-        _windows_sandbox_probe_succeeded = False
-        if state_problem is not None:
-            recovery = state_problem
-        else:
-            recovery = (
-                "Stop other Codex CLI batches and inspect "
-                "~/.codex/.sandbox/setup_error.json plus the current "
-                "sandbox log."
-            )
-        _windows_sandbox_probe_error = (
-            "the elevated Windows sandbox helper failed while applying "
-            "deny-read ACLs. Further agents were not launched to avoid "
-            f"wasting credits. {recovery}"
-        )
+    return None
 
 
 def grant_workspace_owner_inheritance(workspace: Path) -> None:
-    """Make future sandbox-created children readable by the invoking user."""
-    if not is_windows_host():
-        return
-    identity = windows_identity()
-    _run_local_command(
-        [
-            windows_icacls(),
-            path_for_codex(workspace),
-            "/grant",
-            f"{identity}:(OI)(CI)(F)",
-        ],
-        f"could not grant {identity} access to {workspace}",
-    )
+    return None
 
 
 def grant_sandbox_read_access(path: Path) -> None:
-    """Let the restricted Windows Codex sandbox read staged local inputs."""
-    if not is_windows_host():
-        return
-    domain = windows_identity().split("\\", 1)[0]
-    sandbox_group = f"{domain}\\CodexSandboxUsers"
-    staged_path = path_for_codex(path)
-    _run_local_command(
-        [
-            windows_icacls(),
-            staged_path,
-            "/remove:d",
-            sandbox_group,
-            "/T",
-            "/C",
-        ],
-        f"could not remove inherited sandbox read denials from {path}",
-    )
-    _run_local_command(
-        [
-            windows_icacls(),
-            staged_path,
-            "/grant",
-            f"{sandbox_group}:(OI)(CI)(RX)",
-            "/T",
-            "/C",
-        ],
-        f"could not grant the Codex sandbox read access to {path}",
-    )
+    return None
+
+
+def normalize_workspace_access(workspace: Path, codex: str) -> None:
+    return None
 
 
 def _is_windows_reserved_device_name(name: str) -> bool:
@@ -782,41 +581,6 @@ def workspace_is_user_accessible(workspace: Path) -> bool:
     except OSError:
         return False
     return True
-
-
-def normalize_workspace_access(workspace: Path, codex: str) -> None:
-    """Remove sandbox-created deny ACLs, then grant recursive user access."""
-    if not is_windows_host():
-        return
-    # Codex's elevated helper maintains shared ACL state under CODEX_HOME.
-    # Serialize repair turns so concurrent solver/reviewer completions cannot
-    # race while that state is being refreshed.
-    with _WINDOWS_ACL_NORMALIZE_LOCK:
-        if workspace_is_user_accessible(workspace):
-            return
-        identity = windows_identity()
-        command_prefix = [
-            codex,
-            "sandbox",
-            "-P",
-            ":workspace",
-            "-C",
-            path_for_codex(workspace),
-            windows_icacls_for_sandbox(),
-            ".",
-        ]
-        for action in (
-            ["/remove:d", identity, "/T", "/C"],
-            ["/grant", f"{identity}:(OI)(CI)(F)", "/T", "/C"],
-        ):
-            _run_local_command(
-                [*command_prefix, *action],
-                f"could not normalize sandbox-owned files in {workspace}",
-            )
-        if not workspace_is_user_accessible(workspace):
-            raise CodexError(
-                f"Windows ACL repair did not make {workspace} accessible"
-            )
 
 
 def wait_for_codex_launch_slot(interval: float) -> None:
@@ -902,7 +666,7 @@ def is_transient_startup_failure(
 
 
 def structured_turn_is_complete(events_path: Path, result_path: Path) -> bool:
-    """Return whether Codex wrote both its final event and valid JSON result."""
+    """Return whether the agent wrote both its final event and valid JSON result."""
     try:
         with result_path.open(encoding="utf-8") as source:
             json.load(source)
@@ -918,8 +682,26 @@ def structured_turn_is_complete(events_path: Path, result_path: Path) -> bool:
         return False
 
 
+def _signal_process_group(
+    process: subprocess.Popen,
+    posix_signal: int,
+    fallback: Callable[[], None],
+) -> None:
+    """Signal the whole agent group: the claude_exec.py shim and Claude."""
+    try:
+        if os.name != "nt":
+            os.killpg(process.pid, posix_signal)
+        else:
+            fallback()
+    except (OSError, ProcessLookupError):
+        try:
+            fallback()
+        except OSError:
+            pass
+
+
 def _stop_codex_process(process: subprocess.Popen) -> None:
-    """Ask a Codex process group to stop, then escalate if necessary."""
+    """Ask an agent process group to stop, then escalate if necessary."""
     if process.poll() is not None:
         return
     try:
@@ -934,19 +716,17 @@ def _stop_codex_process(process: subprocess.Popen) -> None:
         return
     except subprocess.TimeoutExpired:
         pass
-    try:
-        process.terminate()
-    except OSError:
-        pass
+    _signal_process_group(process, signal.SIGTERM, process.terminate)
     try:
         process.wait(timeout=CODEX_STOP_GRACE_SECONDS)
         return
     except subprocess.TimeoutExpired:
         pass
-    try:
-        process.kill()
-    except OSError:
-        pass
+    _signal_process_group(
+        process,
+        getattr(signal, "SIGKILL", signal.SIGTERM),
+        process.kill,
+    )
     try:
         process.wait(timeout=CODEX_STOP_GRACE_SECONDS)
     except subprocess.TimeoutExpired:
@@ -966,7 +746,7 @@ def _run_codex_process(
     timeout_seconds: float | None,
     completion_grace_seconds: float | None,
 ) -> tuple[subprocess.CompletedProcess, bool, bool]:
-    """Run Codex while detecting completed turns with lingering tools."""
+    """Run the agent while detecting completed turns with lingering tools."""
     popen_options: dict = {
         "cwd": workspace,
         "env": environment,
@@ -980,7 +760,7 @@ def _run_codex_process(
     process = subprocess.Popen(command, **popen_options)
     if process.stdin is None:
         _stop_codex_process(process)
-        raise CodexError("could not open Codex prompt input")
+        raise CodexError("could not open the agent prompt input")
     try:
         process.stdin.write(prompt)
     except BrokenPipeError:
@@ -1005,7 +785,7 @@ def _run_codex_process(
                     and now - completed_at >= completion_grace_seconds
                 ):
                     log.write(
-                        "\nDriver: structured turn completed but Codex did "
+                        "\nDriver: structured turn completed but the agent did "
                         "not exit within the grace period; stopping its "
                         "process group.\n"
                     )
@@ -1019,7 +799,7 @@ def _run_codex_process(
                 and now - started_at >= timeout_seconds
             ):
                 log.write(
-                    f"\nDriver: Codex exceeded the {timeout_seconds:g}-second "
+                    f"\nDriver: the agent exceeded the {timeout_seconds:g}-second "
                     "wall-clock timeout; stopping its process group.\n"
                 )
                 log.flush()
@@ -1031,9 +811,9 @@ def _run_codex_process(
         _stop_codex_process(process)
         raise
     if structured_turn_is_complete(events_path, result_path):
-        # Some launchers, notably the Cygwin `codex` shell wrapper, can return
-        # a nonzero status after the CLI has already fulfilled the structured
-        # output contract.  The validated result and final event are the
+        # Some launchers (for example a Cygwin shell wrapper, or Claude Code
+        # stopped after its final event) can return a nonzero status after the
+        # CLI has already fulfilled the structured output contract.  The validated result and final event are the
         # authoritative success signal in that case.
         structured_result_complete = True
     return (
@@ -1043,56 +823,37 @@ def _run_codex_process(
     )
 
 
-def _toml_value(value: object) -> str:
-    """Encode account/provider settings as TOML CLI override values."""
-    if isinstance(value, str):
-        return json.dumps(value, ensure_ascii=False)
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, (int, float)):
-        return str(value)
-    if isinstance(value, list):
-        return "[" + ", ".join(_toml_value(item) for item in value) + "]"
-    if isinstance(value, dict):
-        return "{" + ", ".join(
-            f"{_toml_value(key)} = {_toml_value(item)}"
-            for key, item in value.items()
-        ) + "}"
-    raise CodexError("unsupported value type in Codex account/provider configuration")
-
-
 def codex_home_path(environment: Mapping[str, str] | None = None) -> Path:
-    """Resolve the account directory used by the native Codex CLI."""
+    """Resolve the Claude Code configuration (account) directory.
+
+    ``CLAUDE_CONFIG_DIR`` selects an account directory, as ``CODEX_HOME`` did
+    for Codex; the default is ``~/.claude``.
+    """
     environment = os.environ if environment is None else environment
-    home = environment.get("CODEX_HOME")
-    if not home:
-        # Cygwin Python can have a different home from the native Windows CLI.
-        home = environment.get("USERPROFILE") if sys.platform == "cygwin" else None
+    home = environment.get(CLAUDE_CONFIG_ENV)
     if home and sys.platform == "cygwin" and PureWindowsPath(home).is_absolute():
         home = _run_local_command(
-            ["cygpath", "-u", home], "could not convert Codex home"
+            ["cygpath", "-u", home], "could not convert CLAUDE_CONFIG_DIR"
         ).strip()
-    path = Path(home).expanduser() if home else Path.home() / ".codex"
-    # USERPROFILE names the user's home, rather than CODEX_HOME itself.
-    if not environment.get("CODEX_HOME") and home:
-        path /= ".codex"
+    path = Path(home).expanduser() if home else Path.home() / ".claude"
     return path.resolve()
 
 
 def codex_home_warnings(environment: Mapping[str, str] | None = None) -> list[str]:
-    """Check account selection without starting Codex or changing its files."""
+    """Check account selection without starting Claude or changing its files."""
     environment = os.environ if environment is None else environment
     warnings = []
     try:
         path = codex_home_path(environment)
         if not path.is_dir():
             warnings.append(
-                f"Codex home is not an existing directory: {path}. "
-                "Set CODEX_HOME in the task's Model and web-search settings "
-                "or in the CLI environment to an existing authenticated account directory."
+                f"Claude config directory is not an existing directory: {path}. "
+                "Set CLAUDE_CONFIG_DIR in the task's Model and web-search settings "
+                "or in the CLI environment to an existing authenticated account "
+                "directory, or run `claude` once to sign in."
             )
     except (CodexError, OSError, ValueError) as exc:
-        warnings.append(f"Could not inspect Codex home: {exc}")
+        warnings.append(f"Could not inspect the Claude config directory: {exc}")
     return warnings
 
 
@@ -1101,53 +862,34 @@ def report_codex_home_warnings() -> None:
         print(f"Warning: {warning}", file=sys.stderr)
 
 
-def codex_account_config_overrides() -> list[str]:
-    """Preserve account and connection settings while ignoring other user config."""
-    config_path = codex_home_path() / "config.toml"
-    try:
-        with config_path.open("rb") as source:
-            config = tomllib.load(source)
-    except FileNotFoundError:
-        config = {}
-    except (OSError, ValueError) as exc:
-        raise CodexError(f"could not read Codex configuration {config_path}: {exc}") from exc
+def claude_sandbox_enabled(environment: Mapping[str, str] | None = None) -> bool:
+    """Use Claude Code's OS sandbox for Bash where it is supported.
 
-    settings = {key: config[key] for key in CODEX_ACCOUNT_CONFIG_KEYS if key in config}
-    for key, value in settings.items():
-        if not isinstance(value, str):
-            raise CodexError(f"Codex configuration {config_path}: {key} must be a string")
+    The sandbox confines shell writes to the workspace and blocks shell network
+    access, matching Codex's ``workspace-write`` sandbox.  It is supported on
+    macOS and Linux (with bubblewrap); set LOOSE_ENDS_CLAUDE_SANDBOX=0 to run
+    without it, or =1 to request it elsewhere.
+    """
+    environment = os.environ if environment is None else environment
+    value = environment.get(CLAUDE_SANDBOX_ENV, "").strip().casefold()
+    if value in {"0", "false", "no", "off"}:
+        return False
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    return sys.platform == "darwin" or sys.platform.startswith("linux")
 
-    def config_directory(value: str) -> str:
-        if PureWindowsPath(value).is_absolute():
-            return value
-        path = Path(value).expanduser()
-        if not path.is_absolute():
-            path = config_path.parent / path
-        return path_for_codex(path)
 
-    if "sqlite_home" in settings:
-        settings["sqlite_home"] = config_directory(settings["sqlite_home"])
-    elif sqlite_home := os.environ.get("CODEX_SQLITE_HOME"):
-        # --ignore-user-config also bypasses the SQLite environment override.
-        settings["sqlite_home"] = sqlite_home
-
-    provider = settings.get("model_provider", "openai")
-    providers = config.get("model_providers", {})
-    if not isinstance(providers, dict):
-        raise CodexError(f"Codex configuration {config_path}: model_providers must be a table")
-    if provider in providers:
-        definition = providers[provider]
-        if not isinstance(definition, dict):
-            raise CodexError(f"Codex configuration {config_path}: selected provider must be a table")
-        auth = definition.get("auth")
-        if isinstance(auth, dict) and isinstance(auth.get("cwd"), str):
-            auth["cwd"] = config_directory(auth["cwd"])
-        settings["model_providers"] = {provider: definition}
-
-    overrides = []
-    for key, value in settings.items():
-        overrides.extend(("--config", f"{key}={_toml_value(value)}"))
-    return overrides
+def claude_settings(options: ModelOptions) -> dict[str, object]:
+    settings: dict[str, object] = {}
+    if claude_sandbox_enabled():
+        settings["sandbox"] = {
+            "enabled": True,
+            "autoAllowBashIfSandboxed": True,
+            "allowUnsandboxedCommands": False,
+        }
+    if options.fast:
+        settings["fastMode"] = True
+    return settings
 
 
 def build_exec_command(
@@ -1161,70 +903,64 @@ def build_exec_command(
     web_search: str = "disabled",
     model_writes_result: bool = False,
 ) -> list[str]:
+    """Build one non-interactive Claude Code turn, wrapped by claude_exec.py.
+
+    The prompt is not part of the command: it is sent on standard input,
+    which keeps large manuscript prompts off the process command line.
+    """
     if web_search not in WEB_SEARCH_MODES:
         raise CodexError(
             "web search must be one of " + ", ".join(WEB_SEARCH_MODES)
         )
-    command = [
-        codex,
-        "exec",
-        "--ephemeral",
-        "--ignore-user-config",
-        "--disable",
-        "shell_snapshot",
-        "--disable",
-        "skill_mcp_dependency_install",
-        "--config",
-        f'web_search="{web_search}"',
-        "--config",
-        "apps._default.enabled=false",
-        "--config",
-        "agents.enabled=false",
-        "--config",
-        "sandbox_workspace_write.network_access=false",
-        "--config",
-        'windows.sandbox="elevated"',
-        "--skip-git-repo-check",
-        "--sandbox",
-        "workspace-write",
-        "--json",
-        "--color",
-        "never",
-        "-C",
-        path_for_codex(workspace),
-    ]
-    command.extend(codex_account_config_overrides())
+    if options.ultrafast:
+        raise CodexError(
+            "Ultrafast is a Codex service tier; Claude Code supports only "
+            "standard speed or --fast"
+        )
+    tools = ",".join((*CLAUDE_BASE_TOOLS, *CLAUDE_WEB_TOOLS[web_search]))
+    command = [sys.executable, str(CLAUDE_EXEC_PATH)]
     if not model_writes_result:
         command.extend(
             (
-                "--output-schema",
-                path_for_codex(schema_path),
-                "-o",
-                path_for_codex(result_path),
+                "--result",
+                str(result_path.resolve()),
+                "--schema",
+                str(schema_path.resolve()),
             )
         )
+    command.extend(
+        (
+            "--",
+            codex,
+            "-p",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--no-session-persistence",
+            # Ignore the invoking user's CLAUDE.md, hooks, skills, plugins,
+            # MCP servers, and output styles; authentication still works.
+            "--safe-mode",
+            "--disable-slash-commands",
+            "--strict-mcp-config",
+            "--tools",
+            tools,
+            "--allowedTools",
+            tools,
+            # Edits inside the workspace are accepted; anything that would
+            # need a person to approve it is denied instead of prompting.
+            "--permission-mode",
+            "acceptEdits",
+            "--permission-prompts",
+            "none",
+        )
+    )
+    settings = claude_settings(options)
+    if settings:
+        command.extend(("--settings", json.dumps(settings, separators=(",", ":"))))
     if options.model is not None:
         command.extend(("--model", options.model))
     if options.reasoning_effort is not None:
-        command.extend(
-            (
-                "--config",
-                f'model_reasoning_effort="{options.reasoning_effort}"',
-            )
-        )
-    if options.fast or options.ultrafast:
-        command.extend(
-            (
-                "--config",
-                "features.fast_mode=true",
-                "--config",
-                f'service_tier="{options.service_tier}"',
-            )
-        )
-    # Windows has a comparatively small process command-line limit.  Prompts
-    # can exceed it, especially for manuscript-writing agents, so keep the
-    # prompt off argv and tell Codex to read it from standard input.
-    command.append("-")
+        command.extend(("--effort", options.reasoning_effort))
     return command
 
 
@@ -1245,10 +981,8 @@ def run_structured_codex(
     completion_grace_seconds: float | None = None,
     model_writes_result: bool = False,
 ) -> Path:
-    """Run one structured Codex turn and return its final-response path."""
+    """Run one structured Claude Code turn and return its final-response path."""
     workspace = workspace.resolve()
-    grant_workspace_owner_inheritance(workspace)
-    require_secure_windows_sandbox(codex, workspace)
     result_path = workspace / result_filename
     events_path = workspace / events_filename
     log_path = workspace / log_filename
@@ -1278,7 +1012,7 @@ def run_structured_codex(
             ):
                 if attempt > 1:
                     log.write(
-                        f"\n--- Codex startup retry {attempt}/"
+                        f"\n--- Claude Code startup retry {attempt}/"
                         f"{MAX_CODEX_START_ATTEMPTS} ---\n"
                     )
                     log.flush()
@@ -1320,10 +1054,10 @@ def run_structured_codex(
                 and getattr(exc, "winerror", None) in {2, 3}
             ):
                 with log_path.open("a", encoding="utf-8") as log:
-                    log.write(f"Codex startup error: {exc}\n")
+                    log.write(f"Claude Code startup error: {exc}\n")
                 continue
             raise CodexError(
-                f"could not start Codex; workspace preserved at "
+                f"could not start Claude Code; workspace preserved at "
                 f"{workspace}: {exc}"
             ) from exc
 
@@ -1343,22 +1077,14 @@ def run_structured_codex(
         ):
             break
 
-    note_windows_sandbox_failure(log_path)
-    try:
-        normalize_workspace_access(workspace, codex)
-    except CodexError as exc:
-        if not structured_turn_is_complete(events_path, result_path):
-            raise
-        with log_path.open("a", encoding="utf-8") as log:
-            log.write(f"\nDriver ACL recovery warning: {exc}\n")
     if credit_error is not None:
         raise CodexError(
-            f"Codex credits exhausted: {credit_error}; "
+            f"Claude usage limit reached (credits exhausted): {credit_error}; "
             f"workspace preserved at {workspace}"
         )
     if timed_out:
         raise CodexError(
-            f"Codex exceeded the {timeout_seconds:g}-second wall-clock "
+            f"Claude Code exceeded the {timeout_seconds:g}-second wall-clock "
             f"timeout; workspace preserved at {workspace}"
         )
     if (
@@ -1367,7 +1093,7 @@ def run_structured_codex(
     ):
         returncode = completed.returncode if completed is not None else "unknown"
         raise CodexError(
-            f"Codex exited with status {returncode}; "
+            f"Claude Code exited with status {returncode}; "
             f"workspace preserved at {workspace}"
         )
     return result_path
@@ -1403,7 +1129,7 @@ def run_validated_codex(
     completion_grace_seconds: float | None = None,
     repair_turns: int = 1,
 ) -> validation_common.ValidationReport:
-    """Run Codex with in-turn validation and authoritative host rechecking."""
+    """Run Claude Code with in-turn validation and authoritative host rechecking."""
     workspace = workspace.resolve()
     try:
         result_schema = json.loads(schema_path.read_text(encoding="utf-8"))
@@ -1414,20 +1140,9 @@ def run_validated_codex(
         validator.validate,
         {**validator.expectations, "result_schema": result_schema},
     )
-    validation_directory = stage_output_validator(
-        workspace,
-        effective_validator,
-    )
-    # The elevated Windows sandbox applies deny-read ACLs to host-created
-    # workspace content unless it is explicitly staged for the sandbox user.
-    # The model must be able to inspect and execute this validator because the
-    # prompt requires an in-turn `python -m validation.validate` check.
-    grant_sandbox_read_access(validation_directory)
-    resolved_schema = schema_path.resolve()
-    if resolved_schema.is_relative_to(workspace):
-        # Review workflows generate a claim-constrained schema inside the
-        # workspace.  Keep that authoritative schema inspectable as well.
-        grant_sandbox_read_access(resolved_schema)
+    # The model inspects and runs this validator in its own turn
+    # (`python -m validation.validate`) before the host rechecks it.
+    stage_output_validator(workspace, effective_validator)
     run_structured_codex(
         codex=codex,
         workspace=workspace,
@@ -1448,10 +1163,11 @@ def run_validated_codex(
         if report.valid or not report.repairable:
             break
         repair_prompt = (
-            "The previous Codex turn left generated output that failed the "
+            "The previous turn left generated output that failed the "
             "authoritative deterministic validator. Preserve all substantive "
             "work and staged inputs. Fix only the reported output-contract "
-            "issues, run `python -m validation.validate` until it passes, and "
+            "issues, run `python -m validation.validate` (or `python3 -m "
+            "validation.validate` if `python` is unavailable) until it passes, and "
             "then return a short completion note.\n\n"
             "Validation issues:\n"
             + "\n".join(f"- {issue.render()}" for issue in report.issues)

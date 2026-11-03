@@ -249,8 +249,9 @@ class ValidationTests(unittest.TestCase):
             model_writes_result=True,
         )
 
-        self.assertNotIn("--output-schema", command)
-        self.assertNotIn("-o", command)
+        self.assertNotIn("--result", command)
+        self.assertNotIn("--schema", command)
+        self.assertNotIn("--json-schema", command)
 
     def test_authoritative_failure_gets_one_repair_turn(self):
         with TemporaryDirectory() as temporary:
@@ -296,13 +297,20 @@ class ValidationTests(unittest.TestCase):
             self.assertIn("E_CLAIM_ID", calls[1]["prompt"])
             self.assertTrue(calls[0]["model_writes_result"])
 
-    def test_validated_run_grants_read_access_to_staged_validation(self):
+    def test_validated_run_stages_validator_for_the_agent(self):
         with TemporaryDirectory() as temporary:
-            workspace = Path(temporary)
+            workspace = Path(temporary).resolve()
             schema = workspace / "schema.json"
             schema.write_text('{"type":"object"}\n', encoding="utf-8")
+            calls = []
 
             def fake_run(**kwargs):
+                calls.append(kwargs)
+                staged = workspace / "validation"
+                # The agent must be able to run the staged checker in its turn.
+                for name in ("__init__.py", "common.py", "validate.py",
+                             "expectations.json"):
+                    self.assertTrue((staged / name).is_file(), name)
                 (workspace / "attempt.md").write_text(
                     "# Attempt\n\n## C-001\n\nA derivation.\n",
                     encoding="utf-8",
@@ -318,19 +326,13 @@ class ValidationTests(unittest.TestCase):
                 solver_validation.validate,
                 {},
             )
-            with (
-                patch.object(
-                    codex_cli,
-                    "run_structured_codex",
-                    side_effect=fake_run,
-                ),
-                patch.object(
-                    codex_cli,
-                    "grant_sandbox_read_access",
-                ) as grant_read_access,
+            with patch.object(
+                codex_cli,
+                "run_structured_codex",
+                side_effect=fake_run,
             ):
                 report = codex_cli.run_validated_codex(
-                    codex="codex",
+                    codex="claude",
                     workspace=workspace,
                     prompt="Do the task.",
                     schema_path=schema,
@@ -339,14 +341,15 @@ class ValidationTests(unittest.TestCase):
                 )
 
             self.assertTrue(report.valid)
-            self.assertEqual(
-                grant_read_access.call_args_list,
-                [
-                    call(workspace / "validation"),
-                    call(schema),
-                ],
+            self.assertEqual(len(calls), 1)
+            self.assertTrue(calls[0]["model_writes_result"])
+            self.assertIn("python -m validation.validate", calls[0]["prompt"])
+            expectations = json.loads(
+                (workspace / "validation" / "expectations.json").read_text(
+                    encoding="utf-8"
+                )
             )
-
+            self.assertEqual(expectations["result_schema"], {"type": "object"})
 
 if __name__ == "__main__":
     unittest.main()

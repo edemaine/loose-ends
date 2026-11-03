@@ -958,11 +958,11 @@ function usageTable(value, label) {
   const head = node("thead");
   const header = node("tr");
   for (const [label, title] of [
-    ["Stage", "Pipeline stage"], ["Turns", "Recorded Codex turns"],
+    ["Stage", "Pipeline stage"], ["Turns", "Recorded Claude Code turns"],
     ["Elapsed", "Sum of wall-clock durations; overlapping runs count separately"],
     ["Input", "All input tokens, including cache reads and writes"],
     ["Cache read", "Cached tokens within input"],
-    ["Cache write", "Cache-write tokens reported by Codex; zero may be a default when upstream usage is unavailable"],
+    ["Cache write", "Cache-write tokens reported by Claude Code"],
     ["Output", "All output tokens, including reasoning"],
     ["Reasoning", "Reasoning tokens within output"],
     ["Est. API cost", "Estimated API-equivalent token cost"],
@@ -1133,7 +1133,7 @@ async function refreshUsageElement(element, force = false) {
     if (element.usageModelFilter) details.append(usageRunFilter(element.usageModelFilter));
     details.append(node("p", "muted", "Cache columns are included in input; reasoning is included in output. — means unreported; * means partially reported. Manuscript work is counted separately from source papers and problems."));
     details.append(node("p", "muted", "Elapsed sums wall-clock durations, counting parallel runs separately. ≈ includes time from run start/end timestamps; + includes running work. The Unknown row covers time without an attributable stage, including setup and work outside timed invocations. Unknown model also covers unassigned run time, which cannot be split by model."));
-    details.append(node("p", "muted", "Cache-write counts are copied from Codex logs. The CLI usage schema allows a default of zero; these logs cannot distinguish a measured zero from a missing upstream count."));
+    details.append(node("p", "muted", "Claude Code runs report their own API-list-price cost, which is used instead of the rate table when present."));
     if (element.usageModelFilter && value.pricingRates?.length) {
       details.append(node("p", "muted", "Select models to include in the totals (all service tiers)."));
     }
@@ -1360,7 +1360,7 @@ function renderSchedulerControl() {
       ? "Pause manually"
       : "Pause queue";
   if (state.settings.queuePauseReason === "codex_credits") {
-    workerStatus.textContent = `${counts.active} active; ${counts.queued} waiting. Codex credits exhausted. Replenish credits, then resume the queue. Active runs continue.`;
+    workerStatus.textContent = `${counts.active} active; ${counts.queued} waiting. Claude usage limit reached. Wait for the limit to reset (or add credits), then resume the queue. Active runs continue.`;
   } else if (state.settings.memoryLimitPending && state.settings.memory?.error) {
     workerStatus.textContent = `${counts.active} active; ${counts.queued} waiting. Queue paused because memory enforcement failed.`;
   } else if (state.settings.memoryLimitPending) {
@@ -2474,7 +2474,7 @@ function renderReviewDetail(item) {
   }));
 
   const tabs = reviewModel.detailTabs(item);
-  tabs.splice(tabs.length - 1, 0, ["codex", "Codex logs"]);
+  tabs.splice(tabs.length - 1, 0, ["codex", "Claude logs"]);
   if (!tabs.some(([key]) => key === state.detailTab)) state.detailTab = tabs[0][0];
   const reports = node("section", "section problem-reports");
   reports.id = "problem-documents";
@@ -3602,7 +3602,7 @@ function shellQuote(value) {
 function runCommandDisplay(job, run) {
   const command = run.argv.map(shellQuote).join(" ");
   const home = (run.options ?? job.plan?.options)?.codexHome;
-  return home ? `CODEX_HOME=${shellQuote(home)} ${command}` : command;
+  return home ? `CLAUDE_CONFIG_DIR=${shellQuote(home)} ${command}` : command;
 }
 
 function renderJobDetail(job) {
@@ -3733,13 +3733,13 @@ function renderJobDetail(job) {
     }
     const codexExpanded = state.expandedCodexRuns.has(run.id);
     const codexFooter = node("div", "run-detail-footer");
-    const codexToggle = button(`${codexExpanded ? "Hide" : "Show"} Codex transcript`, () => {
+    const codexToggle = button(`${codexExpanded ? "Hide" : "Show"} Claude transcript`, () => {
       if (state.expandedCodexRuns.has(run.id)) state.expandedCodexRuns.delete(run.id);
       else state.expandedCodexRuns.add(run.id);
       renderJobDetail(job);
     }, "run-detail-toggle");
     codexToggle.setAttribute("aria-expanded", String(codexExpanded));
-    codexToggle.setAttribute("aria-label", `${codexExpanded ? "Hide" : "Show"} Codex transcript for ${presentation.title}`);
+    codexToggle.setAttribute("aria-label", `${codexExpanded ? "Hide" : "Show"} Claude transcript for ${presentation.title}`);
     codexToggle.prepend(node("span", "run-chevron", "›"));
     codexFooter.append(codexToggle);
     section.append(codexFooter);
@@ -3852,7 +3852,7 @@ function catalogTranscriptFold(kind, item) {
     category: kind, key: item.key, version: state.catalog.version || 0,
   })}`;
   const fold = node("details", "catalog-transcript-fold");
-  fold.append(node("summary", "", "Codex logs"));
+  fold.append(node("summary", "", "Claude logs"));
   fold.open = state.expandedTranscriptPanels.has(key);
   if (fold.open) fold.append(codexTranscript(source));
   fold.addEventListener("toggle", () => {
@@ -3871,7 +3871,7 @@ function catalogTranscriptFold(kind, item) {
 function codexTranscript(source) {
   const element = node("section", "codex-transcripts");
   element.dataset.codexSource = source;
-  element.append(node("h3", "", "Codex transcript"));
+  element.append(node("h3", "", "Claude transcript"));
   return element;
 }
 
@@ -3902,9 +3902,9 @@ function codexItems(text) {
 }
 
 function renderCodexTranscript(element, transcripts) {
-  element.replaceChildren(node("h3", "", "Codex transcript"));
+  element.replaceChildren(node("h3", "", "Claude transcript"));
   if (!transcripts.length) {
-    element.append(node("p", "muted", "No saved Codex transcript available yet."));
+    element.append(node("p", "muted", "No saved Claude transcript available yet."));
   }
   for (const transcript of transcripts) {
     element.append(node("h4", "codex-invocation-heading", transcript.label));
@@ -4609,11 +4609,10 @@ function field(name, label, { type = "text", value = "", placeholder = "", help 
 function modelField(name, label, value, defaultLabel) {
   const options = [
     ["", defaultLabel],
-    ["gpt-6.1-sol", "GPT-6.1 Sol"],
-    ["gpt-6-astra", "GPT-6 Astra"],
-    ["gpt-5.6-sol", "GPT-5.6 Sol"],
-    ["gpt-5.6-terra", "GPT-5.6 Terra"],
-    ["gpt-5.6-luna", "GPT-5.6 Luna"],
+    ["claude-opus-5-5", "Claude Opus 5.5"],
+    ["claude-fable-5-1", "Claude Fable 5.1"],
+    ["claude-sonnet-5-5", "Claude Sonnet 5.5"],
+    ["claude-haiku-5-5", "Claude Haiku 5.5"],
   ];
   // Preserve model IDs from saved task drafts, including older models.
   if (value && !options.some(([id]) => id === value)) options.push([value, value]);
@@ -4997,11 +4996,11 @@ function renderTaskConfiguration(errorMessage = "") {
   ));
   advancedGrid.append(field("reasoningEffort", "Reasoning effort", {
     type: "select", value: options.reasoningEffort || "",
-    options: [["", `Default (${taskDefaults.reasoningEffort || "unavailable"})`], ...["low", "medium", "high", "xhigh", "max", "ultra"].map(value => [value, value])],
+    options: [["", `Default (${taskDefaults.reasoningEffort || "unavailable"})`], ...["low", "medium", "high", "xhigh", "max"].map(value => [value, value])],
   }));
   advancedGrid.append(field("serviceTier", "Speed / service tier", {
     type: "select", value: options.serviceTier || (options.fast ? "fast" : "standard"),
-    options: [["standard", "Standard"], ["fast", "Fast (higher cost)"], ["ultrafast", "Ultrafast (highest cost; requires model/account support)"]],
+    options: [["standard", "Standard"], ["fast", "Fast (Opus only; higher cost, billed as extra usage)"]],
   }));
   if (["literature", "solve", "review", "write", "revise"].includes(task.action)) {
     advancedGrid.append(field("webSearch", "Web search", {
@@ -5013,16 +5012,16 @@ function renderTaskConfiguration(errorMessage = "") {
     advancedGrid.append(modelField("reviewModel", "Critic model", options.reviewModel, "Inherit primary model"));
     advancedGrid.append(field("reviewReasoningEffort", "Critic reasoning", {
       type: "select", value: options.reviewReasoningEffort || "",
-      options: [["", "Inherit"], ...["low", "medium", "high", "xhigh", "max", "ultra"].map(value => [value, value])],
+      options: [["", "Inherit"], ...["low", "medium", "high", "xhigh", "max"].map(value => [value, value])],
     }));
     advancedGrid.append(field("reviewWebSearch", "Critic web search", {
       type: "select", value: options.reviewWebSearch || "",
       options: [["", "Inherit"], ["live", "Live"], ["indexed", "Indexed"], ["disabled", "Disabled"]],
     }));
   }
-  advancedGrid.append(field("codexHome", "CODEX_HOME", {
-    value: options.codexHome || "", placeholder: "~/.codex", full: true,
-    help: "Leave blank to inherit the server's CODEX_HOME or default. Dry runs warn if the selected or default home directory is missing. ~ expands to the server's HOME directory.",
+  advancedGrid.append(field("codexHome", "CLAUDE_CONFIG_DIR", {
+    value: options.codexHome || "", placeholder: "~/.claude", full: true,
+    help: "Claude Code account directory. Leave blank to inherit the server's CLAUDE_CONFIG_DIR or ~/.claude. Dry runs warn if the selected or default directory is missing. ~ expands to the server's HOME directory.",
   }));
   modelSettings.append(advancedGrid);
   grid.append(modelSettings);

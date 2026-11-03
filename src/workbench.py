@@ -2609,7 +2609,7 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
         if "index" not in values and "id" not in values:
             self.send_json({"complete": complete, "transcripts": [
                 {"index": index, "id": key,
-                 "label": f"Codex {index + 1}" + (f" · {stages[key]}" if stages.get(key) else ""),
+                 "label": f"Claude {index + 1}" + (f" · {stages[key]}" if stages.get(key) else ""),
                  "legacy": "prompt" not in files}
                 for index, (key, files) in enumerate(transcripts)
             ]})
@@ -2624,7 +2624,7 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                 raise ValueError()
             _, files = transcripts[index]
         except (ValueError, IndexError):
-            raise PlanError("unknown Codex transcript")
+            raise PlanError("unknown Claude transcript")
         kind = values.get("kind", ["events"])[0]
         if kind not in files:
             raise PlanError("unknown transcript file")

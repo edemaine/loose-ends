@@ -34,7 +34,7 @@ class ExtractPaperMetadataTests(unittest.TestCase):
                 status = extract_paper_metadata.main([str(paper), "--dry-run"])
 
         self.assertEqual(status, 0)
-        self.assertIn("Would ask Codex", output.getvalue())
+        self.assertIn("Would ask Claude", output.getvalue())
         self.assertIn(f"PDF: {paper / 'paper.pdf'}", output.getvalue())
         self.assertIn(f"Source: {paper / 'source'}", output.getvalue())
 

@@ -479,7 +479,7 @@ test("saving a conflicting edit retains input and never starts a replacement tas
   const job = { plan: { options: { codexHome: "/accounts/new" } } };
   assert.equal(context.runCommandDisplay(job, {
     argv: ["codex"], options: { codexHome: "/accounts/old account" },
-  }), "CODEX_HOME='/accounts/old account' codex");
+  }), "CLAUDE_CONFIG_DIR='/accounts/old account' codex");
   assert.equal(context.runCommandDisplay(job, { argv: ["codex"], options: {} }), "codex");
 });
 

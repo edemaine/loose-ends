@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Use one bounded Codex turn to populate an installed paper's metadata."""
+"""Use one bounded Claude turn to populate an installed paper's metadata."""
 
 from __future__ import annotations
 
@@ -39,29 +39,29 @@ def load_metadata(path: Path) -> dict:
 
 def _date(value: object, field: str) -> str:
     if not isinstance(value, str):
-        raise MetadataExtractionError(f"Codex returned a non-string {field}")
+        raise MetadataExtractionError(f"Claude returned a non-string {field}")
     normalized = value.strip()
     if normalized and not is_iso8601_date_or_timestamp(normalized):
         raise MetadataExtractionError(
-            f"Codex returned an invalid ISO 8601 {field}: {normalized!r}"
+            f"Claude returned an invalid ISO 8601 {field}: {normalized!r}"
         )
     return normalized
 
 
 def validate_result(value: object) -> dict:
     if not isinstance(value, dict):
-        raise MetadataExtractionError("Codex metadata result is not an object")
+        raise MetadataExtractionError("Claude metadata result is not an object")
     title = value.get("title")
     authors = value.get("authors")
     if not isinstance(title, str) or not title.strip():
-        raise MetadataExtractionError("Codex returned no paper title")
+        raise MetadataExtractionError("Claude returned no paper title")
     if not isinstance(authors, list) or not authors or not all(
         isinstance(author, str) and author.strip() for author in authors
     ):
-        raise MetadataExtractionError("Codex returned no valid paper authors")
+        raise MetadataExtractionError("Claude returned no valid paper authors")
     normalized_authors = [author.strip() for author in authors]
     if len(set(normalized_authors)) != len(normalized_authors):
-        raise MetadataExtractionError("Codex returned duplicate paper authors")
+        raise MetadataExtractionError("Claude returned duplicate paper authors")
     return {
         "title": title.strip(),
         "authors": normalized_authors,
@@ -151,7 +151,7 @@ def extract_metadata(
             result = json.loads(result_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise MetadataExtractionError(
-                f"could not read Codex metadata result: {exc}"
+                f"could not read Claude metadata result: {exc}"
             ) from exc
         metadata_path = install_metadata(paper, validate_result(result))
     except (OSError, shutil.Error) as exc:
@@ -166,12 +166,18 @@ def extract_metadata(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="extract title and authors from an installed paper with Codex"
+        description="extract title and authors from an installed paper with Claude"
     )
     parser.add_argument("paper", type=Path, help="installed paper directory")
     parser.add_argument("--force", action="store_true", help="replace populated metadata")
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--codex", default="codex")
+    parser.add_argument(
+        "--claude",
+        "--codex",
+        dest="codex",
+        default="claude",
+        help="Claude Code CLI executable or command name (default: claude)",
+    )
     codex_cli.add_prompt_arguments(
         parser,
         default_template=DEFAULT_PROMPT_PATH,
@@ -201,7 +207,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.dry_run:
             codex_cli.report_codex_home_warnings()
-            print("Would ask Codex to extract title and authors from:")
+            print("Would ask Claude to extract title and authors from:")
             print(f"  PDF: {paper / 'paper.pdf'}")
             source = paper / "source"
             print(f"  Source: {source if source.exists() else 'none'}")

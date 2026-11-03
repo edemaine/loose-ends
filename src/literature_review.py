@@ -359,7 +359,7 @@ def validate_literature_result(
                 )
             except OSError as exc:
                 raise common.CodexError(
-                    f"Codex did not create literature report for {problem_id}, "
+                    f"Claude did not create literature report for {problem_id}, "
                     f"and the driver could not synthesize it: {exc}"
                 ) from exc
             synthesized.append(problem_id)
@@ -618,7 +618,7 @@ def search_paper_literature(
     allow_recovery: bool = True,
     launch_interval: float = codex_cli.CODEX_LAUNCH_INTERVAL_SECONDS,
 ) -> list[LiteratureOutcome]:
-    """Search selected problems from one paper in one Codex run."""
+    """Search selected problems from one paper in one Claude run."""
     if not problems:
         return []
     paper = problems[0].paper_directory
@@ -814,12 +814,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="report pending literature searches without starting Codex",
+        help="report pending literature searches without starting Claude",
     )
     parser.add_argument(
+        "--claude",
         "--codex",
-        default="codex",
-        help="Codex CLI executable or command name (default: codex)",
+        dest="codex",
+        default="claude",
+        help="Claude Code CLI executable or command name (default: claude)",
     )
     codex_cli.add_prompt_arguments(
         parser,
@@ -974,7 +976,7 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"Searching literature for {len(stale)} stale problem(s) from "
             f"{len(grouped)} paper(s), with up to "
-            f"{min(args.jobs, len(grouped))} Codex agent(s) at once "
+            f"{min(args.jobs, len(grouped))} Claude agent(s) at once "
             f"({args.web_search} web search)."
         )
         with ThreadPoolExecutor(

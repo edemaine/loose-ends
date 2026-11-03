@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Analyze installed papers with independent non-interactive Codex runs."""
+"""Analyze installed papers with independent non-interactive Claude runs."""
 
 from __future__ import annotations
 
@@ -232,33 +232,33 @@ def validate_agent_result(result_path: Path, workspace: Path) -> dict:
         result = json.loads(result_path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
         raise AnalysisError(
-            "Codex did not write its structured final response"
+            "Claude did not write its structured final response"
         ) from exc
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise AnalysisError(
-            f"could not read Codex's structured response: {exc}"
+            f"could not read Claude's structured response: {exc}"
         ) from exc
 
     if not isinstance(result, dict):
-        raise AnalysisError("Codex's structured response is not a JSON object")
+        raise AnalysisError("Claude's structured response is not a JSON object")
     if result.get("status") not in {"complete", "partial"}:
-        raise AnalysisError("Codex's structured response has an invalid status")
+        raise AnalysisError("Claude's structured response has an invalid status")
     paper_title = result.get("paper_title")
     if not isinstance(paper_title, str) or not paper_title.strip():
-        raise AnalysisError("Codex's structured response has no paper title")
+        raise AnalysisError("Claude's structured response has no paper title")
     paper_authors = result.get("paper_authors")
     if not valid_paper_authors(paper_authors):
         raise AnalysisError(
-            "Codex's structured response has invalid paper authors"
+            "Claude's structured response has invalid paper authors"
         )
     if not isinstance(result.get("warnings"), list) or not all(
         isinstance(item, str) for item in result["warnings"]
     ):
-        raise AnalysisError("Codex's structured response has invalid warnings")
+        raise AnalysisError("Claude's structured response has invalid warnings")
 
     problems = result.get("open_problems")
     if not isinstance(problems, list):
-        raise AnalysisError("Codex's structured response has no open-problem list")
+        raise AnalysisError("Claude's structured response has no open-problem list")
 
     problem_ids: set[str] = set()
     for problem in problems:
@@ -291,13 +291,13 @@ def validate_agent_result(result_path: Path, workspace: Path) -> dict:
         try:
             contents = path.read_text(encoding="utf-8")
         except FileNotFoundError as exc:
-            raise AnalysisError(f"Codex did not create {filename}") from exc
+            raise AnalysisError(f"Claude did not create {filename}") from exc
         except (OSError, UnicodeError) as exc:
             raise AnalysisError(
                 f"could not read generated {filename}: {exc}"
             ) from exc
         if not contents.strip():
-            raise AnalysisError(f"Codex created an empty {filename}")
+            raise AnalysisError(f"Claude created an empty {filename}")
         if not contents.lstrip().startswith("#"):
             raise AnalysisError(
                 f"generated {filename} does not start with a heading"
@@ -349,9 +349,6 @@ def build_manifest(
 
 is_windows_host = codex_cli.is_windows_host
 path_for_codex = codex_cli.path_for_codex
-windows_identity = codex_cli.windows_identity
-windows_icacls = codex_cli.windows_icacls
-windows_icacls_for_sandbox = codex_cli.windows_icacls_for_sandbox
 grant_workspace_owner_inheritance = (
     codex_cli.grant_workspace_owner_inheritance
 )
@@ -408,7 +405,7 @@ def analyze_paper(
     force: bool = False,
     launch_interval: float = CODEX_LAUNCH_INTERVAL_SECONDS,
 ) -> AnalysisOutcome:
-    """Run Codex for one paper and atomically install validated artifacts."""
+    """Run Claude for one paper and atomically install validated artifacts."""
     paper_directory = paper_directory.resolve()
     analysis_directory = paper_directory / ANALYSIS_DIRECTORY
     analysis_directory.mkdir(parents=True, exist_ok=True)
@@ -642,11 +639,11 @@ read_codex_version = codex_cli.read_codex_version
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "use independent Codex CLI runs to analyze installed research papers"
+            "use independent Claude Code CLI runs to analyze installed research papers"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""examples:
-  Analyze one paper with the configured Codex defaults:
+  Analyze one paper with the configured Claude defaults:
     python src/analyze_papers.py papers/author/arXiv-1706.03762
 
   Use the current frontier model with extra-high reasoning and Fast mode:
@@ -668,7 +665,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--jobs",
         type=positive_integer,
         default=1,
-        help="maximum concurrent Codex runs (default: 1)",
+        help="maximum concurrent Claude runs (default: 1)",
     )
     parser.add_argument(
         "-f",
@@ -687,13 +684,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="validate and report the analysis plan without starting Codex",
+        help="validate and report the analysis plan without starting Claude",
     )
     codex_cli.add_model_arguments(parser)
     parser.add_argument(
+        "--claude",
         "--codex",
-        default="codex",
-        help="Codex CLI executable or command name (default: codex)",
+        dest="codex",
+        default="claude",
+        help="Claude Code CLI executable or command name (default: claude)",
     )
     codex_cli.add_prompt_arguments(
         parser,
@@ -815,7 +814,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(
             f"Found {len(papers)} paper(s); running up to "
-            f"{min(args.jobs, len(papers))} Codex agent(s) at once."
+            f"{min(args.jobs, len(papers))} Claude agent(s) at once."
         )
 
     outcomes: list[AnalysisOutcome] = []

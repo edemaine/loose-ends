@@ -2496,7 +2496,7 @@ class OpenProblemPipelineTests(unittest.TestCase):
         for parser, argv in zip(parsers, arguments):
             with self.subTest(program=parser.prog):
                 parsed = parser.parse_args(argv)
-                self.assertEqual(parsed.model, "gpt-6-astra")
+                self.assertEqual(parsed.model, "claude-opus-5-5")
                 self.assertEqual(parsed.reasoning_effort, "xhigh")
                 self.assertIsNone(parsed.prompt)
                 self.assertIsInstance(parsed.prompt_template, Path)
@@ -2559,12 +2559,19 @@ class OpenProblemPipelineTests(unittest.TestCase):
                 web_search="live",
             )
 
-        self.assertIn('web_search="live"', command)
-        self.assertIn("sandbox_workspace_write.network_access=false", command)
-        self.assertIn("apps._default.enabled=false", command)
-        self.assertIn("agents.enabled=false", command)
+        tools = command[command.index("--tools") + 1].split(",")
+        self.assertIn("WebSearch", tools)
+        self.assertIn("WebFetch", tools)
+        # No subagents, MCP servers, or user plugins/hooks; shell network
+        # access stays behind Claude Code's sandbox where it is supported.
+        self.assertNotIn("Agent", tools)
+        self.assertIn("--strict-mcp-config", command)
+        self.assertIn("--safe-mode", command)
+        self.assertNotIn("--mcp-config", command)
+        if codex_cli.claude_sandbox_enabled():
+            settings = json.loads(command[command.index("--settings") + 1])
+            self.assertFalse(settings["sandbox"]["allowUnsandboxedCommands"])
         self.assertNotIn("prompt", command)
-        self.assertEqual(command[-1], "-")
 
 
 if __name__ == "__main__":

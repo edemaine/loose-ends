@@ -175,7 +175,8 @@ def run_worker(database: Path, run_id: str) -> int:
     plan = store.get_job(run["job_id"])["plan"]
     options = run["options"]
     if options.get("codexHome"):
-        environment["CODEX_HOME"] = options["codexHome"]
+        # The stored option name predates the Claude Code backend.
+        environment[codex_cli.CLAUDE_CONFIG_ENV] = options["codexHome"]
     environment["PYTHONUNBUFFERED"] = "1"
     environment[codex_cli.WORKBENCH_DATABASE_ENV] = str(store.database)
     environment["LOOSE_ENDS_CODEX_TRANSCRIPTS"] = str(log_path.parent / "codex")

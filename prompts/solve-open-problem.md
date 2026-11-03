@@ -74,7 +74,7 @@ the task rather than claiming novelty.
 Classify the mathematical claim independently of novelty. Use `solution` or
 `counterexample` for a complete-looking resolution claim even if the same
 result may already appear in the literature; literature provenance is assessed
-separately. Never present a published theorem as a new Codex result in the
+separately. Never present a published theorem as a new Claude result in the
 prose. Record every external source actually used in `external_sources`,
 including its URL, purpose, and what was verified.
 

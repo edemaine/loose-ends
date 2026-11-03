@@ -118,7 +118,7 @@ def _dry_run_preview(unit: dict, options: dict) -> dict:
     argv = [*unit["argv"], "--dry-run"]
     environment = os.environ.copy()
     if options.get("codexHome"):
-        environment["CODEX_HOME"] = options["codexHome"]
+        environment[codex_cli.CLAUDE_CONFIG_ENV] = options["codexHome"]
     preview = {
         "command": command_display(argv),
         "status": "ok",
@@ -183,7 +183,7 @@ def populate_dry_run_previews(plan: dict) -> dict:
     if plan.get("action") != "download":
         environment = os.environ.copy()
         if plan.get("options", {}).get("codexHome"):
-            environment["CODEX_HOME"] = plan["options"]["codexHome"]
+            environment[codex_cli.CLAUDE_CONFIG_ENV] = plan["options"]["codexHome"]
         warnings = plan.setdefault("warnings", [])
         for warning in codex_cli.codex_home_warnings(environment):
             if warning not in warnings:
@@ -403,7 +403,9 @@ def _common_arguments(
             raise PlanError("invalid reasoning effort")
         argv.extend(("--reasoning-effort", effort))
     tier = options.get("serviceTier") or ("fast" if options.get("fast") is True else "standard")
-    if tier not in {"standard", "fast", "ultrafast"}:
+    if tier == "ultrafast":
+        raise PlanError("Ultrafast is a Codex service tier; Claude Code supports Standard or Fast")
+    if tier not in {"standard", "fast"}:
         raise PlanError("invalid service tier")
     if tier != "standard":
         argv.append(f"--{tier}")

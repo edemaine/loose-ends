@@ -1782,7 +1782,7 @@ class WorkbenchPlanningTests(unittest.TestCase):
         returned = populate_dry_run_previews(plan)
 
         self.assertIs(returned, plan)
-        self.assertEqual(run.call_args.kwargs["env"]["CODEX_HOME"], plan["options"]["codexHome"])
+        self.assertEqual(run.call_args.kwargs["env"]["CLAUDE_CONFIG_DIR"], plan["options"]["codexHome"])
         self.assertEqual(
             run.call_args.args[0],
             [sys.executable, "tool.py", "OP-001", "--dry-run"],
@@ -1812,7 +1812,7 @@ class WorkbenchPlanningTests(unittest.TestCase):
         run.return_value = Mock(returncode=0, stdout="Would run.\n", stderr="")
         with TemporaryDirectory() as temporary:
             home = Path(temporary)
-            (home / ".codex").mkdir()
+            (home / ".claude").mkdir()
             for action, inherited, selected, expected in (
                 ("solve", "", None, None),
                 ("solve", str(home), None, None),
@@ -1826,7 +1826,7 @@ class WorkbenchPlanningTests(unittest.TestCase):
                     plan["warnings"] = ["Existing warning"]
                     plan["options"] = {"codexHome": selected} if selected else {}
                     with (
-                        patch.dict(os.environ, {"CODEX_HOME": inherited, "USERPROFILE": ""}),
+                        patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": inherited}),
                         patch("codex_cli.Path.home", return_value=home),
                     ):
                         populate_dry_run_previews(plan)
@@ -1851,8 +1851,8 @@ class WorkbenchPlanningTests(unittest.TestCase):
             populate_dry_run_previews(plan)
             preview = plan["units"][0]["dryRun"]
             self.assertEqual(preview["status"], "ok")
-            self.assertIn("Would ask Codex", preview["output"])
-            self.assertIn("Warning: Codex home is not an existing directory", preview["output"])
+            self.assertIn("Would ask Claude", preview["output"])
+            self.assertIn("Warning: Claude config directory is not an existing directory", preview["output"])
             self.assertIn(str(root / "missing account"), preview["output"])
             self.assertFalse((root / "missing account").exists())
 
@@ -2037,7 +2037,7 @@ class WorkbenchEditTests(unittest.TestCase):
 
     def test_worker_uses_run_account_instead_of_latest_job_settings(self):
         account = str(self.root / "original account")
-        plan = fake_plan([sys.executable, "-c", "import os; print(os.environ['CODEX_HOME'])"])
+        plan = fake_plan([sys.executable, "-c", "import os; print(os.environ['CLAUDE_CONFIG_DIR'])"])
         plan["options"] = {"codexHome": str(self.root / "new account")}
         plan["units"][0]["options"] = {"codexHome": account}
         job = self.app.store.create_job({"action": "solve"}, plan)
@@ -2964,10 +2964,10 @@ class WorkbenchStoreTests(unittest.TestCase):
             state = Path(temporary)
             store = WorkbenchStore(state / "workbench.sqlite3", state)
             for custom in (None, str(state / "custom home")):
-                with self.subTest(custom=custom), patch.dict(os.environ, {"CODEX_HOME": "inherited"}):
+                with self.subTest(custom=custom), patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": "inherited"}):
                     plan = fake_plan([
                         sys.executable, "-c",
-                        "import os; print('codex home: ' + os.environ['CODEX_HOME'])",
+                        "import os; print('codex home: ' + os.environ['CLAUDE_CONFIG_DIR'])",
                     ])
                     plan["options"] = {"codexHome": custom} if custom else {}
                     job = store.create_job({"action": "solve"}, plan)
@@ -2976,7 +2976,7 @@ class WorkbenchStoreTests(unittest.TestCase):
                     self.assertEqual(workbench_worker.run_worker(store.database, run["id"]), 0)
                     log = Path(run["log_path"]).read_text(encoding="utf-8")
                     self.assertIn("codex home: " + (custom or "inherited"), log)
-                    self.assertEqual(os.environ["CODEX_HOME"], "inherited")
+                    self.assertEqual(os.environ["CLAUDE_CONFIG_DIR"], "inherited")
                     store.update_run(run["id"], status="failed")
                     retry = store.retry_job(job["id"])
                     self.assertEqual(retry["plan"]["options"], plan["options"])
